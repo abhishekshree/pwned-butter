@@ -66,8 +66,8 @@ cargo run --release --bin local_scrape
 
 # dashboard
 cd web
-npm install
-npm run dev                        # needs DATABASE_URL in web/.env.local
+pnpm install
+pnpm dev                        # needs DATABASE_URL in web/.env.local
 ```
 
 Migrations only ever run explicitly via the `migrate` bin. The dashboard never
