@@ -1,7 +1,10 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
+use tokio::sync::Semaphore;
 
 use crate::models::{LlmAction, NewsItem};
 
@@ -30,6 +33,8 @@ Return a JSON array only. If an item reports no concrete enforcement record agai
 establishment, skip it entirely. Optional string fields may be null.";
 
 const MAX_ATTEMPTS: usize = 3;
+const BATCH_SIZE: usize = 20;
+const MAX_CONCURRENT: usize = 2;
 
 pub async fn extract(
     api_key: &str,
@@ -39,12 +44,86 @@ pub async fn extract(
     if items.is_empty() {
         return Ok((Vec::new(), 0));
     }
+
+    let api_key = api_key.to_owned();
+    let model = model.to_owned();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let sem = Arc::new(Semaphore::new(MAX_CONCURRENT));
+    let mut tasks = Vec::new();
+
+    for (offset, chunk) in items.chunks(BATCH_SIZE).enumerate() {
+        let sem = Arc::clone(&sem);
+        let requests = Arc::clone(&requests);
+        let api_key = api_key.clone();
+        let model = model.clone();
+        let chunk = chunk.to_vec();
+        tasks.push(tokio::spawn(async move {
+            let _permit = sem.acquire_owned().await.expect("semaphore closed");
+            let batch = extract_batch(&api_key, &model, &chunk, &requests).await;
+            (offset, batch)
+        }));
+    }
+
+    let batch_count = tasks.len();
+    let mut actions: Vec<LlmAction> = Vec::new();
+    let mut failed = 0usize;
+    for task in tasks {
+        let (offset, result) = task.await.context("llm batch task join")?;
+        match result {
+            Ok(mut batch) => {
+                apply_offset(&mut batch, offset * BATCH_SIZE);
+                actions.append(&mut batch);
+            }
+            Err(e) => {
+                failed += 1;
+                eprintln!("llm batch {offset} failed: {e}");
+            }
+        }
+    }
+
+    let calls = requests.load(Ordering::Relaxed);
+    if failed == batch_count {
+        return Err(anyhow!("all {batch_count} llm batches failed"));
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    actions = actions
+        .into_iter()
+        .filter(|a| !a.establishment.trim().is_empty())
+        .filter(|a| {
+            let key = format!(
+                "{}|{}|{}",
+                a.source_index,
+                a.establishment.to_lowercase(),
+                a.action_type
+            );
+            seen.insert(key)
+        })
+        .map(sanitize_action)
+        .collect();
+
+    Ok((actions, calls))
+}
+
+fn apply_offset(actions: &mut [LlmAction], offset: usize) {
+    for a in actions.iter_mut() {
+        a.source_index += offset;
+    }
+}
+
+async fn extract_batch(
+    api_key: &str,
+    model: &str,
+    items: &[NewsItem],
+    requests: &AtomicUsize,
+) -> Result<Vec<LlmAction>> {
     let payload = json!({
         "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
         "contents": [{"parts": [{"text": serde_json::to_string(&json!({ "items": items })).context("serialize news batch")?}]}],
         "generationConfig": {
             "temperature": 0.0,
-            "responseMimeType": "application/json"
+            "responseMimeType": "application/json",
+            "maxOutputTokens": 8192
         }
     });
     let url = format!(
@@ -53,6 +132,7 @@ pub async fn extract(
     let client = crate::http_client();
 
     for attempt in 0..MAX_ATTEMPTS {
+        requests.fetch_add(1, Ordering::Relaxed);
         let resp = match client.post(&url).json(&payload).send().await {
             Ok(r) => r,
             Err(e) => {
@@ -63,8 +143,7 @@ pub async fn extract(
         };
         if resp.status().is_success() {
             let body: Value = resp.json().await.context("gemini json")?;
-            let actions = parse_response(&body)?;
-            return Ok((actions, 1));
+            return parse_response(&body);
         }
         let status = resp.status();
         let text = resp
@@ -262,5 +341,34 @@ mod tests {
             }]
         });
         assert_eq!(parse_response(&body).unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn empty_items_skip_llm() {
+        let (actions, calls) = extract("key", "model", &[]).await.unwrap();
+        assert!(actions.is_empty());
+        assert_eq!(calls, 0);
+    }
+
+    #[test]
+    fn applies_batch_offset_to_source_index() {
+        let mut a = LlmAction {
+            establishment: "X".into(),
+            area: None,
+            city: None,
+            brand: None,
+            operator: None,
+            outlet_type: None,
+            action_type: ActionType::Inspection,
+            action_date: None,
+            violations: vec![],
+            compliance_score: None,
+            fssai_number: None,
+            details: None,
+            platforms: vec![],
+            source_index: 3,
+        };
+        apply_offset(std::slice::from_mut(&mut a), 40);
+        assert_eq!(a.source_index, 43);
     }
 }

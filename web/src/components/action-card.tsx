@@ -1,107 +1,205 @@
-import { ArrowUpRight } from "lucide-react";
-
-import { Badge } from "@/components/ui/badge";
 import {
-  STATUS_TONES,
+  ArrowUpRight,
+  Building2,
+  Calendar,
+  MapPin,
+  Newspaper,
+  ShieldAlert,
+  ShoppingBag,
+} from "lucide-react";
+
+import {
+  STATUS_CONFIG,
+  actionTypeLabel,
+  complianceTone,
   formatDate,
-  humanize,
   outletTypeLabel,
 } from "@/lib/format";
 import type { ActionRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-const EDGE_TONES: Record<string, string> = {
-  suspended: "border-l-red-500",
-  reopened: "border-l-emerald-500",
-  active: "border-l-amber-500",
+const PLATFORM_STYLES: Record<string, string> = {
+  zomato: "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-400",
+  swiggy: "border-orange-500/30 bg-orange-500/10 text-orange-600 dark:text-orange-400",
+  blinkit: "border-yellow-500/30 bg-yellow-500/10 text-yellow-600 dark:text-yellow-400",
+  zepto: "border-purple-500/30 bg-purple-500/10 text-purple-600 dark:text-purple-400",
+  instamart: "border-orange-500/30 bg-orange-500/10 text-orange-600 dark:text-orange-400",
 };
 
-const KNOWN_PLATFORMS = new Set(["zomato", "swiggy", "blinkit", "zepto", "instamart"]);
-
 export function ActionCard({ a }: { a: ActionRow }) {
-  const loc = [a.area, a.city].filter(Boolean).join(" · ");
+  const loc = [a.area, a.city].filter(Boolean).join(", ");
   const violations = a.violations ?? [];
+  const statusCfg = STATUS_CONFIG[a.status] ?? {
+    label: a.status.toUpperCase(),
+    tone: "border-border bg-muted/40 text-muted-foreground",
+    dot: "bg-muted-foreground",
+    edge: "border-l-border",
+    glow: "",
+  };
+  const comp = a.compliance_score != null ? complianceTone(a.compliance_score) : null;
 
   return (
-    <a
-      href={a.source_url}
-      target="_blank"
-      rel="noopener"
+    <article
       className={cn(
-        "group flex flex-col gap-2 rounded-lg border border-l-4 bg-card p-4 text-card-foreground shadow-sm transition hover:-translate-y-px hover:shadow-md",
-        EDGE_TONES[a.status] ?? "border-l-transparent",
+        "group relative flex h-full flex-col justify-between rounded-lg border border-border/80 bg-card p-3 sm:p-3.5 text-card-foreground shadow-2xs transition-all duration-150 hover:-translate-y-0.5 hover:border-border hover:shadow-xs dark:bg-card/90",
+        "border-l-[3px]",
+        statusCfg.edge,
+        statusCfg.glow,
       )}
     >
-      <div className="flex items-start justify-between gap-3">
-        <time className="text-xs font-medium text-muted-foreground">
-          {formatDate(a.action_date)}
-        </time>
-        <Badge variant="outline" className={STATUS_TONES[a.status] ?? "border-border bg-muted/40 text-muted-foreground"}>
-          {humanize(a.status)}
-        </Badge>
-      </div>
+      <div className="space-y-2">
+        {/* Compact Header: Date + Action + Status */}
+        <div className="flex flex-wrap items-center justify-between gap-1.5">
+          <div className="flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
+            <Calendar className="size-3 text-muted-foreground/70" />
+            <span>{formatDate(a.action_date)}</span>
+          </div>
 
-      <h2 className="text-sm leading-snug font-medium text-foreground">{a.establishment}</h2>
-      {loc ? <p className="-mt-1 text-xs text-muted-foreground">{loc}</p> : null}
+          <div className="flex items-center gap-1.5">
+            {a.action_type ? (
+              <span className="inline-flex items-center rounded border border-border/70 bg-muted/40 px-1.5 py-0.5 font-mono text-[10px] font-medium text-muted-foreground">
+                {actionTypeLabel(a.action_type)}
+              </span>
+            ) : null}
 
-      {(a.outlet_type && a.outlet_type !== "other") || (a.brand && a.brand !== a.establishment) ? (
-        <div className="flex flex-wrap gap-1.5">
-          {a.outlet_type && a.outlet_type !== "other" ? (
-            <Badge variant="outline">{outletTypeLabel(a.outlet_type)}</Badge>
-          ) : null}
-          {a.brand && a.brand !== a.establishment ? <Badge variant="outline">{a.brand}</Badge> : null}
-        </div>
-      ) : null}
-
-      {a.details ? <p className="text-sm text-muted-foreground">{a.details}</p> : null}
-
-      {violations.length ? (
-        <ul className="space-y-0.5">
-          {violations.slice(0, 3).map((v) => (
-            <li
-              key={v}
-              className="relative pl-4 text-xs text-muted-foreground before:absolute before:top-1 before:left-0 before:size-1.5 before:rounded-sm before:bg-amber-500"
-            >
-              {v}
-            </li>
-          ))}
-          {violations.length > 3 ? (
-            <li className="text-xs text-muted-foreground">+{violations.length - 3} more</li>
-          ) : null}
-        </ul>
-      ) : null}
-
-      {a.compliance_score != null ? (
-        <div className="text-xs font-semibold text-amber-500">Compliance {a.compliance_score}%</div>
-      ) : null}
-
-      {a.platforms.length ? (
-        <div className="flex flex-wrap gap-1">
-          {a.platforms.map((p) => (
             <span
-              key={p}
               className={cn(
-                "rounded-full border px-2 py-0.5 text-[10px] font-medium",
-                KNOWN_PLATFORMS.has(p)
-                  ? "border-blue-500/30 text-blue-500"
-                  : "border-border text-muted-foreground",
+                "inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[10px] font-semibold tracking-wide",
+                statusCfg.tone,
               )}
             >
-              {p}
+              <span className={cn("size-1.5 rounded-full", statusCfg.dot)} />
+              {statusCfg.label}
             </span>
-          ))}
+          </div>
         </div>
-      ) : null}
 
-      <div className="mt-1 flex items-center justify-between gap-3 border-t border-dashed pt-2.5">
-        <span className="flex items-center gap-1 text-xs font-semibold text-blue-500 group-hover:underline dark:text-blue-400">
-          Read the report
-          <ArrowUpRight className="size-3.5" />
-        </span>
-        <span className="truncate text-xs text-muted-foreground">
-          {a.source_publisher ? `via ${a.source_publisher}` : "article"}
-        </span>
+        {/* Establishment name + Location & Brand in compact inline block */}
+        <div>
+          <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5">
+            <div className="flex flex-wrap items-baseline gap-1.5">
+              <h2 className="text-sm sm:text-[15px] font-bold tracking-tight text-foreground transition-colors group-hover:text-primary">
+                {a.establishment}
+              </h2>
+              {a.brand && a.brand.toLowerCase() !== a.establishment.toLowerCase() ? (
+                <span className="inline-flex items-center rounded border border-primary/20 bg-primary/5 px-1.5 py-0.2 font-mono text-[10px] font-medium text-primary">
+                  {a.brand}
+                </span>
+              ) : null}
+            </div>
+
+            {loc ? (
+              <span className="inline-flex items-center gap-1 text-xs text-muted-foreground font-medium">
+                <MapPin className="size-3 text-muted-foreground/70" />
+                {loc}
+              </span>
+            ) : null}
+          </div>
+
+          {a.outlet_type && a.outlet_type !== "other" ? (
+            <div className="mt-0.5 flex items-center gap-1 text-[11px] text-muted-foreground">
+              <Building2 className="size-2.5 text-muted-foreground/70" />
+              <span>{outletTypeLabel(a.outlet_type)}</span>
+            </div>
+          ) : null}
+        </div>
+
+        {/* Action Details (Clamped if long) */}
+        {a.details ? (
+          <p className="text-xs leading-relaxed text-muted-foreground/90 line-clamp-2">
+            {a.details}
+          </p>
+        ) : null}
+
+        {/* Violations Callout (Compact) */}
+        {violations.length ? (
+          <div className="rounded-md border border-amber-500/20 bg-amber-500/5 px-2.5 py-1.5">
+            <div className="flex items-center gap-1 font-mono text-[10px] font-semibold text-amber-600 dark:text-amber-400">
+              <ShieldAlert className="size-3 shrink-0" />
+              <span>VIOLATIONS ({violations.length})</span>
+            </div>
+            <ul className="mt-1 space-y-0.5">
+              {violations.slice(0, 2).map((v) => (
+                <li
+                  key={v}
+                  className="flex items-start gap-1.5 text-[11px] leading-snug text-foreground/85"
+                >
+                  <span className="mt-1 size-1 shrink-0 rounded-full bg-amber-500" />
+                  <span className="line-clamp-1">{v}</span>
+                </li>
+              ))}
+              {violations.length > 2 ? (
+                <li className="font-mono text-[10px] text-muted-foreground">
+                  +{violations.length - 2} more violations cited
+                </li>
+              ) : null}
+            </ul>
+          </div>
+        ) : null}
+
+        {/* Badges row: Platforms & Compliance */}
+        <div className="flex flex-wrap items-center justify-between gap-1.5 pt-0.5">
+          {a.platforms?.length ? (
+            <div className="flex flex-wrap items-center gap-1">
+              <span className="inline-flex items-center gap-1 font-mono text-[9px] uppercase text-muted-foreground mr-0.5">
+                <ShoppingBag className="size-2.5" />
+                Listed:
+              </span>
+              {a.platforms.map((p) => {
+                const pKey = p.toLowerCase();
+                const pStyle =
+                  PLATFORM_STYLES[pKey] ??
+                  "border-border bg-muted/50 text-muted-foreground";
+                return (
+                  <span
+                    key={p}
+                    className={cn(
+                      "inline-flex items-center rounded border px-1 py-0.2 font-mono text-[9px] font-medium uppercase",
+                      pStyle,
+                    )}
+                  >
+                    {p}
+                  </span>
+                );
+              })}
+            </div>
+          ) : <div />}
+
+          {comp && a.compliance_score != null ? (
+            <div
+              className={cn(
+                "inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[10px] font-semibold",
+                comp.badge,
+              )}
+            >
+              <span>COMPLIANCE:</span>
+              <span>{a.compliance_score}%</span>
+            </div>
+          ) : null}
+        </div>
       </div>
-    </a>
+
+      {/* Card Footer: Source & Link */}
+      <div className="mt-2.5 flex items-center justify-between gap-2 border-t border-border/50 pt-2 text-[11px]">
+        <div className="flex items-center gap-1 text-muted-foreground">
+          <Newspaper className="size-3 text-muted-foreground/70" />
+          <span className="truncate font-mono text-[10px]">
+            {a.source_publisher ? `Source: ${a.source_publisher}` : "News Report"}
+          </span>
+        </div>
+
+        <a
+          href={a.source_url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-0.5 font-mono text-[11px] font-semibold text-primary transition-colors hover:text-primary/80 group-hover:underline"
+        >
+          <span>View Report</span>
+          <ArrowUpRight className="size-3 transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5" />
+        </a>
+      </div>
+    </article>
   );
 }
+
+
