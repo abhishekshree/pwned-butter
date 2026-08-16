@@ -33,6 +33,10 @@ path = "api/cities.rs"
 name = "local_scrape"
 path = "src/bin/local_scrape.rs"
 
+[[bin]]
+name = "migrate"
+path = "src/bin/migrate.rs"
+
 [dependencies]
 vercel_runtime = "2"
 tokio = { version = "1", features = ["full"] }
