@@ -11,24 +11,44 @@ use crate::models::NewsItem;
 pub const USER_AGENT: &str = "Mozilla/5.0 (compatible; fda-mumbai-tracker/0.1; news aggregator)";
 
 const QUERIES: &[&str] = &[
-    "\"Maharashtra FDA\" licence suspended when:1d",
-    "\"Maharashtra Food and Drug Administration\" licence suspended when:1d",
-    "FDA Mumbai raid restaurant hygiene when:1d",
-    "FDA suspension restaurant Maharashtra \"Safe Food\" when:1d",
-    "Zomato restaurant licence suspended FDA when:1d",
-    "Swiggy restaurant licence suspended FDA when:1d",
-    "FDA licence suspension Mumbai eatery dhaba hotel when:1d",
-    "\"Tukaram Mundhe\" FDA when:1d",
-    "FDA suspends licence quick-commerce blinkit zepto instamart when:1d",
-    "FDA hygiene inspection chain restaurant Maharashtra when:1d",
+    "\"Maharashtra FDA\"",
+    "\"Maharashtra Food and Drug Administration\"",
+    "\"FDA Mumbai\"",
+    "\"Tukaram Mundhe\"",
+    "\"Maharashtra FDA\" licence suspended",
+    "\"Maharashtra FDA\" licence cancelled",
+    "\"Maharashtra FDA\" seal",
+    "\"Maharashtra FDA\" seizure",
+    "\"Maharashtra FDA\" raid",
+    "\"Maharashtra FDA\" restaurant hygiene",
+    "\"Maharashtra FDA\" hotel dhaba eatery",
+    "\"Maharashtra FDA\" \"improvement notice\"",
+    "\"Maharashtra FDA\" expired cockroach",
+    "\"Maharashtra FDA\" milk adulteration",
+    "\"Maharashtra FDA\" chain restaurant",
+    "Dominos OR \"Pizza Hut\" OR \"Burger King\" FDA Maharashtra",
+    "KFC OR McDonalds OR Starbucks FDA licence Maharashtra",
+    "Blinkit OR Zepto OR \"Swiggy Instamart\" FDA licence suspended",
+    "Zomato OR Swiggy \"cloud kitchen\" FDA",
+    "\"Maharashtra FDA\" Mumbai food safety",
+    "\"Maharashtra FDA\" Pune",
+    "\"Maharashtra FDA\" Nashik OR Thane OR Nagpur OR Aurangabad",
+    "\"licence suspended\" \"Safe Food\" Maharashtra restaurant",
+    "\"Maharashtra FDA\" prosecution",
+    "\"Food Safety and Standards\" Maharashtra raid licence",
 ];
 
-const MAX_ITEMS: usize = 50;
+pub const MAX_ITEMS: usize = 50;
 
-pub fn google_news_url(query: &str) -> String {
+pub fn google_news_url(query: &str, window: &str) -> String {
+    let q = if window.is_empty() {
+        query.to_string()
+    } else {
+        format!("{query} {window}")
+    };
     format!(
         "https://news.google.com/rss/search?q={0}&hl=en-IN&gl=IN&ceid=IN:en",
-        encode(query)
+        encode(&q)
     )
 }
 
@@ -68,10 +88,10 @@ async fn fetch_feed(client: &reqwest::Client, url: &str) -> Result<Vec<NewsItem>
     Ok(items)
 }
 
-pub async fn fetch_items(client: &reqwest::Client) -> Result<Vec<NewsItem>> {
+pub async fn fetch_items(client: &reqwest::Client, window: &str) -> Result<Vec<NewsItem>> {
     let mut items: Vec<NewsItem> = Vec::new();
     for query in QUERIES {
-        let url = google_news_url(query);
+        let url = google_news_url(query, window);
         match fetch_feed(client, &url).await {
             Ok(found) => items.extend(found),
             Err(e) => eprintln!("rss query failed ({query}): {e}"),
@@ -154,6 +174,7 @@ pub async fn enrich(
     client: &reqwest::Client,
     items: Vec<NewsItem>,
     seen: &HashSet<String>,
+    max_items: usize,
 ) -> Vec<NewsItem> {
     let mut out: Vec<NewsItem> = Vec::with_capacity(items.len());
     let mut urls: HashSet<String> = HashSet::new();
@@ -185,6 +206,6 @@ pub async fn enrich(
             .unwrap_or(chrono::DateTime::<Utc>::MIN_UTC)
             .cmp(&a.published.unwrap_or(chrono::DateTime::<Utc>::MIN_UTC))
     });
-    out.truncate(MAX_ITEMS);
+    out.truncate(max_items);
     out
 }

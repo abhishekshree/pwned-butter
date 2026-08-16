@@ -37,6 +37,10 @@ path = "src/bin/local_scrape.rs"
 name = "migrate"
 path = "src/bin/migrate.rs"
 
+[[bin]]
+name = "backfill"
+path = "src/bin/backfill.rs"
+
 [dependencies]
 vercel_runtime = "2"
 tokio = { version = "1", features = ["full"] }

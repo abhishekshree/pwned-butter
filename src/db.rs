@@ -6,11 +6,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sqlx::migrate::Migrator;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{FromRow, PgPool, QueryBuilder, Row};
-
-static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 static POOL: OnceLock<PgPool> = OnceLock::new();
 
@@ -25,7 +22,6 @@ pub async fn pool() -> Result<&'static PgPool> {
         .connect(&database_url)
         .await
         .context("connect to neon")?;
-    MIGRATOR.run(&pool).await.context("run migrations")?;
     Ok(POOL.get_or_init(|| pool))
 }
 

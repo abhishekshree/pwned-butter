@@ -16,10 +16,20 @@ pub struct ScrapeReport {
 }
 
 pub async fn run_scrape(gemini_key: &str, model: &str) -> Result<(i64, ScrapeReport)> {
+    run_with_window(gemini_key, model, "when:1d", 14, news::MAX_ITEMS).await
+}
+
+pub async fn run_with_window(
+    gemini_key: &str,
+    model: &str,
+    window: &str,
+    seen_days: i64,
+    max_items: usize,
+) -> Result<(i64, ScrapeReport)> {
     let pool = db::pool().await?;
     let run_id = db::begin_run(pool).await?;
 
-    match scrape_once(pool, gemini_key, model).await {
+    match scrape_once(pool, gemini_key, model, window, seen_days, max_items).await {
         Ok(report) => {
             db::finish_run(
                 pool,
@@ -28,7 +38,7 @@ pub async fn run_scrape(gemini_key: &str, model: &str) -> Result<(i64, ScrapeRep
                 report.articles_new,
                 report.actions_upserted,
                 report.llm_calls,
-                &json!({"model": model}),
+                &json!({"model": model, "window": window}),
             )
             .await?;
             Ok((run_id, report))
@@ -40,14 +50,21 @@ pub async fn run_scrape(gemini_key: &str, model: &str) -> Result<(i64, ScrapeRep
     }
 }
 
-async fn scrape_once(pool: &sqlx::PgPool, gemini_key: &str, model: &str) -> Result<ScrapeReport> {
+async fn scrape_once(
+    pool: &sqlx::PgPool,
+    gemini_key: &str,
+    model: &str,
+    window: &str,
+    seen_days: i64,
+    max_items: usize,
+) -> Result<ScrapeReport> {
     let client = crate::http_client();
-    let seen = Utc::now() - ChronoDuration::days(14);
+    let seen = Utc::now() - ChronoDuration::days(seen_days);
 
-    let items = news::fetch_items(client).await?;
+    let items = news::fetch_items(client, window).await?;
     let already_seen = db::seen_urls(pool, seen).await?;
     let articles_seen = items.len();
-    let fresh = news::enrich(client, items, &already_seen).await;
+    let fresh = news::enrich(client, items, &already_seen, max_items).await;
 
     let (actions, llm_calls) = llm::extract(gemini_key, model, &fresh).await?;
     let rows = build_rows(&fresh, &actions);

@@ -59,11 +59,13 @@ public/              static dashboard frontend
 ## Run locally
 
 ```bash
-cp .env.example .env   # fill DATABASE_URL + GEMINI_API_KEY
+cp .env.example .env                # fill DATABASE_URL + GEMINI_API_KEY
+cargo run --bin migrate              # apply schema (only needed once / after changes)
 cargo run --release --bin local_scrape
 ```
 
-Migrations apply automatically on first run.
+The API never runs migrations itself; that happens explicitly with `migrate`
+so serverless cold starts don't fight over the migration lock.
 
 ## Deploy
 
