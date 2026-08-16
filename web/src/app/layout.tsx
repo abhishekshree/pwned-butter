@@ -19,9 +19,9 @@ const fontMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Maharashtra FDA Tracker · Food Safety Intelligence",
+  title: "Is the Mumbai Butter Real?",
   description:
-    "Real-time tracker of regulatory actions, licence suspensions, and raids against food businesses across Maharashtra, surfaced from news reporting.",
+    "Live FDA raids, suspensions & seizures across Maharashtra — you ask, the enforcement answers.",
 };
 
 export default function RootLayout({

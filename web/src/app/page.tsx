@@ -163,7 +163,7 @@ export default async function Home({
             <div className="min-w-0">
               <div className="flex items-center gap-2">
                 <h1 className="truncate text-sm font-bold tracking-tight text-foreground sm:text-base">
-                  Maharashtra FDA Tracker
+                  Is the Mumbai Butter Real?
                 </h1>
                 <span className="inline-flex items-center gap-1 rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-emerald-600 dark:text-emerald-400">
                   <span className="size-1.5 rounded-full bg-emerald-500 animate-pulse" />
@@ -171,7 +171,7 @@ export default async function Home({
                 </span>
               </div>
               <p className="truncate font-mono text-[11px] text-muted-foreground">
-                Food safety & regulatory intelligence across Maharashtra
+                live FDA raids, suspensions &amp; seizures across Maharashtra
               </p>
             </div>
           </div>
@@ -182,7 +182,7 @@ export default async function Home({
             </span>
             <ThemeToggle />
             <a
-              href="https://github.com/abhishekshree/fda-mumbai-tracker"
+              href="https://github.com/abhishekshree/pwned-butter"
               target="_blank"
               rel="noopener noreferrer"
               aria-label="View source repository on GitHub"
