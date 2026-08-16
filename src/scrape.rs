@@ -46,14 +46,15 @@ async fn scrape_once(pool: &sqlx::PgPool, gemini_key: &str, model: &str) -> Resu
 
     let items = news::fetch_items(client).await?;
     let already_seen = db::seen_urls(pool, seen).await?;
-    let fresh = news::enrich(client, items.clone(), &already_seen).await;
+    let articles_seen = items.len();
+    let fresh = news::enrich(client, items, &already_seen).await;
 
     let (actions, llm_calls) = llm::extract(gemini_key, model, &fresh).await?;
     let rows = build_rows(&fresh, &actions);
     let upserted = db::upsert_actions(pool, &rows).await?;
 
     Ok(ScrapeReport {
-        articles_seen: items.len(),
+        articles_seen,
         articles_new: fresh.len(),
         actions_upserted: upserted,
         llm_calls,

@@ -41,7 +41,7 @@ pub async fn extract(
     }
     let payload = json!({
         "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
-        "contents": [{"parts": [{"text": items_json(items)?}]}],
+        "contents": [{"parts": [{"text": serde_json::to_string(&json!({ "items": items })).context("serialize news batch")?}]}],
         "generationConfig": {
             "temperature": 0.0,
             "responseMimeType": "application/json"
@@ -79,11 +79,6 @@ pub async fn extract(
         return Err(anyhow!("gemini http {status}: {text}"));
     }
     Err(anyhow!("gemini API failed after {MAX_ATTEMPTS} attempts"))
-}
-
-fn items_json(items: &[NewsItem]) -> Result<String> {
-    serde_json::to_string(&json!({ "items": items }))
-        .map_err(|e| anyhow!("serialize news batch: {e}"))
 }
 
 fn parse_response(body: &Value) -> Result<Vec<LlmAction>> {
@@ -151,24 +146,12 @@ fn parse_response(body: &Value) -> Result<Vec<LlmAction>> {
 
 fn sanitize_action(mut a: LlmAction) -> LlmAction {
     a.establishment = clamp(a.establishment, 200);
-    if let Some(v) = a.area.take() {
-        a.area = Some(clamp(v, 120));
-    }
-    if let Some(v) = a.city.take() {
-        a.city = Some(clamp(v, 120));
-    }
-    if let Some(v) = a.brand.take() {
-        a.brand = Some(clamp(v, 120));
-    }
-    if let Some(v) = a.operator.take() {
-        a.operator = Some(clamp(v, 200));
-    }
-    if let Some(v) = a.fssai_number.take() {
-        a.fssai_number = Some(clamp(v, 64));
-    }
-    if let Some(v) = a.details.take() {
-        a.details = Some(clamp(v, 2000));
-    }
+    clamp_opt(&mut a.area, 120);
+    clamp_opt(&mut a.city, 120);
+    clamp_opt(&mut a.brand, 120);
+    clamp_opt(&mut a.operator, 200);
+    clamp_opt(&mut a.fssai_number, 64);
+    clamp_opt(&mut a.details, 2000);
     a.violations = a
         .violations
         .into_iter()
@@ -192,6 +175,12 @@ fn clamp(s: String, max: usize) -> String {
         trimmed.chars().take(max).collect()
     } else {
         trimmed
+    }
+}
+
+fn clamp_opt(field: &mut Option<String>, max: usize) {
+    if let Some(v) = field.take() {
+        *field = Some(clamp(v, max));
     }
 }
 

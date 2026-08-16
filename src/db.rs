@@ -128,7 +128,7 @@ pub async fn upsert_actions(pool: &PgPool, rows: &[ActionInsert]) -> Result<usiz
         .bind(r.published_at)
         .execute(&mut *tx)
         .await?;
-        affected += res.rows_affected() as usize;
+        affected += usize::try_from(res.rows_affected())?;
     }
     tx.commit().await?;
     Ok(affected)
@@ -233,7 +233,7 @@ pub async fn list_actions(pool: &PgPool, p: &ListParams) -> Result<(i64, Vec<Act
         .push_bind(offset);
 
     let rows = qb.build_query_as::<ActionRow>().fetch_all(pool).await?;
-    let total = rows.first().map(|r| r.total_count).unwrap_or(0);
+    let total = rows.first().map_or(0, |r| r.total_count);
     Ok((total, rows))
 }
 
