@@ -420,11 +420,15 @@ export default async function Home({
         <footer className="border-t border-border/80 pt-6 pb-12 text-xs">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
             <p className="max-w-xl leading-relaxed text-muted-foreground">
-              This dashboard aggregates regulatory food-safety actions across Maharashtra
-              reported in public Indian news publications. Data is news-derived and indexed automatically.
-              Licence suspensions do not imply permanent cancellation, and premises frequently reopen upon compliance.
+              An independent, unofficial compilation of food-safety enforcement actions across
+              Maharashtra, aggregated from public news reporting. Not affiliated with or endorsed
+              by any government body. Use as a reference only — data is news-derived and may
+              contain errors, and is not the definitive truth.
             </p>
             <div className="flex flex-wrap gap-2">
+              <span className="rounded-md border border-border/80 bg-card px-2 py-1 font-mono text-[11px] text-muted-foreground">
+                🥐 bun
+              </span>
               <span className="rounded-md border border-border/80 bg-card px-2 py-1 font-mono text-[11px] text-muted-foreground">
                 ⚡ Rust Engine
               </span>
@@ -435,6 +439,26 @@ export default async function Home({
                 🐘 Neon Postgres
               </span>
             </div>
+          </div>
+          <div className="mt-6 border-t border-border/40 pt-4 text-muted-foreground">
+            Built by{" "}
+            <a
+              href="https://abhishekshree.github.io"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-medium text-foreground underline underline-offset-2 decoration-border hover:decoration-foreground"
+            >
+              Abhishek Shree
+            </a>{" "}
+            · source on{" "}
+            <a
+              href="https://github.com/abhishekshree/pwned-butter"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-medium text-foreground underline underline-offset-2 decoration-border hover:decoration-foreground"
+            >
+              GitHub
+            </a>
           </div>
         </footer>
       </div>
