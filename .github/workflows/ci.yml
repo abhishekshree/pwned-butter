@@ -14,6 +14,19 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test --lib
+      - run: cargo test --doc
+      - run: cargo nextest run --profile ci --all-features
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-junit
+          path: target/nextest/ci/junit.xml
+      - if: always()
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        with:
+          files: target/nextest/ci/junit.xml
