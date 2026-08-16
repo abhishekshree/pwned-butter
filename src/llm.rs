@@ -9,10 +9,15 @@ use tokio::sync::Semaphore;
 use crate::models::{LlmAction, NewsItem};
 
 pub const SYSTEM_PROMPT: &str = "You are a structured-data extractor for a tracker of Maharashtra \
+<<<<<<< HEAD
 FDA (Food and Drug Administration) food-safety enforcement. Given JSON news items (news \
 articles and X/Twitter posts) from India, extract one record per RETAIL food business that \
 faced a concrete regulatory action: licence suspension, stop business, improvement notice, \
 sealing, seizure, or an inspection/raid with cited violations.
+=======
+FDA (Food and Drug Administration) food-safety enforcement. Given JSON news items from India, \
+extract one record per food establishment that faced a concrete regulatory action.
+>>>>>>> origin/feat/next-dashboard
 
 Scope rules:
 - Only extract places a consumer could order food from or eat at: restaurants, hotels, \
@@ -28,11 +33,22 @@ outletType, actionType, actionDate, violations, complianceScore, platforms, deta
 sourceIndex.
 
 Field rules:
+<<<<<<< HEAD
 - establishment: the outlet name as reported (e.g. \"Noor Mohammadi Hotel\", \"Blink Commerce Malad\").
 - brand: national/chain brand if applicable (Domino's, Pizza Hut, Burger King, KFC, Blinkit, Zepto), else omit.
 - area: locality within the city (e.g. Vile Parle West), else omit.
 - city: city/locality name (Mumbai, Navi Mumbai, Thane, Pune, Nashik...).
 - outletType: one of restaurant, cloud_kitchen, quick_commerce, dhaba, hotel, bakery, club, mess, dairy, street_vendor, other.
+=======
+- Only food outlets count: restaurants, hotels, dhabas, eateries, cafes, bakeries, cloud
+  kitchens and quick-commerce dark stores (Zomato, Swiggy, Blinkit, Instamart, Zepto, Restrow...).
+  If an article names no such establishment, skip it entirely, even if it reports a raid,
+  seizure or complaint trend in general.
+- establishment: the business or establishment name as reported (e.g. \"Noor Mohammadi Hotel\", \"Blink Commerce\").
+- brand: the national/brand name if applicable (Domino's, Pizza Hut, Burger King, KFC, Starbucks, Blinkit, Zepto, Swiggy Instamart), otherwise null.
+- area: locality within the city (e.g. Vile Parle West) if reported, else null.
+- city: city/locality name (Mumbai, Pune, Nashik, Satara, Karad, Palghar...).
+>>>>>>> origin/feat/next-dashboard
 - actionType: one of licence_suspension, stop_business, improvement_notice, sealing, seizure, inspection, reopened.
 - actionDate: inspection or order date in YYYY-MM-DD when stated, otherwise the source publication date.
 - violations: array of up to 5 short phrases summarising the cited violations (hygiene, pest \

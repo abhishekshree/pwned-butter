@@ -49,7 +49,11 @@ async fn gemini_backfill(args: &[String]) -> Result<()> {
         let date = today - ChronoDuration::days(i64::from(d));
         let window = format!("after:{date} before:{}", date + ChronoDuration::days(1));
         println!("\n=== day {date} ({window}) ===");
+<<<<<<< HEAD
 let fut = run_with_window(&gemini_key, &model, &window, SEEN_DAYS, MAX_ITEMS, true);
+=======
+        let fut = run_with_window(&gemini_key, &model, &window, SEEN_DAYS, MAX_ITEMS);
+>>>>>>> origin/feat/next-dashboard
         match tokio::time::timeout(DAY_TIMEOUT, fut).await {
             Ok(Ok((run_id, report))) => println!(
                 "day {date}: run {run_id} ok: seen={} new={} upserted={} llm_calls={}",
@@ -65,8 +69,13 @@ let fut = run_with_window(&gemini_key, &model, &window, SEEN_DAYS, MAX_ITEMS, tr
     }
 
     if args.is_empty() {
+<<<<<<< HEAD
 println!("\n=== wide pass when:30d ===");
         let fut = run_with_window(&gemini_key, &model, "when:30d", SEEN_DAYS, MAX_ITEMS, true);
+=======
+        println!("\n=== wide pass when:30d ===");
+        let fut = run_with_window(&gemini_key, &model, "when:30d", SEEN_DAYS, MAX_ITEMS);
+>>>>>>> origin/feat/next-dashboard
         match tokio::time::timeout(DAY_TIMEOUT, fut).await {
             Ok(Ok((run_id, report))) => println!(
                 "wide: run {run_id} ok: seen={} new={} upserted={} llm_calls={}",
@@ -258,7 +267,11 @@ fn load_day(
 
 fn preview_day(items_dir: &Path, actions_file: &Path, date: &str) -> Result<usize> {
     let (items, actions) = load_day(items_dir, actions_file, date)?;
+<<<<<<< HEAD
     let rows = scrape::build_rows(&items, &actions, false);
+=======
+    let rows = scrape::build_rows(&items, &actions);
+>>>>>>> origin/feat/next-dashboard
     for r in &rows {
         println!(
             "  {:<32} {:<16} {:<20} {} | {}",
@@ -280,7 +293,11 @@ async fn ingest_one(
 ) -> Result<usize> {
     let (items, actions) = load_day(items_dir, actions_file, date)?;
 
+<<<<<<< HEAD
     let rows = scrape::build_rows(&items, &actions, false);
+=======
+    let rows = scrape::build_rows(&items, &actions);
+>>>>>>> origin/feat/next-dashboard
     let inserted = db::insert_actions(pool, &rows).await?;
     let skipped = rows.len().saturating_sub(inserted);
     if skipped > 0 {
