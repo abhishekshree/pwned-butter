@@ -8,7 +8,7 @@ use tokio::sync::Semaphore;
 
 use crate::models::{LlmAction, NewsItem};
 
-const BASE_PROMPT: &str = "You are a structured-data extractor for a tracker of Maharashtra \
+pub const SYSTEM_PROMPT: &str = "You are a structured-data extractor for a tracker of Maharashtra \
 FDA (Food and Drug Administration) food-safety enforcement. Given JSON news items (news \
 articles and X/Twitter posts) from India, extract one record per RETAIL food business that \
 faced a concrete regulatory action: licence suspension, stop business, improvement notice, \
@@ -55,9 +55,9 @@ instamart, zepto, bigbasket.\n\
 
 fn system_prompt(delivery: bool) -> String {
     if delivery {
-        format!("{BASE_PROMPT}{DELIVERY_MODE}")
+        format!("{SYSTEM_PROMPT}{DELIVERY_MODE}")
     } else {
-        BASE_PROMPT.to_string()
+        SYSTEM_PROMPT.to_string()
     }
 }
 

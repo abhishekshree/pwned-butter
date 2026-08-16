@@ -113,6 +113,45 @@ pub async fn upsert_actions(pool: &PgPool, rows: &[ActionInsert]) -> Result<usiz
     Ok(affected)
 }
 
+/// Insert rows, skipping any that already exist on
+/// (source_url, establishment, action_date). Zero overwrite.
+pub async fn insert_actions(pool: &PgPool, rows: &[ActionInsert]) -> Result<usize> {
+    let mut tx = pool.begin().await?;
+    let mut inserted: usize = 0;
+    for r in rows {
+        let res = sqlx::query(
+            "INSERT INTO actions (
+                establishment, area, city, brand, operator, outlet_type, action_type,
+                action_date, violations, compliance_score, fssai_number, details,
+                platforms, source_url, source_publisher, source_headline, published_at
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+            ON CONFLICT (source_url, establishment, action_date) DO NOTHING",
+        )
+        .bind(&r.establishment)
+        .bind(&r.area)
+        .bind(&r.city)
+        .bind(&r.brand)
+        .bind(&r.operator)
+        .bind(&r.outlet_type)
+        .bind(&r.action_type)
+        .bind(r.action_date)
+        .bind(&r.violations)
+        .bind(r.compliance_score)
+        .bind(&r.fssai_number)
+        .bind(&r.details)
+        .bind(&r.platforms)
+        .bind(&r.source_url)
+        .bind(&r.source_publisher)
+        .bind(&r.source_headline)
+        .bind(r.published_at)
+        .execute(&mut *tx)
+        .await?;
+        inserted += usize::try_from(res.rows_affected())?;
+    }
+    tx.commit().await?;
+    Ok(inserted)
+}
+
 pub async fn begin_run(pool: &PgPool) -> Result<i64> {
     let row = sqlx::query("INSERT INTO fetch_runs (status) VALUES ('running') RETURNING id")
         .fetch_one(pool)
