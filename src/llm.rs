@@ -8,7 +8,7 @@ use tokio::sync::Semaphore;
 
 use crate::models::{LlmAction, NewsItem};
 
-const SYSTEM_PROMPT: &str = "You are a structured-data extractor for a tracker of Maharashtra \
+pub const SYSTEM_PROMPT: &str = "You are a structured-data extractor for a tracker of Maharashtra \
 FDA (Food and Drug Administration) food-safety enforcement. Given JSON news items from India, \
 extract one record per food establishment that faced a concrete regulatory action.
 
@@ -17,6 +17,10 @@ operator, outletType, actionType, actionDate, violations, complianceScore, platf
 details, sourceIndex.
 
 Field rules:
+- Only food outlets count: restaurants, hotels, dhabas, eateries, cafes, bakeries, cloud
+  kitchens and quick-commerce dark stores (Zomato, Swiggy, Blinkit, Instamart, Zepto, Restrow...).
+  If an article names no such establishment, skip it entirely, even if it reports a raid,
+  seizure or complaint trend in general.
 - establishment: the business or establishment name as reported (e.g. \"Noor Mohammadi Hotel\", \"Blink Commerce\").
 - brand: the national/brand name if applicable (Domino's, Pizza Hut, Burger King, KFC, Starbucks, Blinkit, Zepto, Swiggy Instamart), otherwise null.
 - area: locality within the city (e.g. Vile Parle West) if reported, else null.

@@ -78,7 +78,7 @@ async fn scrape_once(
     })
 }
 
-fn build_rows(items: &[NewsItem], actions: &[LlmAction]) -> Vec<ActionInsert> {
+pub fn build_rows(items: &[NewsItem], actions: &[LlmAction]) -> Vec<ActionInsert> {
     actions
         .iter()
         .filter_map(|a| {

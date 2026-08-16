@@ -74,6 +74,31 @@ Migrations only ever run explicitly via the `migrate` bin. The dashboard never
 runs them, and reads go over Neon's HTTP driver instead of a pooled TCP
 connection, which is what keeps serverless cold starts fast and reliable.
 
+## One-time backfill without Gemini
+
+For a dense historical backfill (default: past 30 days) you can do the heavy
+part offline, extract with any LLM (local or not), then ingest:
+
+```bash
+# 1. fetch + enrich news per day, keep only restaurant-relevant items
+cargo run --release --bin backfill -- dump            # → data/backfill/items/<date>.json
+# 2. hand data/backfill/EXTRACT.md + the items to your LLM; write per-day JSON to:
+#    data/backfill/actions/<date>.json    (array of records, sourceIndex = item index)
+# 3. preview before writing (no DB access)
+cargo run --release --bin backfill -- ingest --dry-run
+# 4. write to the database
+cargo run --release --bin backfill -- ingest
+```
+
+- `backfill dump [dir [from_days_ago [to_days_ago]]]` skips days already dumped;
+  delete a `<date>.json` to redo it.
+- `backfill ingest [--dry-run] [dir]` reads `actions/<date>.json`, joins with the
+  items dump via `sourceIndex`, and upserts (dedup is the usual
+  `(source_url, establishment, action_date)` key). Records with a wrong `sourceIndex`
+  are dropped.
+- Concurrency is tunable so you can slow down if Google News/publishers throttle:
+  `FDA_DAY_CONCURRENCY`, `FDA_RSS_CONCURRENCY`, `FDA_FETCH_CONCURRENCY`.
+
 ## Deploy
 
 1. Push to GitHub; import in Vercel with **root directory** set to `web`
