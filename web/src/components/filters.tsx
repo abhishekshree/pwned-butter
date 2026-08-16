@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Search } from "lucide-react";
 import { useRouter } from "next/navigation";
 
@@ -31,11 +31,19 @@ export function Controls({
   const [q, setQ] = useState(initial.q ?? "");
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+    },
+    [],
+  );
+
   const apply = (next: Filters) => router.replace(buildHref(next));
 
   const onSelect = (key: keyof Filters, value: string) => {
+    if (timer.current) clearTimeout(timer.current);
     const v = value === "all" ? undefined : value;
-    apply({ ...initial, [key]: v });
+    apply({ ...initial, q: q.trim() || undefined, [key]: v });
   };
 
   const onSearch = (value: string) => {
@@ -51,10 +59,11 @@ export function Controls({
       <div className="relative flex-1 sm:max-w-xs">
         <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
         <input
+          type="search"
           value={q}
           onChange={(e) => onSearch(e.target.value)}
           placeholder="Search establishment, brand, area…"
-          className="h-11 w-full rounded-xl border border-input bg-card pr-3 pl-9 text-base text-foreground outline-none placeholder:text-muted-foreground focus-visible:border-ring dark:bg-input/30"
+          className="h-11 w-full rounded-lg border border-input bg-card pr-3 pl-9 text-base text-foreground outline-none placeholder:text-muted-foreground focus-visible:border-ring dark:bg-input/30"
         />
       </div>
 

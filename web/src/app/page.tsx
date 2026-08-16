@@ -22,6 +22,7 @@ import { cn } from "@/lib/utils";
 export const dynamic = "force-dynamic";
 
 const PAGE_SIZE = 20;
+const MAX_PAGE = 10_000;
 
 const STATUS_CHIPS: { v: string | null; label: string }[] = [
   { v: null, label: "All" },
@@ -34,6 +35,11 @@ function single(v: string | string[] | undefined): string | undefined {
   return typeof v === "string" ? v : undefined;
 }
 
+function pageNumber(v: string | undefined): number {
+  if (!v || !/^\d+$/.test(v)) return 1;
+  return Math.min(Math.max(Number(v), 1), MAX_PAGE);
+}
+
 export default async function Home({
   searchParams,
 }: {
@@ -41,7 +47,7 @@ export default async function Home({
 }) {
   const sp = await searchParams;
   const p = (k: string) => single(sp[k]);
-  const page = Math.max(1, Math.min(10, Number(p("page")) || 1));
+  const page = pageNumber(p("page"));
 
   const filters: Filters = {
     brand: p("brand"),
@@ -62,18 +68,18 @@ export default async function Home({
       getStats(),
       listBrands(),
       listCities(),
-      listActions(filters, { limit: page * PAGE_SIZE, offset: 0 }),
+      listActions(filters, { limit: PAGE_SIZE, offset: (page - 1) * PAGE_SIZE }),
     ]);
-  } catch (err) {
+  } catch (error) {
+    console.error("Dashboard query failed", error);
     return (
       <main className="mx-auto flex w-full max-w-xl flex-1 items-center px-4">
-        <div className="rounded-2xl border bg-card px-8 py-10 text-center shadow-sm">
-          <div className="text-4xl">🧺</div>
-          <h1 className="mt-3 text-lg font-semibold text-foreground">
+        <div className="rounded-lg border bg-card px-8 py-10 text-center shadow-sm">
+          <h1 className="text-lg font-semibold text-foreground">
             Couldn&apos;t load the tracker
           </h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            The database isn&apos;t reachable right now ({(err as Error).message}).
+            The data service is temporarily unavailable. Please try again later.
           </p>
         </div>
       </main>
@@ -89,18 +95,17 @@ export default async function Home({
   ];
 
   const total = data.total;
-  const shown = data.actions.length;
-  const hasMore = shown < total;
+  const hasMore = page * PAGE_SIZE < total;
 
   return (
     <main>
       <header className="sticky top-0 z-30 border-b bg-background/90 backdrop-blur">
         <div className="mx-auto flex max-w-3xl items-center justify-between gap-2 px-4 py-3">
           <div className="flex min-w-0 items-center gap-2.5">
-            <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-gradient-to-br from-blue-500 to-blue-700 text-[11px] font-extrabold tracking-wide text-white shadow-sm">
+            <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-gradient-to-br from-blue-500 to-blue-700 text-[11px] font-extrabold tracking-wide text-white shadow-sm">
               FDA
             </span>
-            <h1 className="truncate text-base font-semibold tracking-tight">
+            <h1 className="truncate text-base font-semibold">
               Maharashtra FDA Enforcement Tracker
             </h1>
           </div>
@@ -128,8 +133,8 @@ export default async function Home({
 
           <div className="mt-3 grid grid-cols-2 gap-2.5 sm:grid-cols-4">
             {tiles.map((t) => (
-              <div key={t.label} className="rounded-xl border bg-card p-3 shadow-sm">
-                <div className="text-xl font-bold tracking-tight">{t.value}</div>
+              <div key={t.label} className="rounded-lg border bg-card p-3 shadow-sm">
+                <div className="text-xl font-bold">{t.value}</div>
                 <div className="mt-1 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
                   <span className={cn("size-1.5 rounded-full", t.dot)} />
                   {t.label}
@@ -193,7 +198,7 @@ export default async function Home({
             <BarChartCard title="By action" data={stats.byActionType} />
           </Card>
           <Card className="p-4 sm:col-span-2 lg:col-span-1">
-            <BarChartCard title="By city" data={stats.byCity} />
+            <BarChartCard title="Top cities" data={stats.byCity} />
           </Card>
         </section>
 
@@ -201,6 +206,7 @@ export default async function Home({
           <div>
             {total} record{total === 1 ? "" : "s"}
             {hasFilters ? ` · filtered` : ""}
+            {page > 1 ? ` · page ${page}` : ""}
           </div>
           {stats.lastRun?.finished_at ? (
             <div className="truncate">Scraped {formatDateTime(stats.lastRun.finished_at)}</div>
@@ -211,9 +217,8 @@ export default async function Home({
           {data.actions.length ? (
             data.actions.map((a) => <ActionCard key={a.id} a={a} />)
           ) : (
-            <div className="rounded-2xl border border-dashed p-12 text-center">
-              <div className="text-3xl">🧺</div>
-              <p className="mt-2 text-sm font-medium">No matching actions</p>
+            <div className="rounded-lg border border-dashed p-12 text-center">
+              <p className="text-sm font-medium">No matching actions</p>
               <p className="text-xs text-muted-foreground">
                 Try a different search or clear the filters.
               </p>
@@ -224,10 +229,10 @@ export default async function Home({
         <div className="flex items-center justify-center gap-3 pb-6">
           {page > 1 ? (
             <Link
-              href={href + "#list"}
+              href={buildHref(filters, { page: page - 1 }) + "#list"}
               className="text-xs font-semibold text-muted-foreground hover:text-foreground"
             >
-              ← Back to latest
+              Previous page
             </Link>
           ) : null}
           {hasMore ? (
@@ -235,7 +240,7 @@ export default async function Home({
               href={buildHref(filters, { page: page + 1 }) + "#list"}
               className={buttonVariants({ variant: "outline" })}
             >
-              Load more · {total - shown} more
+              Next page
             </Link>
           ) : null}
         </div>
