@@ -14,7 +14,7 @@ async fn handler(req: Request) -> Result<Response<Value>, Error> {
         return json_response(401, json!({ "error": "unauthorized" }));
     }
     let gemini_key = env("GEMINI_API_KEY")?;
-    let model = env_or("GEMINI_MODEL", "gemini-2.5-flash");
+    let model = env_or("GEMINI_MODEL", "gemini-flash-latest");
 
     match run_scrape(&gemini_key, &model).await {
         Ok((run_id, r)) => json_response(

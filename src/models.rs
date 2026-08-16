@@ -143,22 +143,23 @@ pub struct LlmAction {
     pub brand: Option<String>,
     #[serde(default)]
     pub operator: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "outlet_type")]
     pub outlet_type: Option<String>,
+    #[serde(alias = "action_type")]
     pub action_type: ActionType,
-    #[serde(default)]
+    #[serde(default, alias = "action_date")]
     pub action_date: Option<String>,
     #[serde(default)]
     pub violations: Vec<String>,
     #[serde(default)]
     pub compliance_score: Option<i32>,
-    #[serde(default)]
+    #[serde(default, alias = "fssai_number")]
     pub fssai_number: Option<String>,
     #[serde(default)]
     pub details: Option<String>,
     #[serde(default)]
     pub platforms: Vec<String>,
-    #[serde(default)]
+    #[serde(default, alias = "source_index")]
     pub source_index: usize,
 }
 

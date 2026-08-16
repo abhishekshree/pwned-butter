@@ -9,18 +9,22 @@ const SYSTEM_PROMPT: &str = "You are a structured-data extractor for a tracker o
 FDA (Food and Drug Administration) food-safety enforcement. Given JSON news items from India, \
 extract one record per food establishment that faced a concrete regulatory action.
 
-Rules:
+Output JSON uses camelCase keys exactly as listed: establishment, area, city, brand, \
+operator, outletType, actionType, actionDate, violations, complianceScore, platforms, \
+details, sourceIndex.
+
+Field rules:
 - establishment: the business or establishment name as reported (e.g. \"Noor Mohammadi Hotel\", \"Blink Commerce\").
 - brand: the national/brand name if applicable (Domino's, Pizza Hut, Burger King, KFC, Starbucks, Blinkit, Zepto, Swiggy Instamart), otherwise null.
 - area: locality within the city (e.g. Vile Parle West) if reported, else null.
 - city: city/locality name (Mumbai, Pune, Nashik, Satara, Karad, Palghar...).
-- action_type: one of licence_suspension, stop_business, improvement_notice, sealing, seizure, inspection, reopened.
-- action_date: the inspection or order date in YYYY-MM-DD when stated, otherwise the article publication date.
+- actionType: one of licence_suspension, stop_business, improvement_notice, sealing, seizure, inspection, reopened.
+- actionDate: the inspection or order date in YYYY-MM-DD when stated, otherwise the article publication date.
 - violations: up to 5 short phrases summarising the cited violations (hygiene, pest infestation, expired stock, missing records, unhygienic storage...).
-- compliance_score: the reported percentage score (integer) only when the article states one, else omit.
+- complianceScore: the reported percentage score (integer) only when the article states one, else omit.
 - platforms: delivery/quick-commerce platforms named in the article, lowercase (zomato, swiggy, blinkit, zepto, instamart, bigbasket...).
 - details: one sentence of crucial context (e.g. reopened after compliance, appeal filed), else null.
-- source_index: the index of the source item this record came from (required).
+- sourceIndex: the index of the source item this record came from (required).
 
 Return a JSON array only. If an item reports no concrete enforcement record against a named \
 establishment, skip it entirely. Optional string fields may be null.";
@@ -119,9 +123,12 @@ fn parse_response(body: &Value) -> Result<Vec<LlmAction>> {
 
     let mut actions = Vec::new();
     for v in raw {
-        match serde_json::from_value::<LlmAction>(v) {
+        match serde_json::from_value::<LlmAction>(v.clone()) {
             Ok(a) => actions.push(a),
-            Err(e) => eprintln!("dropping invalid LLM record: {e}"),
+            Err(e) => eprintln!(
+                "dropping invalid LLM record: {e}: {}",
+                truncate(&v.to_string(), 200)
+            ),
         }
     }
 
@@ -231,6 +238,18 @@ mod tests {
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].establishment, "Domino's");
         assert_eq!(actions[0].action_type, ActionType::LicenceSuspension);
+    }
+
+    #[test]
+    fn accepts_snake_case_keys() {
+        let body = json!({
+            "candidates": [{
+                "content": {"parts": [{"text": "[{\"establishment\":\"X\",\"action_type\":\"inspection\",\"source_index\":0}]"}]}
+            }]
+        });
+        let actions = parse_response(&body).unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action_type, ActionType::Inspection);
     }
 
     #[test]

@@ -34,7 +34,7 @@ upserted and LLM calls, so the pipeline is auditable.
 | Hosting    | Vercel — native Rust runtime (`/api/*.rs`)|
 | Schedule   | [Vercel Cron Jobs](https://vercel.com/docs/cron-jobs) (Hobby: once/day) |
 | Database   | Neon Postgres (serverless)                |
-| Extraction | Gemini Flash (`gemini-2.5-flash`), free tier, retry-with-backoff on 429 |
+| Extraction | Gemini Flash (`gemini-flash-latest`), free tier, retry-with-backoff on 429 |
 | News       | Google News RSS (no API key)              |
 | Frontend   | Static HTML/JS in `public/` (no build step) |
 
