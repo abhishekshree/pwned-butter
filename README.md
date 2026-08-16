@@ -1,5 +1,10 @@
 # pwned-butter
 
+![CI: fmt, clippy, nextest](https://img.shields.io/github/actions/workflow/status/abhishekshree/pwned-butter/ci.yml?label=CI&logo=github)
+![Daily scrape](https://img.shields.io/github/actions/workflow/status/abhishekshree/pwned-butter/scrape.yml?label=daily%20scrape)
+![License: MIT](https://img.shields.io/github/license/abhishekshree/pwned-butter)
+![Language: Rust](https://img.shields.io/github/languages/top/abhishekshree/pwned-butter)
+
 Is the Mumbai butter real? A live tracker of Maharashtra FDA food-safety
 enforcement: licence suspensions, stop-business orders, seals, seizures and
 re-openings at restaurants, hotels, dhabas and dark stores.
@@ -27,6 +32,12 @@ cargo run --bin migrate             # apply schema
 cargo run --release --bin local_scrape
 
 cd web && pnpm install && pnpm dev
+```
+
+Tests (what CI runs) via [cargo-nextest](https://nexte.st):
+
+```bash
+cargo nextest run
 ```
 
 ## Caveats
