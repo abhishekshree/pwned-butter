@@ -1,18 +1,40 @@
 export default function Loading() {
   return (
-    <div className="mx-auto w-full max-w-3xl px-4 py-6">
-      <div className="h-4 w-3/4 animate-pulse rounded bg-muted" />
-      <div className="mt-3 grid grid-cols-2 gap-2.5 sm:grid-cols-4">
+    <div className="mx-auto w-full max-w-6xl space-y-6 px-4 py-6 sm:px-6">
+      {/* KPI Skeletons */}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-4">
         {Array.from({ length: 4 }).map((_, i) => (
-          <div key={i} className="h-20 animate-pulse rounded-lg bg-muted" />
+          <div
+            key={i}
+            className="h-24 animate-pulse rounded-xl border border-border/60 bg-muted/40 p-4"
+          />
         ))}
       </div>
-      <div className="mt-5 h-11 animate-pulse rounded-lg bg-muted" />
-      <div className="mt-4 space-y-3">
-        {Array.from({ length: 4 }).map((_, i) => (
-          <div key={i} className="h-40 animate-pulse rounded-lg bg-muted" />
+
+      {/* Filter Bar Skeleton */}
+      <div className="h-28 animate-pulse rounded-xl border border-border/60 bg-muted/40 p-4" />
+
+      {/* Charts Grid Skeleton */}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+        {Array.from({ length: 3 }).map((_, i) => (
+          <div
+            key={i}
+            className="h-64 animate-pulse rounded-xl border border-border/60 bg-muted/40 p-4"
+          />
+        ))}
+      </div>
+
+      {/* Action Cards Skeleton (2-Column Grid) */}
+      <div className="grid grid-cols-1 gap-3.5 md:grid-cols-2">
+        {Array.from({ length: 6 }).map((_, i) => (
+          <div
+            key={i}
+            className="h-36 animate-pulse rounded-lg border border-border/60 bg-muted/40 p-3.5"
+          />
         ))}
       </div>
     </div>
   );
 }
+
+

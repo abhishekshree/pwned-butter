@@ -155,3 +155,14 @@ pub async fn fail_run(pool: &PgPool, run_id: i64, error: &str) -> Result<()> {
     .await?;
     Ok(())
 }
+
+pub async fn mark_stale_runs(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        "UPDATE fetch_runs SET finished_at = now(), status = 'error',
+         error = 'stale run marked by backfill (no heartbeat)'
+         WHERE status = 'running' AND started_at < now() - interval '30 minutes'",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}

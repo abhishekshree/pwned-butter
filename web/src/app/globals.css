@@ -5,8 +5,8 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-sans), system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: var(--font-mono), ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Monaco, Consolas, monospace;
   --font-heading: var(--font-sans);
   --color-chart-5: var(--chart-5);
   --color-chart-4: var(--chart-4);
@@ -35,55 +35,55 @@
 }
 
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
+  --background: oklch(0.985 0.003 240);
+  --foreground: oklch(0.16 0.015 250);
   --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
+  --card-foreground: oklch(0.16 0.015 250);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.59 0.19 262);  /* blue */
-  --chart-2: oklch(0.64 0.22 20);   /* red */
-  --chart-3: oklch(0.55 0.16 150);  /* green */
-  --chart-4: oklch(0.64 0.15 70);   /* amber */
-  --chart-5: oklch(0.59 0.19 295);  /* violet */
+  --popover-foreground: oklch(0.16 0.015 250);
+  --primary: oklch(0.24 0.04 250);
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.95 0.008 240);
+  --secondary-foreground: oklch(0.2 0.02 250);
+  --muted: oklch(0.95 0.008 240);
+  --muted-foreground: oklch(0.48 0.02 245);
+  --accent: oklch(0.94 0.01 245);
+  --accent-foreground: oklch(0.2 0.03 250);
+  --destructive: oklch(0.58 0.22 25);
+  --border: oklch(0.89 0.008 240);
+  --input: oklch(0.89 0.008 240);
+  --ring: oklch(0.55 0.15 250);
+  --chart-1: oklch(0.58 0.18 250);  /* blue */
+  --chart-2: oklch(0.62 0.22 25);   /* red */
+  --chart-3: oklch(0.58 0.16 150);  /* green */
+  --chart-4: oklch(0.66 0.16 70);   /* amber */
+  --chart-5: oklch(0.6 0.18 295);   /* violet */
   --radius: 0.625rem;
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.7 0.16 262);   /* blue */
-  --chart-2: oklch(0.7 0.18 20);    /* red */
-  --chart-3: oklch(0.7 0.15 150);   /* green */
-  --chart-4: oklch(0.75 0.13 70);   /* amber */
+  --background: oklch(0.135 0.015 255);
+  --foreground: oklch(0.95 0.006 240);
+  --card: oklch(0.17 0.018 255);
+  --card-foreground: oklch(0.95 0.006 240);
+  --popover: oklch(0.17 0.018 255);
+  --popover-foreground: oklch(0.95 0.006 240);
+  --primary: oklch(0.9 0.04 240);
+  --primary-foreground: oklch(0.135 0.015 255);
+  --secondary: oklch(0.22 0.02 255);
+  --secondary-foreground: oklch(0.95 0.006 240);
+  --muted: oklch(0.2 0.018 255);
+  --muted-foreground: oklch(0.68 0.015 240);
+  --accent: oklch(0.24 0.025 255);
+  --accent-foreground: oklch(0.98 0.005 240);
+  --destructive: oklch(0.68 0.19 25);
+  --border: oklch(0.27 0.02 255 / 75%);
+  --input: oklch(0.27 0.02 255 / 90%);
+  --ring: oklch(0.6 0.16 250);
+  --chart-1: oklch(0.7 0.16 250);   /* blue */
+  --chart-2: oklch(0.7 0.19 25);    /* red */
+  --chart-3: oklch(0.72 0.16 150);  /* green */
+  --chart-4: oklch(0.76 0.14 70);   /* amber */
   --chart-5: oklch(0.72 0.17 295);  /* violet */
 }
 
@@ -92,9 +92,8 @@
     @apply border-border outline-ring/50;
   }
   body {
-    @apply bg-background text-foreground;
-  }
-  html {
-    @apply font-sans;
+    @apply bg-background text-foreground font-sans;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
   }
 }
+
