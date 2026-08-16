@@ -11,4 +11,4 @@ failure-output = "immediate-final"
 slow-timeout = { period = "60s", terminate-after = 2 }
 
 [profile.ci.junit]
-path = "target/nextest/ci/junit.xml"
+path = "junit.xml"
