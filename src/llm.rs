@@ -8,50 +8,9 @@ use tokio::sync::Semaphore;
 
 use crate::models::{LlmAction, NewsItem};
 
-pub const SYSTEM_PROMPT: &str = "You are a structured-data extractor for a tracker of Maharashtra \
-FDA (Food and Drug Administration) food-safety enforcement. Given JSON news items (news \
-articles and X/Twitter posts) from India, extract one record per RETAIL food business that \
-faced a concrete regulatory action: licence suspension, stop business, improvement notice, \
-sealing, seizure, or an inspection/raid with cited violations.
+pub const SYSTEM_PROMPT: &str = include_str!("prompts/system.txt");
 
-Scope rules:
-- Only extract places a consumer could order food from or eat at: restaurants, hotels, \
-cafés, cloud kitchens, fast-food outlets, bakeries, sweet shops, dhabas, messes, and \
-quick-commerce stores (Blinkit, Zepto, Instamart, BigBasket) that sell food.
-- Skip manufacturers, food-processing plants, warehouses, wholesale/B2B suppliers, dairy \
-plants, farms, slaughterhouses, and any non-food business.
-- If one item lists several named outlets under a single action, emit a separate record per \
-named outlet. Never invent establishments that are not named in the source.
-
-Output JSON uses camelCase keys exactly as listed: establishment, area, city, brand, operator, \
-outletType, actionType, actionDate, violations, complianceScore, platforms, details, \
-sourceIndex.
-
-Field rules:
-- establishment: the outlet name as reported (e.g. \"Noor Mohammadi Hotel\", \"Blink Commerce Malad\").
-- brand: national/chain brand if applicable (Domino's, Pizza Hut, Burger King, KFC, Blinkit, Zepto), else omit.
-- area: locality within the city (e.g. Vile Parle West), else omit.
-- city: city/locality name (Mumbai, Navi Mumbai, Thane, Pune, Nashik...).
-- outletType: one of restaurant, cloud_kitchen, quick_commerce, dhaba, hotel, bakery, club, mess, dairy, street_vendor, other.
-- actionType: one of licence_suspension, stop_business, improvement_notice, sealing, seizure, inspection, reopened.
-- actionDate: inspection or order date in YYYY-MM-DD when stated, otherwise the source publication date.
-- violations: array of up to 5 short phrases summarising the cited violations (hygiene, pest \
-infestation, expired stock, missing records, unhygienic storage). Omit when none cited.
-- complianceScore: the reported percentage score (integer) only when the source states one, else omit.
-- platforms: lowercased delivery apps the outlet operates on, from the source OR from your own \
-knowledge (zomato, swiggy, blinkit, zepto, instamart, bigbasket). Omit when none applies.
-- details: one sentence of crucial context (e.g. reopened after compliance, appeal filed), else omit.
-- sourceIndex: the index of the source item this record came from (required).
-
-Return a JSON array only. If an item reports no concrete action against a named retail food \
-outlet, skip it entirely. Optional fields may be null.";
-
-const DELIVERY_MODE: &str = "\n\nThis is a Mumbai consumer-delivery run. Additional hard rules:\n\
-- Include ONLY establishments in the Mumbai metropolitan region: Mumbai, Navi Mumbai, Thane, \
-and neighbouring suburbs (Kalyan, Dombivli, Mulund, Goregaon, Andheri, Bandra, Worli...).\n\
-- Every included record MUST list at least one of platforms: zomato, swiggy, blinkit, \
-instamart, zepto, bigbasket.\n\
-- Drop any record outside the Mumbai region or with no delivery-app presence.";
+const DELIVERY_MODE: &str = include_str!("prompts/delivery.txt");
 
 fn system_prompt(delivery: bool) -> String {
     if delivery {

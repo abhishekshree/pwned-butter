@@ -1,0 +1,6 @@
+
+
+This is a Mumbai consumer-delivery run. Additional hard rules:
+- Include ONLY establishments in the Mumbai metropolitan region: Mumbai, Navi Mumbai, Thane, and neighbouring suburbs (Kalyan, Dombivli, Mulund, Goregaon, Andheri, Bandra, Worli...).
+- Every included record MUST list at least one of platforms: zomato, swiggy, blinkit, instamart, zepto, bigbasket.
+- Drop any record outside the Mumbai region or with no delivery-app presence.
