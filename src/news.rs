@@ -209,6 +209,7 @@ async fn fetch_article(client: &reqwest::Client, url: &str) -> Result<(String, O
     Ok((final_url, extract_snippet(&text)))
 }
 
+#[allow(clippy::type_complexity)]
 pub async fn enrich(
     client: &reqwest::Client,
     items: Vec<NewsItem>,
@@ -272,48 +273,6 @@ pub async fn enrich(
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn item(title: &str, snippet: Option<&str>) -> NewsItem {
-        NewsItem {
-            title: title.into(),
-            url: "https://t.test/x".into(),
-            source: None,
-            published: None,
-            snippet: snippet.map(str::to_string),
-        }
-    }
-
-    #[test]
-    fn restaurant_filter_keeps_outlets_and_brands() {
-        assert!(is_restaurant_relevant(&item(
-            "Domino's outlet sealed in Mumbai",
-            Some("hygiene violations"),
-        )));
-        assert!(is_restaurant_relevant(&item("Hotel Sharda dhaba licence suspended", None)));
-        assert!(is_restaurant_relevant(&item(
-            "Zepto dark store raided",
-            Some("expired stock found"),
-        )));
-        assert!(is_restaurant_relevant(&item("Pizza", Some("Burger King fined in Pune"))));
-    }
-
-    #[test]
-    fn restaurant_filter_drops_generic_news() {
-        assert!(!is_restaurant_relevant(&item(
-            "Maharashtra FDA seizes cosmetics racket worth 1 crore",
-            None,
-        )));
-        assert!(!is_restaurant_relevant(&item(
-            "Pune records highest unhygienic food complaints",
-            Some("FDA held meeting"),
-        )));
-        assert!(!is_restaurant_relevant(&item("FDA issues advisory on monsoon", None)));
-    }
-}
-
 /// Pre-filter for the backfill dump: keep only items that reference a food
 /// outlet or known restaurant/quick-commerce brand, so generic regulatory news
 /// (complaint trends, cosmetics seizures, ...) never reaches the extractor.
@@ -375,3 +334,54 @@ const RESTAURANT_KEYWORDS: &[&str] = &[
     "restrow",
     "restraw",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(title: &str, snippet: Option<&str>) -> NewsItem {
+        NewsItem {
+            title: title.into(),
+            url: "https://t.test/x".into(),
+            source: None,
+            published: None,
+            snippet: snippet.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn restaurant_filter_keeps_outlets_and_brands() {
+        assert!(is_restaurant_relevant(&item(
+            "Domino's outlet sealed in Mumbai",
+            Some("hygiene violations"),
+        )));
+        assert!(is_restaurant_relevant(&item(
+            "Hotel Sharda dhaba licence suspended",
+            None
+        )));
+        assert!(is_restaurant_relevant(&item(
+            "Zepto dark store raided",
+            Some("expired stock found"),
+        )));
+        assert!(is_restaurant_relevant(&item(
+            "Pizza",
+            Some("Burger King fined in Pune")
+        )));
+    }
+
+    #[test]
+    fn restaurant_filter_drops_generic_news() {
+        assert!(!is_restaurant_relevant(&item(
+            "Maharashtra FDA seizes cosmetics racket worth 1 crore",
+            None,
+        )));
+        assert!(!is_restaurant_relevant(&item(
+            "Pune records highest unhygienic food complaints",
+            Some("FDA held meeting"),
+        )));
+        assert!(!is_restaurant_relevant(&item(
+            "FDA issues advisory on monsoon",
+            None
+        )));
+    }
+}

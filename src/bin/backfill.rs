@@ -49,11 +49,7 @@ async fn gemini_backfill(args: &[String]) -> Result<()> {
         let date = today - ChronoDuration::days(i64::from(d));
         let window = format!("after:{date} before:{}", date + ChronoDuration::days(1));
         println!("\n=== day {date} ({window}) ===");
-<<<<<<< HEAD
-let fut = run_with_window(&gemini_key, &model, &window, SEEN_DAYS, MAX_ITEMS, true);
-=======
-        let fut = run_with_window(&gemini_key, &model, &window, SEEN_DAYS, MAX_ITEMS);
->>>>>>> origin/feat/next-dashboard
+        let fut = run_with_window(&gemini_key, &model, &window, SEEN_DAYS, MAX_ITEMS, true);
         match tokio::time::timeout(DAY_TIMEOUT, fut).await {
             Ok(Ok((run_id, report))) => println!(
                 "day {date}: run {run_id} ok: seen={} new={} upserted={} llm_calls={}",
@@ -69,13 +65,8 @@ let fut = run_with_window(&gemini_key, &model, &window, SEEN_DAYS, MAX_ITEMS, tr
     }
 
     if args.is_empty() {
-<<<<<<< HEAD
-println!("\n=== wide pass when:30d ===");
-        let fut = run_with_window(&gemini_key, &model, "when:30d", SEEN_DAYS, MAX_ITEMS, true);
-=======
         println!("\n=== wide pass when:30d ===");
-        let fut = run_with_window(&gemini_key, &model, "when:30d", SEEN_DAYS, MAX_ITEMS);
->>>>>>> origin/feat/next-dashboard
+        let fut = run_with_window(&gemini_key, &model, "when:30d", SEEN_DAYS, MAX_ITEMS, true);
         match tokio::time::timeout(DAY_TIMEOUT, fut).await {
             Ok(Ok((run_id, report))) => println!(
                 "wide: run {run_id} ok: seen={} new={} upserted={} llm_calls={}",
@@ -195,7 +186,10 @@ async fn dump_day(
         })).collect::<Vec<_>>(),
     });
     let path = items_dir.join(format!("{date}.json"));
-    if let Err(e) = fs::write(&path, serde_json::to_string_pretty(&doc).unwrap_or_default()) {
+    if let Err(e) = fs::write(
+        &path,
+        serde_json::to_string_pretty(&doc).unwrap_or_default(),
+    ) {
         eprintln!("day {date}: write failed: {e}");
     }
     (fetched, kept)
@@ -237,12 +231,18 @@ async fn ingest(args: &[String]) -> Result<()> {
         match result {
             Ok(n) => {
                 total += n;
-                println!("ingest {date}: +{n} rows{}", if dry_run { " (dry run)" } else { "" });
+                println!(
+                    "ingest {date}: +{n} rows{}",
+                    if dry_run { " (dry run)" } else { "" }
+                );
             }
             Err(e) => eprintln!("ingest {date} failed: {e:#}"),
         }
     }
-    println!("{} {total} rows total", if dry_run { "would write" } else { "ingested" });
+    println!(
+        "{} {total} rows total",
+        if dry_run { "would write" } else { "ingested" }
+    );
     Ok(())
 }
 
@@ -254,11 +254,8 @@ fn load_day(
     let items_raw = fs::read_to_string(items_dir.join(format!("{date}.json")))
         .with_context(|| format!("missing items dump for {date}"))?;
     let doc: serde_json::Value = serde_json::from_str(&items_raw)?;
-    let items: Vec<NewsItem> = serde_json::from_value(
-        doc.get("items")
-            .context("no items array in dump")?
-            .clone(),
-    )?;
+    let items: Vec<NewsItem> =
+        serde_json::from_value(doc.get("items").context("no items array in dump")?.clone())?;
 
     let actions_raw = fs::read_to_string(actions_file)?;
     let actions: Vec<LlmAction> = serde_json::from_str(&actions_raw)?;
@@ -267,11 +264,7 @@ fn load_day(
 
 fn preview_day(items_dir: &Path, actions_file: &Path, date: &str) -> Result<usize> {
     let (items, actions) = load_day(items_dir, actions_file, date)?;
-<<<<<<< HEAD
     let rows = scrape::build_rows(&items, &actions, false);
-=======
-    let rows = scrape::build_rows(&items, &actions);
->>>>>>> origin/feat/next-dashboard
     for r in &rows {
         println!(
             "  {:<32} {:<16} {:<20} {} | {}",
@@ -293,11 +286,7 @@ async fn ingest_one(
 ) -> Result<usize> {
     let (items, actions) = load_day(items_dir, actions_file, date)?;
 
-<<<<<<< HEAD
     let rows = scrape::build_rows(&items, &actions, false);
-=======
-    let rows = scrape::build_rows(&items, &actions);
->>>>>>> origin/feat/next-dashboard
     let inserted = db::insert_actions(pool, &rows).await?;
     let skipped = rows.len().saturating_sub(inserted);
     if skipped > 0 {
