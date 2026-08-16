@@ -427,9 +427,6 @@ export default async function Home({
             </p>
             <div className="flex flex-wrap gap-2">
               <span className="rounded-md border border-border/80 bg-card px-2 py-1 font-mono text-[11px] text-muted-foreground">
-                🥐 bun
-              </span>
-              <span className="rounded-md border border-border/80 bg-card px-2 py-1 font-mono text-[11px] text-muted-foreground">
                 ⚡ Rust Engine
               </span>
               <span className="rounded-md border border-border/80 bg-card px-2 py-1 font-mono text-[11px] text-muted-foreground">
