@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let date = today - ChronoDuration::days(i64::from(d));
         let window = format!("after:{date} before:{}", date + ChronoDuration::days(1));
         println!("\n=== day {date} ({window}) ===");
-        match run_with_window(&gemini_key, &model, &window, SEEN_DAYS, MAX_ITEMS).await {
+        match run_with_window(&gemini_key, &model, &window, SEEN_DAYS, MAX_ITEMS, true).await {
             Ok((run_id, report)) => println!(
                 "day {date}: run {run_id} ok: seen={} new={} upserted={} llm_calls={}",
                 report.articles_seen,
@@ -46,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if args.is_empty() {
         println!("\n=== wide pass when:15d ===");
-        match run_with_window(&gemini_key, &model, "when:15d", SEEN_DAYS, MAX_ITEMS).await {
+        match run_with_window(&gemini_key, &model, "when:15d", SEEN_DAYS, MAX_ITEMS, true).await {
             Ok((run_id, report)) => println!(
                 "wide: run {run_id} ok: seen={} new={} upserted={} llm_calls={}",
                 report.articles_seen,

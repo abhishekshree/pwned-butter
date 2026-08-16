@@ -5,29 +5,58 @@ use serde_json::{json, Value};
 
 use crate::models::{LlmAction, NewsItem};
 
-const SYSTEM_PROMPT: &str = "You are a structured-data extractor for a tracker of Maharashtra \
-FDA (Food and Drug Administration) food-safety enforcement. Given JSON news items from India, \
-extract one record per food establishment that faced a concrete regulatory action.
+const BASE_PROMPT: &str = "You are a structured-data extractor for a tracker of Maharashtra \
+FDA (Food and Drug Administration) food-safety enforcement. Given JSON news items (news \
+articles and X/Twitter posts) from India, extract one record per RETAIL food business that \
+faced a concrete regulatory action: licence suspension, stop business, improvement notice, \
+sealing, seizure, or an inspection/raid with cited violations.
 
-Output JSON uses camelCase keys exactly as listed: establishment, area, city, brand, \
-operator, outletType, actionType, actionDate, violations, complianceScore, platforms, \
-details, sourceIndex.
+Scope rules:
+- Only extract places a consumer could order food from or eat at: restaurants, hotels, \
+cafés, cloud kitchens, fast-food outlets, bakeries, sweet shops, dhabas, messes, and \
+quick-commerce stores (Blinkit, Zepto, Instamart, BigBasket) that sell food.
+- Skip manufacturers, food-processing plants, warehouses, wholesale/B2B suppliers, dairy \
+plants, farms, slaughterhouses, and any non-food business.
+- If one item lists several named outlets under a single action, emit a separate record per \
+named outlet. Never invent establishments that are not named in the source.
+
+Output JSON uses camelCase keys exactly as listed: establishment, area, city, brand, operator, \
+outletType, actionType, actionDate, violations, complianceScore, platforms, details, \
+sourceIndex.
 
 Field rules:
-- establishment: the business or establishment name as reported (e.g. \"Noor Mohammadi Hotel\", \"Blink Commerce\").
-- brand: the national/brand name if applicable (Domino's, Pizza Hut, Burger King, KFC, Starbucks, Blinkit, Zepto, Swiggy Instamart), otherwise null.
-- area: locality within the city (e.g. Vile Parle West) if reported, else null.
-- city: city/locality name (Mumbai, Pune, Nashik, Satara, Karad, Palghar...).
+- establishment: the outlet name as reported (e.g. \"Noor Mohammadi Hotel\", \"Blink Commerce Malad\").
+- brand: national/chain brand if applicable (Domino's, Pizza Hut, Burger King, KFC, Blinkit, Zepto), else omit.
+- area: locality within the city (e.g. Vile Parle West), else omit.
+- city: city/locality name (Mumbai, Navi Mumbai, Thane, Pune, Nashik...).
+- outletType: one of restaurant, cloud_kitchen, quick_commerce, dhaba, hotel, bakery, club, mess, dairy, street_vendor, other.
 - actionType: one of licence_suspension, stop_business, improvement_notice, sealing, seizure, inspection, reopened.
-- actionDate: the inspection or order date in YYYY-MM-DD when stated, otherwise the article publication date.
-- violations: up to 5 short phrases summarising the cited violations (hygiene, pest infestation, expired stock, missing records, unhygienic storage...).
-- complianceScore: the reported percentage score (integer) only when the article states one, else omit.
-- platforms: delivery/quick-commerce platforms named in the article, lowercase (zomato, swiggy, blinkit, zepto, instamart, bigbasket...).
-- details: one sentence of crucial context (e.g. reopened after compliance, appeal filed), else null.
+- actionDate: inspection or order date in YYYY-MM-DD when stated, otherwise the source publication date.
+- violations: array of up to 5 short phrases summarising the cited violations (hygiene, pest \
+infestation, expired stock, missing records, unhygienic storage). Omit when none cited.
+- complianceScore: the reported percentage score (integer) only when the source states one, else omit.
+- platforms: lowercased delivery apps the outlet operates on, from the source OR from your own \
+knowledge (zomato, swiggy, blinkit, zepto, instamart, bigbasket). Omit when none applies.
+- details: one sentence of crucial context (e.g. reopened after compliance, appeal filed), else omit.
 - sourceIndex: the index of the source item this record came from (required).
 
-Return a JSON array only. If an item reports no concrete enforcement record against a named \
-establishment, skip it entirely. Optional string fields may be null.";
+Return a JSON array only. If an item reports no concrete action against a named retail food \
+outlet, skip it entirely. Optional fields may be null.";
+
+const DELIVERY_MODE: &str = "\n\nThis is a Mumbai consumer-delivery run. Additional hard rules:\n\
+- Include ONLY establishments in the Mumbai metropolitan region: Mumbai, Navi Mumbai, Thane, \
+and neighbouring suburbs (Kalyan, Dombivli, Mulund, Goregaon, Andheri, Bandra, Worli...).\n\
+- Every included record MUST list at least one of platforms: zomato, swiggy, blinkit, \
+instamart, zepto, bigbasket.\n\
+- Drop any record outside the Mumbai region or with no delivery-app presence.";
+
+fn system_prompt(delivery: bool) -> String {
+    if delivery {
+        format!("{BASE_PROMPT}{DELIVERY_MODE}")
+    } else {
+        BASE_PROMPT.to_string()
+    }
+}
 
 const MAX_ATTEMPTS: usize = 3;
 
@@ -35,12 +64,13 @@ pub async fn extract(
     api_key: &str,
     model: &str,
     items: &[NewsItem],
+    delivery: bool,
 ) -> Result<(Vec<LlmAction>, usize)> {
     if items.is_empty() {
         return Ok((Vec::new(), 0));
     }
     let payload = json!({
-        "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+        "system_instruction": {"parts": [{"text": system_prompt(delivery)}]},
         "contents": [{"parts": [{"text": serde_json::to_string(&json!({ "items": items })).context("serialize news batch")?}]}],
         "generationConfig": {
             "temperature": 0.0,
@@ -239,6 +269,19 @@ mod tests {
         let actions = parse_response(&body).unwrap();
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].action_type, ActionType::Inspection);
+    }
+
+    #[test]
+    fn tolerates_null_arrays() {
+        let body = json!({
+            "candidates": [{
+                "content": {"parts": [{"text": "[{\"establishment\":\"X\",\"actionType\":\"sealing\",\"violations\":null,\"platforms\":null,\"source_index\":0}]"}]}
+            }]
+        });
+        let actions = parse_response(&body).unwrap();
+        assert_eq!(actions.len(), 1);
+        assert!(actions[0].violations.is_empty());
+        assert!(actions[0].platforms.is_empty());
     }
 
     #[test]

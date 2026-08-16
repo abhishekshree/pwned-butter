@@ -149,7 +149,7 @@ pub struct LlmAction {
     pub action_type: ActionType,
     #[serde(default, alias = "action_date")]
     pub action_date: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_vec")]
     pub violations: Vec<String>,
     #[serde(default)]
     pub compliance_score: Option<i32>,
@@ -157,10 +157,17 @@ pub struct LlmAction {
     pub fssai_number: Option<String>,
     #[serde(default)]
     pub details: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_vec")]
     pub platforms: Vec<String>,
     #[serde(default, alias = "source_index")]
     pub source_index: usize,
+}
+
+fn deserialize_string_vec<'de, D>(de: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<Vec<String>>::deserialize(de)?.unwrap_or_default())
 }
 
 pub fn nonempty(v: Option<String>) -> Option<String> {

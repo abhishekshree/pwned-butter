@@ -93,6 +93,20 @@ pub async fn upsert_actions(pool: &PgPool, rows: &[ActionInsert]) -> Result<usiz
     let mut tx = pool.begin().await?;
     let mut affected: usize = 0;
     for r in rows {
+        let existing: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM actions
+             WHERE lower(establishment) = lower($1) AND action_date = $2
+               AND ($3::text IS NULL OR lower(coalesce(city, '')) = lower(coalesce($3, '')))
+             ORDER BY id LIMIT 1",
+        )
+        .bind(&r.establishment)
+        .bind(r.action_date)
+        .bind(&r.city)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if existing.is_some() {
+            continue;
+        }
         let res = sqlx::query(
             "INSERT INTO actions (
                 establishment, area, city, brand, operator, outlet_type, action_type,

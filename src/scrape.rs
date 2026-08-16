@@ -16,7 +16,7 @@ pub struct ScrapeReport {
 }
 
 pub async fn run_scrape(gemini_key: &str, model: &str) -> Result<(i64, ScrapeReport)> {
-    run_with_window(gemini_key, model, "when:1d", 14, news::MAX_ITEMS).await
+    run_with_window(gemini_key, model, "when:1d", 14, news::MAX_ITEMS, false).await
 }
 
 pub async fn run_with_window(
@@ -25,11 +25,16 @@ pub async fn run_with_window(
     window: &str,
     seen_days: i64,
     max_items: usize,
+    delivery: bool,
 ) -> Result<(i64, ScrapeReport)> {
     let pool = db::pool().await?;
     let run_id = db::begin_run(pool).await?;
 
-    match scrape_once(pool, gemini_key, model, window, seen_days, max_items).await {
+    match scrape_once(
+        pool, gemini_key, model, window, seen_days, max_items, delivery,
+    )
+    .await
+    {
         Ok(report) => {
             db::finish_run(
                 pool,
@@ -38,7 +43,7 @@ pub async fn run_with_window(
                 report.articles_new,
                 report.actions_upserted,
                 report.llm_calls,
-                &json!({"model": model, "window": window}),
+                &json!({"model": model, "window": window, "delivery": delivery}),
             )
             .await?;
             Ok((run_id, report))
@@ -57,6 +62,7 @@ async fn scrape_once(
     window: &str,
     seen_days: i64,
     max_items: usize,
+    delivery: bool,
 ) -> Result<ScrapeReport> {
     let client = crate::http_client();
     let seen = Utc::now() - ChronoDuration::days(seen_days);
@@ -66,8 +72,8 @@ async fn scrape_once(
     let articles_seen = items.len();
     let fresh = news::enrich(client, items, &already_seen, max_items).await;
 
-    let (actions, llm_calls) = llm::extract(gemini_key, model, &fresh).await?;
-    let rows = build_rows(&fresh, &actions);
+    let (actions, llm_calls) = llm::extract(gemini_key, model, &fresh, delivery).await?;
+    let rows = build_rows(&fresh, &actions, delivery);
     let upserted = db::upsert_actions(pool, &rows).await?;
 
     Ok(ScrapeReport {
@@ -78,10 +84,13 @@ async fn scrape_once(
     })
 }
 
-fn build_rows(items: &[NewsItem], actions: &[LlmAction]) -> Vec<ActionInsert> {
+fn build_rows(items: &[NewsItem], actions: &[LlmAction], delivery: bool) -> Vec<ActionInsert> {
     actions
         .iter()
         .filter_map(|a| {
+            if delivery && a.platforms.is_empty() {
+                return None;
+            }
             let item = items.get(a.source_index)?;
             let establishment = nonempty(Some(a.establishment.clone()))?;
             Some(ActionInsert {
@@ -145,7 +154,7 @@ mod tests {
             platforms: vec!["zomato".into()],
             source_index: 0,
         }];
-        let rows = build_rows(&items, &actions);
+        let rows = build_rows(&items, &actions, false);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].brand.as_deref(), Some("Domino's"));
         assert_eq!(rows[0].action_type, "licence_suspension");
@@ -172,7 +181,7 @@ mod tests {
             platforms: vec![],
             source_index: 0,
         };
-        let rows = build_rows(&items, &[action]);
+        let rows = build_rows(&items, &[action], false);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].outlet_type.as_deref(), Some("other"));
     }
@@ -196,6 +205,30 @@ mod tests {
             platforms: vec![],
             source_index: 5,
         };
-        assert!(build_rows(&items, &[action]).is_empty());
+        assert!(build_rows(&items, &[action], false).is_empty());
+    }
+
+    #[test]
+    fn delivery_mode_drops_unlisted_outlets() {
+        let items = vec![item("a", "b")];
+        let mut action = LlmAction {
+            establishment: "X".into(),
+            area: None,
+            city: Some("Mumbai".into()),
+            brand: None,
+            operator: None,
+            outlet_type: Some("restaurant".into()),
+            action_type: ActionType::Inspection,
+            action_date: None,
+            violations: vec![],
+            compliance_score: None,
+            fssai_number: None,
+            details: None,
+            platforms: vec![],
+            source_index: 0,
+        };
+        assert!(build_rows(&items, &[action.clone()], true).is_empty());
+        action.platforms = vec!["zomato".into(), "swiggy".into()];
+        assert_eq!(build_rows(&items, &[action], true).len(), 1);
     }
 }

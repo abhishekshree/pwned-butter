@@ -36,6 +36,13 @@ const QUERIES: &[&str] = &[
     "\"licence suspended\" \"Safe Food\" Maharashtra restaurant",
     "\"Maharashtra FDA\" prosecution",
     "\"Food Safety and Standards\" Maharashtra raid licence",
+    "site:x.com \"Maharashtra FDA\"",
+    "site:twitter.com \"Maharashtra FDA\"",
+    "site:x.com \"Maharashtra FDA\" raid OR licence OR suspend",
+    "site:x.com FDA Mumbai raid",
+    "site:x.com \"Tukaram Mundhe\"",
+    "site:x.com Mumbai restaurant FDA hygiene",
+    "site:x.com Blinkit OR Zepto OR Instamart FDA",
 ];
 
 pub const MAX_ITEMS: usize = 50;
