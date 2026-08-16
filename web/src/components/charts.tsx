@@ -6,15 +6,12 @@ import {
   Cell,
   Pie,
   PieChart,
+  ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
 
-import {
-  ChartContainer,
-  type ChartConfig,
-} from "@/components/ui/chart";
 import { CHART_COLORS, humanize } from "@/lib/format";
 import type { DimCount } from "@/lib/types";
 
@@ -44,12 +41,12 @@ function ChartTooltip({
   );
 }
 
-function configFor(data: DimCount[]): ChartConfig {
+const chartClass =
+  "h-56 w-full text-xs [&_.recharts-cartesian-axis-tick_text]:fill-muted-foreground [&_.recharts-cartesian-grid_line[stroke='#ccc']]:stroke-border/50 [&_.recharts-curve.recharts-tooltip-cursor]:stroke-border [&_.recharts-layer]:outline-hidden [&_.recharts-polar-grid_[stroke='#ccc']]:stroke-border [&_.recharts-radial-bar-background-sector]:fill-muted [&_.recharts-rectangle.recharts-tooltip-cursor]:fill-muted [&_.recharts-sector]:outline-hidden [&_.recharts-sector[stroke='#fff']]:stroke-transparent [&_.recharts-surface]:outline-hidden";
+
+function colorsFor(data: DimCount[]): Record<string, string> {
   return Object.fromEntries(
-    data.map((d, i) => [
-      d.key,
-      { label: humanize(d.key), color: CHART_COLORS[i % CHART_COLORS.length] },
-    ]),
+    data.map((d, i) => [d.key, CHART_COLORS[i % CHART_COLORS.length]]),
   );
 }
 
@@ -62,7 +59,7 @@ export function DonutChart({
   description?: string;
   data: DimCount[];
 }) {
-  const config = configFor(data);
+  const colors = colorsFor(data);
   return (
     <div className="flex flex-col gap-2">
       <div>
@@ -71,24 +68,26 @@ export function DonutChart({
           <div className="text-xs text-muted-foreground">{description}</div>
         ) : null}
       </div>
-      <ChartContainer config={config} className="h-56 w-full">
-        <PieChart>
-          <Tooltip content={<ChartTooltip />} />
-          <Pie
-            data={data}
-            dataKey="n"
-            nameKey="key"
-            innerRadius={48}
-            outerRadius={76}
-            paddingAngle={2}
-            strokeWidth={0}
-          >
-            {data.map((d) => (
-              <Cell key={d.key} fill={config[d.key]?.color} />
-            ))}
-          </Pie>
-        </PieChart>
-      </ChartContainer>
+      <div className={chartClass}>
+        <ResponsiveContainer width="100%" height="100%">
+          <PieChart>
+            <Tooltip content={<ChartTooltip />} />
+            <Pie
+              data={data}
+              dataKey="n"
+              nameKey="key"
+              innerRadius={48}
+              outerRadius={76}
+              paddingAngle={2}
+              strokeWidth={0}
+            >
+              {data.map((d) => (
+                <Cell key={d.key} fill={colors[d.key]} />
+              ))}
+            </Pie>
+          </PieChart>
+        </ResponsiveContainer>
+      </div>
     </div>
   );
 }
@@ -102,7 +101,7 @@ export function BarChartCard({
   description?: string;
   data: DimCount[];
 }) {
-  const config = configFor(data);
+  const colors = colorsFor(data);
   return (
     <div className="flex flex-col gap-2">
       <div>
@@ -111,29 +110,31 @@ export function BarChartCard({
           <div className="text-xs text-muted-foreground">{description}</div>
         ) : null}
       </div>
-      <ChartContainer config={config} className="h-56 w-full">
-        <BarChart data={data} layout="vertical" margin={{ left: 0, right: 8 }}>
-          <XAxis type="number" hide />
-          <YAxis
-            type="category"
-            dataKey="key"
-            width={86}
-            tickLine={false}
-            axisLine={false}
-            tick={{ fontSize: 11 }}
-            tickFormatter={(v: string) => humanize(v)}
-          />
-          <Tooltip
-            content={<ChartTooltip />}
-            cursor={{ fill: "rgba(128,128,128,0.08)" }}
-          />
-          <Bar dataKey="n" radius={4} barSize={14}>
-            {data.map((d) => (
-              <Cell key={d.key} fill={config[d.key]?.color} />
-            ))}
-          </Bar>
-        </BarChart>
-      </ChartContainer>
+      <div className={chartClass}>
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={data} layout="vertical" margin={{ left: 0, right: 8 }}>
+            <XAxis type="number" hide />
+            <YAxis
+              type="category"
+              dataKey="key"
+              width={86}
+              tickLine={false}
+              axisLine={false}
+              tick={{ fontSize: 11 }}
+              tickFormatter={(v: string) => humanize(v)}
+            />
+            <Tooltip
+              content={<ChartTooltip />}
+              cursor={{ fill: "rgba(128,128,128,0.08)" }}
+            />
+            <Bar dataKey="n" radius={4} barSize={14}>
+              {data.map((d) => (
+                <Cell key={d.key} fill={colors[d.key]} />
+              ))}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
     </div>
   );
 }

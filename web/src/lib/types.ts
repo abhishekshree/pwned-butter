@@ -39,12 +39,10 @@ export type RunSummary = {
 
 export type Stats = {
   totalActions: number;
-  latestActionDate: string | null;
   lastRun: RunSummary | null;
   byStatus: DimCount[];
   byActionType: DimCount[];
   byCity: DimCount[];
-  byBrand: DimCount[];
 };
 
 export type Filters = {

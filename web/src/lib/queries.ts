@@ -4,6 +4,13 @@ import type { ActionRow, DimCount, Filters, RunSummary, Stats } from "./types";
 const toInt = (v: unknown): number =>
   typeof v === "string" ? parseInt(v, 10) : Number(v ?? 0);
 
+async function queryRows<T extends Record<string, unknown>>(
+  text: string,
+  params: unknown[] = [],
+): Promise<T[]> {
+  return (await sql.query(text, params)) as T[];
+}
+
 function normalizeAction(r: Record<string, unknown>): ActionRow {
   return {
     id: toInt(r.id),
@@ -76,25 +83,40 @@ export async function listActions(
     conds.push(`action_date <= $${params.length}`);
   }
 
-  const limit = Math.min(Math.max(opts.limit, 1), 200);
-  const offset = Math.max(opts.offset, 0);
-  params.push(limit, offset);
-
   const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "WHERE true";
+  const filterParams = [...params];
+  const limit = Math.min(Math.max(opts.limit, 1), 200);
+  const offset = Math.max(Math.floor(opts.offset), 0);
   const text = `SELECT actions.*, COUNT(*) OVER()::int AS total_count FROM actions ${where}
-    ORDER BY action_date DESC, id DESC LIMIT $${params.length - 1} OFFSET $${params.length}`;
+    ORDER BY action_date DESC, id DESC LIMIT $${filterParams.length + 1} OFFSET $${filterParams.length + 2}`;
 
-  const rows = (await sql.query(text, params)) as Array<Record<string, unknown>>;
+  const rows = (await sql.query(text, [...filterParams, limit, offset])) as Array<
+    Record<string, unknown>
+  >;
+  const total = rows[0]
+    ? toInt(rows[0].total_count)
+    : offset
+      ? toInt(
+          (
+            (await sql.query(
+              `SELECT COUNT(*)::int AS total_count FROM actions ${where}`,
+              filterParams,
+            )) as Array<Record<string, unknown>>
+          )[0]?.total_count,
+        )
+      : 0;
   return {
-    total: rows[0] ? toInt(rows[0].total_count) : 0,
+    total,
     actions: rows.map(normalizeAction),
   };
 }
 
-async function dims(col: string): Promise<DimCount[]> {
+async function dims(col: string, limit?: number): Promise<DimCount[]> {
+  const query = `SELECT COALESCE(NULLIF(${col}, ''), 'unknown') AS k, COUNT(*)::int AS n
+     FROM actions GROUP BY k ORDER BY n DESC${limit ? " LIMIT $1" : ""}`;
   const rows = (await sql.query(
-    `SELECT COALESCE(NULLIF(${col}, ''), 'unknown') AS k, COUNT(*)::int AS n
-     FROM actions GROUP BY k ORDER BY n DESC`,
+    query,
+    limit ? [limit] : [],
   )) as Array<Record<string, unknown>>;
   return rows.map((r) => ({
     key: String(r.k),
@@ -131,33 +153,22 @@ function normalizeRun(r: Record<string, unknown>): RunSummary {
 }
 
 export async function getStats(): Promise<Stats> {
-  const total = (await sql.query("SELECT COUNT(*)::int AS n FROM actions")) as Array<{
-    n: unknown;
-  }>;
-  const latest = (await sql.query(
-    "SELECT COALESCE(MAX(action_date), '1970-01-01'::date)::text AS d FROM actions",
-  )) as Array<{ d: unknown }>;
-  const runs = (await sql.query(
-    `SELECT id::int AS id, started_at, finished_at, status,
+  const [total, runs, byStatus, byActionType, byCity] = await Promise.all([
+    queryRows<{ n: unknown }>("SELECT COUNT(*)::int AS n FROM actions"),
+    queryRows<Record<string, unknown>>(`SELECT id::int AS id, started_at, finished_at, status,
             articles_seen::int AS articles_seen, articles_new::int AS articles_new,
             actions_upserted::int AS actions_upserted, llm_calls::int AS llm_calls, error
-     FROM fetch_runs ORDER BY id DESC LIMIT 1`,
-  )) as Array<Record<string, unknown>>;
-
-  const [byStatus, byActionType, byCity, byBrand] = await Promise.all([
+     FROM fetch_runs ORDER BY id DESC LIMIT 1`),
     dims("status"),
     dims("action_type"),
-    dims("city"),
-    dims("brand"),
+    dims("city", 8),
   ]);
 
   return {
     totalActions: total[0] ? toInt(total[0].n) : 0,
-    latestActionDate: latest[0] ? String(latest[0].d) : null,
     lastRun: runs[0] ? normalizeRun(runs[0]) : null,
     byStatus,
     byActionType,
     byCity,
-    byBrand,
   };
 }

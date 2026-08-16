@@ -3,6 +3,7 @@ import { ArrowUpRight } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import {
   STATUS_TONES,
+  formatDate,
   humanize,
   outletTypeLabel,
 } from "@/lib/format";
@@ -27,12 +28,14 @@ export function ActionCard({ a }: { a: ActionRow }) {
       target="_blank"
       rel="noopener"
       className={cn(
-        "group flex flex-col gap-2 rounded-2xl border border-l-4 bg-card p-4 text-card-foreground shadow-sm transition hover:-translate-y-px hover:shadow-md",
+        "group flex flex-col gap-2 rounded-lg border border-l-4 bg-card p-4 text-card-foreground shadow-sm transition hover:-translate-y-px hover:shadow-md",
         EDGE_TONES[a.status] ?? "border-l-transparent",
       )}
     >
       <div className="flex items-start justify-between gap-3">
-        <time className="text-xs font-medium text-muted-foreground">{a.action_date}</time>
+        <time className="text-xs font-medium text-muted-foreground">
+          {formatDate(a.action_date)}
+        </time>
         <Badge variant="outline" className={STATUS_TONES[a.status] ?? "border-border bg-muted/40 text-muted-foreground"}>
           {humanize(a.status)}
         </Badge>

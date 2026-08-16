@@ -242,6 +242,19 @@ mod tests {
     }
 
     #[test]
+    fn tolerates_null_arrays() {
+        let body = json!({
+            "candidates": [{
+                "content": {"parts": [{"text": "[{\"establishment\":\"X\",\"actionType\":\"sealing\",\"violations\":null,\"platforms\":null,\"source_index\":0}]"}]}
+            }]
+        });
+        let actions = parse_response(&body).unwrap();
+        assert_eq!(actions.len(), 1);
+        assert!(actions[0].violations.is_empty());
+        assert!(actions[0].platforms.is_empty());
+    }
+
+    #[test]
     fn drops_unknown_action_type() {
         let body = json!({
             "candidates": [{
