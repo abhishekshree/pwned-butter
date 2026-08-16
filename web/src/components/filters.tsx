@@ -5,14 +5,14 @@ import { ChevronDown, Search, X } from "lucide-react";
 import { useRouter } from "next/navigation";
 
 import { ACTION_TYPE_LABELS } from "@/lib/format";
-import { buildHref } from "@/lib/href";
+import { activeFilter, buildHref } from "@/lib/href";
 import type { Filters } from "@/lib/types";
 
 const selectCls =
   "h-10 w-full appearance-none rounded-lg border border-border bg-card pr-8 pl-3 text-xs font-medium text-foreground outline-none transition-colors hover:border-primary/50 focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring sm:w-auto dark:bg-card/80";
 
 function selectValue(v: string | undefined, fallback: string): string {
-  return v && /^(all|any)$/i.test(v) ? "all" : v ?? fallback;
+  return activeFilter(v) ?? fallback;
 }
 
 export function Controls({

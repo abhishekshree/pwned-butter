@@ -54,12 +54,10 @@ function colorsFor(data: DimCount[]): Record<string, string> {
 
 export function DonutChart({
   title,
-  description,
   data,
   tag,
 }: {
   title: string;
-  description?: string;
   data: DimCount[];
   tag?: string;
 }) {
@@ -79,9 +77,6 @@ export function DonutChart({
           {total} total
         </span>
       </div>
-      {description ? (
-        <div className="text-xs text-muted-foreground">{description}</div>
-      ) : null}
       <div className={chartClass}>
         <ResponsiveContainer width="100%" height="100%">
           <PieChart>
@@ -108,17 +103,14 @@ export function DonutChart({
 
 export function BarChartCard({
   title,
-  description,
   data,
   tag,
 }: {
   title: string;
-  description?: string;
   data: DimCount[];
   tag?: string;
 }) {
   const colors = colorsFor(data);
-  const total = data.reduce((acc, d) => acc + (d.n || 0), 0);
 
   return (
     <div className="flex flex-col gap-3">
@@ -133,9 +125,6 @@ export function BarChartCard({
           {data.length} buckets
         </span>
       </div>
-      {description ? (
-        <div className="text-xs text-muted-foreground">{description}</div>
-      ) : null}
       <div className={chartClass}>
         <ResponsiveContainer width="100%" height="100%">
           <BarChart data={data} layout="vertical" margin={{ left: -10, right: 12, top: 4, bottom: 4 }}>

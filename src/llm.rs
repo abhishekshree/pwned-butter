@@ -237,21 +237,7 @@ fn parse_response(body: &Value) -> Result<Vec<LlmAction>> {
         }
     }
 
-    let mut seen = std::collections::HashSet::new();
-    Ok(actions
-        .into_iter()
-        .filter(|a| !a.establishment.trim().is_empty())
-        .filter(|a| {
-            let key = format!(
-                "{}|{}|{}",
-                a.source_index,
-                a.establishment.to_lowercase(),
-                a.action_type
-            );
-            seen.insert(key)
-        })
-        .map(sanitize_action)
-        .collect())
+    Ok(actions)
 }
 
 fn sanitize_action(mut a: LlmAction) -> LlmAction {

@@ -1,6 +1,7 @@
 import { unstable_cache } from "next/cache";
 
 import { sql } from "./db";
+import { activeFilter } from "./href";
 import type { ActionRow, DimCount, Filters, RunSummary, Stats } from "./types";
 
 const DAILY = { revalidate: 21600 };
@@ -12,7 +13,7 @@ async function queryRows<T extends Record<string, unknown>>(
   text: string,
   params: unknown[] = [],
 ): Promise<T[]> {
-  return (await sql.query(text, params)) as T[];
+  return (await sql(text, params)) as T[];
 }
 
 function normalizeAction(r: Record<string, unknown>): ActionRow {
@@ -45,11 +46,6 @@ function normalizeAction(r: Record<string, unknown>): ActionRow {
   };
 }
 
-function isActiveFilter(v: string | undefined): boolean {
-  const t = v?.trim();
-  return !!t && !/^(all|any)$/i.test(t);
-}
-
 export const listActions = unstable_cache(
   async (
     f: Filters,
@@ -59,8 +55,9 @@ export const listActions = unstable_cache(
     const conds: string[] = [];
 
     const eq = (col: string, v: string | undefined) => {
-      if (isActiveFilter(v)) {
-        params.push(v!.trim());
+      const val = activeFilter(v);
+      if (val) {
+        params.push(val);
         conds.push(`${col} = $${params.length}`);
       }
     };
@@ -95,7 +92,7 @@ export const listActions = unstable_cache(
     const text = `SELECT actions.*, COUNT(*) OVER()::int AS total_count FROM actions ${where}
       ORDER BY action_date DESC, id DESC LIMIT $${filterParams.length + 1} OFFSET $${filterParams.length + 2}`;
 
-    const rows = (await sql.query(text, [...filterParams, limit, offset])) as Array<
+    const rows = (await sql(text, [...filterParams, limit, offset])) as Array<
       Record<string, unknown>
     >;
     const total = rows[0]
@@ -103,7 +100,7 @@ export const listActions = unstable_cache(
       : offset
         ? toInt(
             (
-              (await sql.query(
+              (await sql(
                 `SELECT COUNT(*)::int AS total_count FROM actions ${where}`,
                 filterParams,
               )) as Array<Record<string, unknown>>
@@ -122,7 +119,7 @@ export const listActions = unstable_cache(
 async function dims(col: string, limit?: number): Promise<DimCount[]> {
   const query = `SELECT COALESCE(NULLIF(${col}, ''), 'unknown') AS k, COUNT(*)::int AS n
      FROM actions GROUP BY k ORDER BY n DESC${limit ? " LIMIT $1" : ""}`;
-  const rows = (await sql.query(
+  const rows = (await sql(
     query,
     limit ? [limit] : [],
   )) as Array<Record<string, unknown>>;
@@ -134,7 +131,7 @@ async function dims(col: string, limit?: number): Promise<DimCount[]> {
 
 export const listBrands = unstable_cache(
   async (): Promise<string[]> => {
-    const rows = (await sql.query(
+    const rows = (await sql(
       "SELECT DISTINCT brand FROM actions WHERE brand IS NOT NULL AND brand <> '' ORDER BY brand",
     )) as Array<Record<string, unknown>>;
     return rows.map((r) => String(r.brand));
@@ -145,7 +142,7 @@ export const listBrands = unstable_cache(
 
 export const listCities = unstable_cache(
   async (): Promise<string[]> => {
-    const rows = (await sql.query(
+    const rows = (await sql(
       "SELECT DISTINCT city FROM actions WHERE city IS NOT NULL AND city <> '' ORDER BY city",
     )) as Array<Record<string, unknown>>;
     return rows.map((r) => String(r.city));

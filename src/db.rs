@@ -58,6 +58,43 @@ pub struct ActionInsert {
     pub published_at: Option<DateTime<Utc>>,
 }
 
+const INSERT_TAIL: &str = "establishment, area, city, brand, operator, outlet_type, action_type,
+                action_date, violations, compliance_score, fssai_number, details,
+                platforms, source_url, source_publisher, source_headline, published_at";
+
+async fn execute_insert(
+    conn: &mut sqlx::PgConnection,
+    r: &ActionInsert,
+    conflict_tail: &str,
+) -> Result<u64> {
+    let sql = format!(
+        "INSERT INTO actions ({INSERT_TAIL}) VALUES \
+         ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) \
+         ON CONFLICT (source_url, establishment, action_date) {conflict_tail}"
+    );
+    let res = sqlx::query(&sql)
+        .bind(&r.establishment)
+        .bind(&r.area)
+        .bind(&r.city)
+        .bind(&r.brand)
+        .bind(&r.operator)
+        .bind(&r.outlet_type)
+        .bind(&r.action_type)
+        .bind(r.action_date)
+        .bind(&r.violations)
+        .bind(r.compliance_score)
+        .bind(&r.fssai_number)
+        .bind(&r.details)
+        .bind(&r.platforms)
+        .bind(&r.source_url)
+        .bind(&r.source_publisher)
+        .bind(&r.source_headline)
+        .bind(r.published_at)
+        .execute(conn)
+        .await?;
+    Ok(res.rows_affected())
+}
+
 pub async fn upsert_actions(pool: &PgPool, rows: &[ActionInsert]) -> Result<usize> {
     let mut tx = pool.begin().await?;
     let mut affected: usize = 0;
@@ -76,38 +113,17 @@ pub async fn upsert_actions(pool: &PgPool, rows: &[ActionInsert]) -> Result<usiz
         if existing.is_some() {
             continue;
         }
-        let res = sqlx::query(
-            "INSERT INTO actions (
-                establishment, area, city, brand, operator, outlet_type, action_type,
-                action_date, violations, compliance_score, fssai_number, details,
-                platforms, source_url, source_publisher, source_headline, published_at
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
-            ON CONFLICT (source_url, establishment, action_date) DO UPDATE SET
+        let affected_rows = execute_insert(
+            &mut tx,
+            r,
+            "DO UPDATE SET
                 violations = EXCLUDED.violations,
                 platforms = EXCLUDED.platforms,
                 details = EXCLUDED.details,
                 updated_at = now()",
         )
-        .bind(&r.establishment)
-        .bind(&r.area)
-        .bind(&r.city)
-        .bind(&r.brand)
-        .bind(&r.operator)
-        .bind(&r.outlet_type)
-        .bind(&r.action_type)
-        .bind(r.action_date)
-        .bind(&r.violations)
-        .bind(r.compliance_score)
-        .bind(&r.fssai_number)
-        .bind(&r.details)
-        .bind(&r.platforms)
-        .bind(&r.source_url)
-        .bind(&r.source_publisher)
-        .bind(&r.source_headline)
-        .bind(r.published_at)
-        .execute(&mut *tx)
         .await?;
-        affected += usize::try_from(res.rows_affected())?;
+        affected += usize::try_from(affected_rows)?;
     }
     tx.commit().await?;
     Ok(affected)
@@ -119,34 +135,8 @@ pub async fn insert_actions(pool: &PgPool, rows: &[ActionInsert]) -> Result<usiz
     let mut tx = pool.begin().await?;
     let mut inserted: usize = 0;
     for r in rows {
-        let res = sqlx::query(
-            "INSERT INTO actions (
-                establishment, area, city, brand, operator, outlet_type, action_type,
-                action_date, violations, compliance_score, fssai_number, details,
-                platforms, source_url, source_publisher, source_headline, published_at
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
-            ON CONFLICT (source_url, establishment, action_date) DO NOTHING",
-        )
-        .bind(&r.establishment)
-        .bind(&r.area)
-        .bind(&r.city)
-        .bind(&r.brand)
-        .bind(&r.operator)
-        .bind(&r.outlet_type)
-        .bind(&r.action_type)
-        .bind(r.action_date)
-        .bind(&r.violations)
-        .bind(r.compliance_score)
-        .bind(&r.fssai_number)
-        .bind(&r.details)
-        .bind(&r.platforms)
-        .bind(&r.source_url)
-        .bind(&r.source_publisher)
-        .bind(&r.source_headline)
-        .bind(r.published_at)
-        .execute(&mut *tx)
-        .await?;
-        inserted += usize::try_from(res.rows_affected())?;
+        let inserted_rows = execute_insert(&mut tx, r, "DO NOTHING").await?;
+        inserted += usize::try_from(inserted_rows)?;
     }
     tx.commit().await?;
     Ok(inserted)

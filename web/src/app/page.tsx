@@ -1,24 +1,18 @@
 import Link from "next/link";
 import {
-  Activity,
   AlertTriangle,
-  ArrowRight,
-  CheckCircle2,
   ChevronLeft,
   ChevronRight,
   Clock,
   GitFork,
-  Radio,
   RotateCcw,
   Shield,
-  ShieldAlert,
 } from "lucide-react";
 
 import { ActionCard } from "@/components/action-card";
 import { BarChartCard, DonutChart } from "@/components/charts";
 import { Controls } from "@/components/filters";
 import { ThemeToggle } from "@/components/theme-toggle";
-import { Badge } from "@/components/ui/badge";
 import { buttonVariants } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { formatDateTime, formatNumber } from "@/lib/format";
@@ -117,37 +111,29 @@ export default async function Home({
       label: "TOTAL ACTIONS",
       value: formatNumber(totalActions),
       sub: "Logged enforcement actions",
-      icon: Activity,
       border: "border-primary/20 hover:border-primary/40",
       indicator: "bg-blue-500",
-      accent: "text-blue-600 dark:text-blue-400",
     },
     {
       label: "SUSPENDED",
       value: formatNumber(suspendedCount),
       sub: `${totalActions > 0 ? Math.round((suspendedCount / totalActions) * 100) : 0}% of all recorded actions`,
-      icon: AlertTriangle,
       border: "border-red-500/20 hover:border-red-500/40",
       indicator: "bg-red-500",
-      accent: "text-red-600 dark:text-red-400",
     },
     {
       label: "REOPENED",
       value: formatNumber(reopenedCount),
       sub: "Cleared post-compliance verification",
-      icon: CheckCircle2,
       border: "border-emerald-500/20 hover:border-emerald-500/40",
       indicator: "bg-emerald-500",
-      accent: "text-emerald-600 dark:text-emerald-400",
     },
     {
       label: "NOTICES & RAIDS",
       value: formatNumber(activeCount),
       sub: "Active inspection hearings & seizures",
-      icon: ShieldAlert,
       border: "border-amber-500/20 hover:border-amber-500/40",
       indicator: "bg-amber-500",
-      accent: "text-amber-600 dark:text-amber-400",
     },
   ];
 
@@ -202,7 +188,6 @@ export default async function Home({
         {/* KPI Metrics Grid */}
         <section className="grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-4">
           {kpis.map((k) => {
-            const Icon = k.icon;
             return (
               <div
                 key={k.label}

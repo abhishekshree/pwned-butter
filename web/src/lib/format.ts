@@ -50,12 +50,6 @@ export const STATUS_CONFIG: Record<
   },
 };
 
-export const STATUS_TONES: Record<string, string> = {
-  suspended: "text-red-600 dark:text-red-400 border-red-500/30 bg-red-500/10",
-  active: "text-amber-600 dark:text-amber-400 border-amber-500/30 bg-amber-500/10",
-  reopened: "text-emerald-600 dark:text-emerald-400 border-emerald-500/30 bg-emerald-500/10",
-};
-
 export const CHART_COLORS = [
   "var(--chart-1)",
   "var(--chart-2)",
@@ -116,7 +110,7 @@ export function complianceTone(score: number | null): { text: string; badge: str
       bg: "bg-muted",
     };
   }
-  if (score >= 80 || score >= 4) {
+  if (score >= 4) {
     return {
       text: "text-emerald-500",
       badge: "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
@@ -124,7 +118,7 @@ export function complianceTone(score: number | null): { text: string; badge: str
       bg: "bg-emerald-500",
     };
   }
-  if (score >= 60 || score >= 3) {
+  if (score >= 3) {
     return {
       text: "text-amber-500",
       badge: "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400",
