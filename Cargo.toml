@@ -1,0 +1,53 @@
+[package]
+name = "fda-mumbai-tracker"
+version = "0.1.0"
+edition = "2021"
+description = "Daily tracker of Maharashtra FDA food-safety actions, served from Vercel (Rust) + Neon."
+license = "MIT"
+
+[lib]
+name = "fda_mumbai_tracker"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cron_scrape"
+path = "api/cron_scrape.rs"
+
+[[bin]]
+name = "actions"
+path = "api/actions.rs"
+
+[[bin]]
+name = "stats"
+path = "api/stats.rs"
+
+[[bin]]
+name = "brands"
+path = "api/brands.rs"
+
+[[bin]]
+name = "cities"
+path = "api/cities.rs"
+
+[[bin]]
+name = "local_scrape"
+path = "src/bin/local_scrape.rs"
+
+[dependencies]
+vercel_runtime = "2"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_urlencoded = "0.7"
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rss = "2"
+scraper = "0.22"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "json", "chrono", "migrate", "macros"] }
+urlencoding = "2"
+dotenvy = "0.15"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

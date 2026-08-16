@@ -1,0 +1,5 @@
+/target
+.env
+.vercel
+*.log
+.DS_Store

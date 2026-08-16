@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Maharashtra FDA Enforcement Tracker</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <div>
+      <h1>Maharashtra FDA Enforcement Tracker</h1>
+      <p class="subtitle">Daily log of food-safety actions: licence suspensions, raids, seals and more — compiled from Indian news.</p>
+    </div>
+    <a class="gh-link" href="https://github.com/abhishekshree/fda-mumbai-tracker" target="_blank" rel="noopener">Source on GitHub</a>
+  </header>
+
+  <section class="cards" id="cards"></section>
+
+  <section class="filters" id="filters">
+    <label>Brand
+      <select id="f-brand"></select>
+    </label>
+    <label>City
+      <select id="f-city"></select>
+    </label>
+    <label>Status
+      <select id="f-status">
+        <option value="all">All</option>
+        <option value="suspended">Suspended</option>
+        <option value="reopened">Reopened</option>
+        <option value="active">Active</option>
+      </select>
+    </label>
+    <label>Action
+      <select id="f-type">
+        <option value="all">All</option>
+        <option value="licence_suspension">Licence suspension</option>
+        <option value="stop_business">Stop business</option>
+        <option value="sealing">Sealing</option>
+        <option value="improvement_notice">Improvement notice</option>
+        <option value="seizure">Seizure</option>
+        <option value="inspection">Inspection</option>
+        <option value="reopened">Reopened</option>
+      </select>
+    </label>
+    <label>Search
+      <input id="f-q" type="search" placeholder="establishment, brand, area…">
+    </label>
+  </section>
+
+  <p class="muted" id="meta"></p>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>Establishment</th>
+          <th>City</th>
+          <th>Brand</th>
+          <th>Type</th>
+          <th>Action</th>
+          <th>Violations</th>
+          <th>Platforms</th>
+          <th>Source</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+  <p class="muted empty" id="empty" hidden>No records match the filters.</p>
+
+  <footer>
+    <p class="disclaimer">Compiled automatically from public news reports. Suspension is not cancellation — outlets often reopen after compliance. Every row links to its source article. Data is news-derived and may contain errors; this is not an official register.</p>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>
