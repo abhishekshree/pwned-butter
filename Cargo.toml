@@ -2,32 +2,12 @@
 name = "fda-mumbai-tracker"
 version = "0.1.0"
 edition = "2021"
-description = "Daily tracker of Maharashtra FDA food-safety actions, served from Vercel (Rust) + Neon."
+description = "A Rust ETL that tracks Maharashtra FDA food-safety actions and stores them in Neon for a Next.js dashboard."
 license = "MIT"
 
 [lib]
 name = "fda_mumbai_tracker"
 path = "src/lib.rs"
-
-[[bin]]
-name = "cron_scrape"
-path = "api/cron_scrape.rs"
-
-[[bin]]
-name = "actions"
-path = "api/actions.rs"
-
-[[bin]]
-name = "stats"
-path = "api/stats.rs"
-
-[[bin]]
-name = "brands"
-path = "api/brands.rs"
-
-[[bin]]
-name = "cities"
-path = "api/cities.rs"
 
 [[bin]]
 name = "local_scrape"
@@ -42,11 +22,9 @@ name = "backfill"
 path = "src/bin/backfill.rs"
 
 [dependencies]
-vercel_runtime = "2"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_urlencoded = "0.7"
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

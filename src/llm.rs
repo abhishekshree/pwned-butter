@@ -1,15 +1,23 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
+use tokio::sync::Semaphore;
 
 use crate::models::{LlmAction, NewsItem};
 
-const BASE_PROMPT: &str = "You are a structured-data extractor for a tracker of Maharashtra \
+pub const SYSTEM_PROMPT: &str = "You are a structured-data extractor for a tracker of Maharashtra \
+<<<<<<< HEAD
 FDA (Food and Drug Administration) food-safety enforcement. Given JSON news items (news \
 articles and X/Twitter posts) from India, extract one record per RETAIL food business that \
 faced a concrete regulatory action: licence suspension, stop business, improvement notice, \
 sealing, seizure, or an inspection/raid with cited violations.
+=======
+FDA (Food and Drug Administration) food-safety enforcement. Given JSON news items from India, \
+extract one record per food establishment that faced a concrete regulatory action.
+>>>>>>> origin/feat/next-dashboard
 
 Scope rules:
 - Only extract places a consumer could order food from or eat at: restaurants, hotels, \
@@ -25,11 +33,22 @@ outletType, actionType, actionDate, violations, complianceScore, platforms, deta
 sourceIndex.
 
 Field rules:
+<<<<<<< HEAD
 - establishment: the outlet name as reported (e.g. \"Noor Mohammadi Hotel\", \"Blink Commerce Malad\").
 - brand: national/chain brand if applicable (Domino's, Pizza Hut, Burger King, KFC, Blinkit, Zepto), else omit.
 - area: locality within the city (e.g. Vile Parle West), else omit.
 - city: city/locality name (Mumbai, Navi Mumbai, Thane, Pune, Nashik...).
 - outletType: one of restaurant, cloud_kitchen, quick_commerce, dhaba, hotel, bakery, club, mess, dairy, street_vendor, other.
+=======
+- Only food outlets count: restaurants, hotels, dhabas, eateries, cafes, bakeries, cloud
+  kitchens and quick-commerce dark stores (Zomato, Swiggy, Blinkit, Instamart, Zepto, Restrow...).
+  If an article names no such establishment, skip it entirely, even if it reports a raid,
+  seizure or complaint trend in general.
+- establishment: the business or establishment name as reported (e.g. \"Noor Mohammadi Hotel\", \"Blink Commerce\").
+- brand: the national/brand name if applicable (Domino's, Pizza Hut, Burger King, KFC, Starbucks, Blinkit, Zepto, Swiggy Instamart), otherwise null.
+- area: locality within the city (e.g. Vile Parle West) if reported, else null.
+- city: city/locality name (Mumbai, Pune, Nashik, Satara, Karad, Palghar...).
+>>>>>>> origin/feat/next-dashboard
 - actionType: one of licence_suspension, stop_business, improvement_notice, sealing, seizure, inspection, reopened.
 - actionDate: inspection or order date in YYYY-MM-DD when stated, otherwise the source publication date.
 - violations: array of up to 5 short phrases summarising the cited violations (hygiene, pest \
@@ -52,13 +71,15 @@ instamart, zepto, bigbasket.\n\
 
 fn system_prompt(delivery: bool) -> String {
     if delivery {
-        format!("{BASE_PROMPT}{DELIVERY_MODE}")
+        format!("{SYSTEM_PROMPT}{DELIVERY_MODE}")
     } else {
-        BASE_PROMPT.to_string()
+        SYSTEM_PROMPT.to_string()
     }
 }
 
 const MAX_ATTEMPTS: usize = 3;
+const BATCH_SIZE: usize = 20;
+const MAX_CONCURRENT: usize = 2;
 
 pub async fn extract(
     api_key: &str,
@@ -69,12 +90,86 @@ pub async fn extract(
     if items.is_empty() {
         return Ok((Vec::new(), 0));
     }
+
+    let api_key = api_key.to_owned();
+    let model = model.to_owned();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let sem = Arc::new(Semaphore::new(MAX_CONCURRENT));
+    let mut tasks = Vec::new();
+
+    for (offset, chunk) in items.chunks(BATCH_SIZE).enumerate() {
+        let sem = Arc::clone(&sem);
+        let requests = Arc::clone(&requests);
+        let api_key = api_key.clone();
+        let model = model.clone();
+        let chunk = chunk.to_vec();
+        tasks.push(tokio::spawn(async move {
+            let _permit = sem.acquire_owned().await.expect("semaphore closed");
+            let batch = extract_batch(&api_key, &model, &chunk, &requests).await;
+            (offset, batch)
+        }));
+    }
+
+    let batch_count = tasks.len();
+    let mut actions: Vec<LlmAction> = Vec::new();
+    let mut failed = 0usize;
+    for task in tasks {
+        let (offset, result) = task.await.context("llm batch task join")?;
+        match result {
+            Ok(mut batch) => {
+                apply_offset(&mut batch, offset * BATCH_SIZE);
+                actions.append(&mut batch);
+            }
+            Err(e) => {
+                failed += 1;
+                eprintln!("llm batch {offset} failed: {e}");
+            }
+        }
+    }
+
+    let calls = requests.load(Ordering::Relaxed);
+    if failed == batch_count {
+        return Err(anyhow!("all {batch_count} llm batches failed"));
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    actions = actions
+        .into_iter()
+        .filter(|a| !a.establishment.trim().is_empty())
+        .filter(|a| {
+            let key = format!(
+                "{}|{}|{}",
+                a.source_index,
+                a.establishment.to_lowercase(),
+                a.action_type
+            );
+            seen.insert(key)
+        })
+        .map(sanitize_action)
+        .collect();
+
+    Ok((actions, calls))
+}
+
+fn apply_offset(actions: &mut [LlmAction], offset: usize) {
+    for a in actions.iter_mut() {
+        a.source_index += offset;
+    }
+}
+
+async fn extract_batch(
+    api_key: &str,
+    model: &str,
+    items: &[NewsItem],
+    requests: &AtomicUsize,
+) -> Result<Vec<LlmAction>> {
     let payload = json!({
         "system_instruction": {"parts": [{"text": system_prompt(delivery)}]},
         "contents": [{"parts": [{"text": serde_json::to_string(&json!({ "items": items })).context("serialize news batch")?}]}],
         "generationConfig": {
             "temperature": 0.0,
-            "responseMimeType": "application/json"
+            "responseMimeType": "application/json",
+            "maxOutputTokens": 8192
         }
     });
     let url = format!(
@@ -83,6 +178,7 @@ pub async fn extract(
     let client = crate::http_client();
 
     for attempt in 0..MAX_ATTEMPTS {
+        requests.fetch_add(1, Ordering::Relaxed);
         let resp = match client.post(&url).json(&payload).send().await {
             Ok(r) => r,
             Err(e) => {
@@ -93,8 +189,7 @@ pub async fn extract(
         };
         if resp.status().is_success() {
             let body: Value = resp.json().await.context("gemini json")?;
-            let actions = parse_response(&body)?;
-            return Ok((actions, 1));
+            return parse_response(&body);
         }
         let status = resp.status();
         let text = resp
@@ -292,5 +387,34 @@ mod tests {
             }]
         });
         assert_eq!(parse_response(&body).unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn empty_items_skip_llm() {
+        let (actions, calls) = extract("key", "model", &[]).await.unwrap();
+        assert!(actions.is_empty());
+        assert_eq!(calls, 0);
+    }
+
+    #[test]
+    fn applies_batch_offset_to_source_index() {
+        let mut a = LlmAction {
+            establishment: "X".into(),
+            area: None,
+            city: None,
+            brand: None,
+            operator: None,
+            outlet_type: None,
+            action_type: ActionType::Inspection,
+            action_date: None,
+            violations: vec![],
+            compliance_score: None,
+            fssai_number: None,
+            details: None,
+            platforms: vec![],
+            source_index: 3,
+        };
+        apply_offset(std::slice::from_mut(&mut a), 40);
+        assert_eq!(a.source_index, 43);
     }
 }

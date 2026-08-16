@@ -84,7 +84,11 @@ async fn scrape_once(
     })
 }
 
-fn build_rows(items: &[NewsItem], actions: &[LlmAction], delivery: bool) -> Vec<ActionInsert> {
+<<<<<<< HEAD
+pub fn build_rows(items: &[NewsItem], actions: &[LlmAction], delivery: bool) -> Vec<ActionInsert> {
+=======
+pub fn build_rows(items: &[NewsItem], actions: &[LlmAction]) -> Vec<ActionInsert> {
+>>>>>>> origin/feat/next-dashboard
     actions
         .iter()
         .filter_map(|a| {
