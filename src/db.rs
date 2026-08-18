@@ -153,10 +153,11 @@ pub async fn replace_actions(
     rows: &[ActionInsert],
 ) -> Result<(usize, usize)> {
     let mut tx = pool.begin().await?;
-    let deleted = sqlx::query("DELETE FROM actions WHERE published_at >= $1 OR action_date >= $1::date")
-        .bind(since)
-        .execute(&mut *tx)
-        .await?;
+    let deleted =
+        sqlx::query("DELETE FROM actions WHERE published_at >= $1 OR action_date >= $1::date")
+            .bind(since)
+            .execute(&mut *tx)
+            .await?;
 
     let mut inserted = 0usize;
     let mut kept: Vec<&ActionInsert> = Vec::new();

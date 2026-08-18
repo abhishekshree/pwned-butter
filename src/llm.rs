@@ -282,7 +282,9 @@ async fn openrouter_with_model(
         }
         tokio::time::sleep(retry_delay(attempt, retry_after)).await;
     }
-    Err(anyhow!("openrouter {model} failed after {OPENROUTER_MAX_ATTEMPTS} attempts"))
+    Err(anyhow!(
+        "openrouter {model} failed after {OPENROUTER_MAX_ATTEMPTS} attempts"
+    ))
 }
 
 fn parse_response(body: &Value) -> Result<Vec<LlmAction>> {
@@ -491,7 +493,8 @@ mod tests {
     }
 
     #[test]
-    fn applies_batch_offset_to_source_index() {        let mut a = LlmAction {
+    fn applies_batch_offset_to_source_index() {
+        let mut a = LlmAction {
             establishment: "X".into(),
             area: None,
             city: None,
