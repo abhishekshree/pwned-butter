@@ -2,6 +2,7 @@ import {
   ArrowUpRight,
   Building2,
   Calendar,
+  ChevronDown,
   MapPin,
   Newspaper,
   ShieldAlert,
@@ -111,30 +112,33 @@ export function ActionCard({ a }: { a: ActionRow }) {
           </p>
         ) : null}
 
-        {/* Violations Callout (Compact) */}
+        {/* Violations Callout (Compact, expandable) */}
         {violations.length ? (
-          <div className="rounded-md border border-amber-500/20 bg-amber-500/5 px-2.5 py-1.5">
-            <div className="flex items-center gap-1 font-mono text-[10px] font-semibold text-amber-600 dark:text-amber-400">
-              <ShieldAlert className="size-3 shrink-0" />
-              <span>VIOLATIONS ({violations.length})</span>
-            </div>
-            <ul className="mt-1 space-y-0.5">
-              {violations.slice(0, 2).map((v) => (
+          <details className="group rounded-md border border-amber-500/20 bg-amber-500/5 px-2.5 py-1.5">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-1 font-mono text-[10px] font-semibold text-amber-600 dark:text-amber-400">
+              <span className="flex items-center gap-1">
+                <ShieldAlert className="size-3 shrink-0" />
+                <span>
+                  VIOLATIONS ({violations.length})
+                  {violations.length > 2
+                    ? ` — ${violations.length - 2} more cited`
+                    : ""}
+                </span>
+              </span>
+              <ChevronDown className="size-3 transition-transform group-open:rotate-180" />
+            </summary>
+            <ul className="mt-1.5 space-y-1">
+              {violations.map((v) => (
                 <li
                   key={v}
                   className="flex items-start gap-1.5 text-[11px] leading-snug text-foreground/85"
                 >
                   <span className="mt-1 size-1 shrink-0 rounded-full bg-amber-500" />
-                  <span className="line-clamp-1">{v}</span>
+                  <span>{v}</span>
                 </li>
               ))}
-              {violations.length > 2 ? (
-                <li className="font-mono text-[10px] text-muted-foreground">
-                  +{violations.length - 2} more violations cited
-                </li>
-              ) : null}
             </ul>
-          </div>
+          </details>
         ) : null}
 
         {/* Badges row: Platforms & Compliance */}

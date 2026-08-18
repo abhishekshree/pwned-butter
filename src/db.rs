@@ -142,6 +142,51 @@ pub async fn insert_actions(pool: &PgPool, rows: &[ActionInsert]) -> Result<usiz
     Ok(inserted)
 }
 
+/// Replace a date window of rows with a fresh, deduped extraction. Rows are
+/// deleted by published_at/action_date (Google News URLs rotate between
+/// fetches, so source_url is not a stable key), then inserted with
+/// within-batch dedup on (action_date, city, establishment-name overlap).
+/// Returns (deleted, inserted).
+pub async fn replace_actions(
+    pool: &PgPool,
+    since: DateTime<Utc>,
+    rows: &[ActionInsert],
+) -> Result<(usize, usize)> {
+    let mut tx = pool.begin().await?;
+    let deleted = sqlx::query("DELETE FROM actions WHERE published_at >= $1 OR action_date >= $1::date")
+        .bind(since)
+        .execute(&mut *tx)
+        .await?;
+
+    let mut inserted = 0usize;
+    let mut kept: Vec<&ActionInsert> = Vec::new();
+    for r in rows {
+        if kept.iter().any(|k| {
+            k.action_date == r.action_date
+                && k.city == r.city
+                && name_overlap(&k.establishment, &r.establishment) > 0
+        }) {
+            continue;
+        }
+        inserted += usize::try_from(execute_insert(&mut tx, r, "DO NOTHING").await?)?;
+        kept.push(r);
+    }
+
+    tx.commit().await?;
+    Ok((usize::try_from(deleted.rows_affected())?, inserted))
+}
+
+fn name_overlap(a: &str, b: &str) -> usize {
+    let tokens = |s: &str| -> HashSet<String> {
+        s.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    tokens(a).intersection(&tokens(b)).count()
+}
+
 pub async fn begin_run(pool: &PgPool) -> Result<i64> {
     let row = sqlx::query("INSERT INTO fetch_runs (status) VALUES ('running') RETURNING id")
         .fetch_one(pool)
