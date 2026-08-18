@@ -105,11 +105,9 @@ export function ActionCard({ a }: { a: ActionRow }) {
           ) : null}
         </div>
 
-        {/* Action Details (Clamped if long) */}
+        {/* Action Details (Full) */}
         {a.details ? (
-          <p className="text-xs leading-relaxed text-muted-foreground/90 line-clamp-2">
-            {a.details}
-          </p>
+          <p className="text-xs leading-relaxed text-muted-foreground/90">{a.details}</p>
         ) : null}
 
         {/* Violations Callout (Compact, expandable) */}
