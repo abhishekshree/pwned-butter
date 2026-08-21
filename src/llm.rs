@@ -25,8 +25,14 @@ const MAX_ATTEMPTS: usize = 6;
 fn retry_delay(attempt: usize, retry_after: Option<u64>) -> Duration {
     let secs = retry_after
         .map(|s| s.min(120))
-        .unwrap_or_else(|| (15u64 * (1u64 << attempt.min(4))).min(60));
-    Duration::from_secs(secs)
+        .unwrap_or_else(|| (15u64 * (1u64 << attempt.min(4))).min(120));
+    // full jitter (Google/AWS rec): shave up to half so concurrent batches
+    // don't re-hit the API in lockstep; nanos are enough entropy for 2 workers
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|t| t.subsec_nanos() as u64)
+        .unwrap_or(0);
+    Duration::from_secs(secs - nanos % (secs / 2 + 1))
 }
 const BATCH_SIZE: usize = 20;
 const MAX_CONCURRENT: usize = 2;
@@ -141,9 +147,9 @@ async fn extract_batch(
     let payload = json!({
         "system_instruction": {"parts": [{"text": system_prompt(delivery)}]},
         "contents": [{"parts": [{"text": serde_json::to_string(&json!({ "items": items })).context("serialize news batch")?}]}],
+        "tools": [{"google_search": {}}],
         "generationConfig": {
             "temperature": 0.0,
-            "responseMimeType": "application/json",
             "maxOutputTokens": 8192
         }
     });
@@ -165,7 +171,20 @@ async fn extract_batch(
         };
         if resp.status().is_success() {
             let body: Value = resp.json().await.context("gemini json")?;
-            return parse_response(&body);
+            let text = response_text(&body)?;
+            if text.trim().is_empty() {
+                // ponytail: thinking models can burn the token budget and return
+                // 200 with zero text; retry, then OpenRouter via the normal path
+                let finish = body["candidates"][0]["finishReason"]
+                    .as_str()
+                    .unwrap_or("unknown");
+                eprintln!(
+                    "gemini empty response (finishReason={finish}), attempt {attempt}; retrying"
+                );
+                tokio::time::sleep(retry_delay(attempt, None)).await;
+                continue;
+            }
+            return parse_llm_text(&text);
         }
         let status = resp.status();
         let retry_after = resp
@@ -287,8 +306,8 @@ async fn openrouter_with_model(
     ))
 }
 
-fn parse_response(body: &Value) -> Result<Vec<LlmAction>> {
-    let text: String = body
+fn response_text(body: &Value) -> Result<String> {
+    Ok(body
         .get("candidates")
         .and_then(|c| c.as_array())
         .and_then(|c| c.first())
@@ -302,9 +321,7 @@ fn parse_response(body: &Value) -> Result<Vec<LlmAction>> {
                 .collect::<Vec<_>>()
                 .join("")
         })
-        .ok_or_else(|| anyhow!("no text in gemini response"))?;
-
-    parse_llm_text(&text)
+        .unwrap_or_default())
 }
 
 fn parse_llm_text(text: &str) -> Result<Vec<LlmAction>> {
@@ -419,7 +436,7 @@ mod tests {
                 "content": {"parts": [{"text": "[{\"establishment\":\"Domino's\",\"actionType\":\"licence_suspension\",\"sourceIndex\":0}]"}]}
             }]
         });
-        let actions = parse_response(&body).unwrap();
+        let actions = parse_llm_text(&response_text(&body).unwrap()).unwrap();
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].establishment, "Domino's");
         assert_eq!(actions[0].action_type, ActionType::LicenceSuspension);
@@ -432,7 +449,7 @@ mod tests {
                 "content": {"parts": [{"text": "[{\"establishment\":\"X\",\"action_type\":\"inspection\",\"source_index\":0}]"}]}
             }]
         });
-        let actions = parse_response(&body).unwrap();
+        let actions = parse_llm_text(&response_text(&body).unwrap()).unwrap();
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].action_type, ActionType::Inspection);
     }
@@ -444,7 +461,7 @@ mod tests {
                 "content": {"parts": [{"text": "[{\"establishment\":\"X\",\"actionType\":\"sealing\",\"violations\":null,\"platforms\":null,\"source_index\":0}]"}]}
             }]
         });
-        let actions = parse_response(&body).unwrap();
+        let actions = parse_llm_text(&response_text(&body).unwrap()).unwrap();
         assert_eq!(actions.len(), 1);
         assert!(actions[0].violations.is_empty());
         assert!(actions[0].platforms.is_empty());
@@ -457,7 +474,12 @@ mod tests {
                 "content": {"parts": [{"text": "[{\"establishment\":\"X\",\"actionType\":\"bogus\",\"sourceIndex\":0}]"}]}
             }]
         });
-        assert_eq!(parse_response(&body).unwrap().len(), 0);
+        assert_eq!(
+            parse_llm_text(&response_text(&body).unwrap())
+                .unwrap()
+                .len(),
+            0
+        );
     }
 
     #[tokio::test]
@@ -468,13 +490,24 @@ mod tests {
     }
 
     #[test]
+    fn empty_parts_yield_empty_text() {
+        let body = json!({
+            "candidates": [{"finishReason": "MAX_TOKENS", "content": {"parts": []}}]
+        });
+        assert_eq!(response_text(&body).unwrap(), "");
+        assert!(response_text(&json!({})).unwrap().is_empty());
+    }
+
+    #[test]
     fn retry_delay_backs_off_and_caps() {
-        assert_eq!(retry_delay(0, None).as_secs(), 15);
-        assert_eq!(retry_delay(1, None).as_secs(), 30);
-        assert_eq!(retry_delay(2, None).as_secs(), 60);
-        assert_eq!(retry_delay(5, None).as_secs(), 60);
-        assert_eq!(retry_delay(0, Some(5)).as_secs(), 5);
-        assert_eq!(retry_delay(0, Some(300)).as_secs(), 120);
+        let d = |a: usize| retry_delay(a, None).as_secs();
+        assert!((8..=15).contains(&d(0)));
+        assert!((15..=30).contains(&d(1)));
+        assert!((30..=60).contains(&d(2)));
+        assert!((60..=120).contains(&d(3)));
+        assert!((60..=120).contains(&d(5)));
+        assert!((3..=5).contains(&retry_delay(0, Some(5)).as_secs()));
+        assert!((60..=120).contains(&retry_delay(0, Some(300)).as_secs()));
     }
 
     #[test]
