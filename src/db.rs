@@ -99,18 +99,27 @@ pub async fn upsert_actions(pool: &PgPool, rows: &[ActionInsert]) -> Result<usiz
     let mut tx = pool.begin().await?;
     let mut affected: usize = 0;
     for r in rows {
-        let existing: Option<i64> = sqlx::query_scalar(
-            "SELECT id FROM actions
-             WHERE lower(establishment) = lower($1) AND action_date = $2
-               AND ($3::text IS NULL OR lower(coalesce(city, '')) = lower(coalesce($3, '')))
-             ORDER BY id LIMIT 1",
+        // Same outlet + same action within ±5 days = one event, re-reported by
+        // another outlet. SQL narrows to the window; name matching tolerates
+        // qualifier variants ("Otters Club" vs "Otters Club, Carter Road").
+        // ponytail: containment match, so "KFC" vs "KFC Andheri" still slips
+        // through; switch to pg_trgm similarity if variants show up in practice.
+        let candidates: Vec<String> = sqlx::query(
+            "SELECT establishment FROM actions
+             WHERE action_type = $1
+               AND action_date BETWEEN $2 - 5 AND $2 + 5",
         )
-        .bind(&r.establishment)
+        .bind(&r.action_type)
         .bind(r.action_date)
-        .bind(&r.city)
-        .fetch_optional(&mut *tx)
-        .await?;
-        if existing.is_some() {
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .filter_map(|row| row.try_get(0).ok())
+        .collect();
+        if candidates
+            .iter()
+            .any(|name| same_event(name, &r.establishment))
+        {
             continue;
         }
         let affected_rows = execute_insert(
@@ -188,6 +197,25 @@ fn name_overlap(a: &str, b: &str) -> usize {
     tokens(a).intersection(&tokens(b)).count()
 }
 
+/// True when two establishment names refer to the same outlet: exact
+/// (case/punctuation-insensitive) or one name containing the other, so a bare
+/// name and its qualified variant collapse to one event.
+fn same_event(a: &str, b: &str) -> bool {
+    let norm = |s: &str| -> String {
+        s.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let (a, b) = (norm(a), norm(b));
+    if a == b {
+        return true;
+    }
+    // containment of a very short name is too loose ("KFC" everywhere)
+    a.len().min(b.len()) >= 6 && (a.contains(&b) || b.contains(&a))
+}
+
 pub async fn begin_run(pool: &PgPool) -> Result<i64> {
     let row = sqlx::query("INSERT INTO fetch_runs (status) VALUES ('running') RETURNING id")
         .fetch_one(pool)
@@ -240,4 +268,30 @@ pub async fn mark_stale_runs(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_event;
+
+    #[test]
+    fn same_event_matches_variants_not_branches() {
+        assert!(same_event("Otters Club", "otters club"));
+        assert!(same_event(
+            "Otters Club",
+            "Otters Club, Carter Road, Bandra West"
+        ));
+        assert!(same_event(
+            "Blinkit Dark Store (Malad West)",
+            "Blinkit Dark Store Malad West"
+        ));
+        assert!(!same_event(
+            "Domino's Pizza (Borivali West)",
+            "Domino's Pizza (Ghatkopar West)"
+        ));
+        assert!(!same_event("Domino's Pizza", "Pizza Hut Borivali"));
+        // short names only match exactly
+        assert!(!same_event("KFC", "KFC Andheri"));
+        assert!(same_event("KFC", "kfc"));
+    }
 }
