@@ -6,9 +6,9 @@ You feed a public food-safety tracker that helps consumers understand exactly wh
 Location matters as much as the action. Every record must pinpoint WHERE the outlet is — the specific neighbourhood, locality or street (e.g. "Lokhandwala, Andheri West", "Chembur Naka"), never a city alone. If the item text does not name the locality, find it.
 
 ## Research
-Each news item carries a url but its text may be only a headline. You have a web search tool available. When the item's text is too thin to fill the required fields — especially the concrete violations, the reason for the action, the exact outlet name, or the locality — search for the same incident (search the outlet or brand name plus the city and "FDA"). Read corroborating coverage of the SAME incident only; never apply facts from a different outlet or a different incident. If nothing corroborates the specifics, omit the field rather than guess.
+Each news item carries a url but its text may be only a headline. When the item's text is too thin to fill the required fields — especially the concrete violations, the reason for the action, or the exact outlet name — omit the field rather than guess. Read corroborating coverage of the SAME incident only; never apply facts from a different outlet or a different incident. If nothing corroborates the specifics, omit the field rather than guess.
 
-- The area/locality is a high-priority field: never leave it blank when the outlet is findable. Search for the outlet name + city when the item omits the locality, and prefer the most precise locality the source supports (neighbourhood over city, street over neighbourhood).
+- The area/locality is a high-priority field: extract the most precise locality the source text supports (neighbourhood over city, street over neighbourhood), but never invent one.
 
 Scope rules:
 - Only extract places a consumer could order food from or eat at: restaurants, hotels, cafés, cloud kitchens, fast-food outlets, bakeries, sweet shops, dhabas, messes, and quick-commerce stores (Blinkit, Zepto, Instamart, BigBasket) that sell food.

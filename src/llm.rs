@@ -147,9 +147,9 @@ async fn extract_batch(
     let payload = json!({
         "system_instruction": {"parts": [{"text": system_prompt(delivery)}]},
         "contents": [{"parts": [{"text": serde_json::to_string(&json!({ "items": items })).context("serialize news batch")?}]}],
-        "tools": [{"google_search": {}}],
         "generationConfig": {
             "temperature": 0.0,
+            "responseMimeType": "application/json",
             "maxOutputTokens": 8192
         }
     });
