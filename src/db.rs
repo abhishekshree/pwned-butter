@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
+use serde::Serialize;
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
@@ -22,6 +23,40 @@ pub async fn pool() -> Result<&'static PgPool> {
         .await
         .context("connect to neon")?;
     Ok(POOL.get_or_init(|| pool))
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecentEvent {
+    pub establishment: String,
+    pub action_type: String,
+    pub action_date: NaiveDate,
+    pub city: Option<String>,
+    pub area: Option<String>,
+}
+
+/// Establishments acted against in the last `days` days, for the LLM
+/// duplicate-grouping pass. Capped to bound prompt size.
+pub async fn recent_events(pool: &PgPool, days: i64) -> Result<Vec<RecentEvent>> {
+    let rows = sqlx::query(
+        "SELECT establishment, action_type, action_date, city, area FROM actions \
+         WHERE action_date >= CURRENT_DATE - $1 \
+         ORDER BY action_date DESC LIMIT 200",
+    )
+    .bind(days)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .filter_map(|r| {
+            Some(RecentEvent {
+                establishment: r.try_get(0).ok()?,
+                action_type: r.try_get(1).ok()?,
+                action_date: r.try_get(2).ok()?,
+                city: r.try_get(3).ok(),
+                area: r.try_get(4).ok(),
+            })
+        })
+        .collect())
 }
 
 pub async fn seen_urls(pool: &PgPool, cutoff: DateTime<Utc>) -> Result<HashSet<String>> {

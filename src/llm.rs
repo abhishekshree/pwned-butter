@@ -3,14 +3,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use chrono::NaiveDate;
 use serde_json::{json, Value};
 use tokio::sync::Semaphore;
 
+use crate::db::{ActionInsert, RecentEvent};
 use crate::models::{LlmAction, NewsItem};
 
 pub const SYSTEM_PROMPT: &str = include_str!("prompts/system.txt");
 
 const DELIVERY_MODE: &str = include_str!("prompts/delivery.txt");
+const DEDUPE_PROMPT: &str = include_str!("prompts/dedupe.txt");
 
 fn system_prompt(delivery: bool) -> String {
     if delivery {
@@ -135,6 +138,160 @@ fn apply_offset(actions: &mut [LlmAction], offset: usize) {
     for a in actions.iter_mut() {
         a.source_index += offset;
     }
+}
+
+/// Ask Gemini which of today's records describe an event already covered by
+/// another record or a recent DB row. Returns indices into `rows` to drop and
+/// the number of API calls used. Best effort: on any failure returns no drops
+/// so the name-heuristic dedup in db::upsert_actions stays the safety net.
+pub async fn collapse_dupes(
+    api_key: &str,
+    model: &str,
+    rows: &[ActionInsert],
+    recent: &[RecentEvent],
+) -> (Vec<usize>, usize) {
+    let requests = AtomicUsize::new(0);
+    let result = collapse_once(api_key, model, rows, recent, &requests).await;
+    let calls = requests.load(Ordering::Relaxed);
+    match result {
+        Ok(drops) => (drops, calls),
+        Err(e) => {
+            eprintln!("dupe-collapse llm failed ({e:#}); using name heuristics only");
+            (Vec::new(), calls)
+        }
+    }
+}
+
+async fn collapse_once(
+    api_key: &str,
+    model: &str,
+    rows: &[ActionInsert],
+    recent: &[RecentEvent],
+    requests: &AtomicUsize,
+) -> Result<Vec<usize>> {
+    let record = |id_prefix: &str,
+                  establishment: &str,
+                  action_type: &str,
+                  action_date: NaiveDate,
+                  city: &Option<String>,
+                  area: &Option<String>| {
+        json!({
+            "id": format!("{id_prefix}"),
+            "establishment": establishment,
+            "actionType": action_type,
+            "actionDate": action_date.to_string(),
+            "city": city,
+            "area": area,
+        })
+    };
+    let new_items: Vec<Value> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            record(
+                &format!("N{i}"),
+                &r.establishment,
+                &r.action_type,
+                r.action_date,
+                &r.city,
+                &r.area,
+            )
+        })
+        .collect();
+    let known_items: Vec<Value> = recent
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            record(
+                &format!("K{i}"),
+                &e.establishment,
+                &e.action_type,
+                e.action_date,
+                &e.city,
+                &e.area,
+            )
+        })
+        .collect();
+
+    let payload = json!({
+        "system_instruction": {"parts": [{"text": DEDUPE_PROMPT}]},
+        "contents": [{"parts": [{"text": serde_json::to_string(
+            &json!({"new": new_items, "known": known_items})
+        ).context("serialize dupe payload")?}]}],
+        "generationConfig": {
+            "temperature": 0.0,
+            "responseMimeType": "application/json",
+            "maxOutputTokens": 2048
+        }
+    });
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    );
+    requests.fetch_add(1, Ordering::Relaxed);
+    let resp = crate::http_client()
+        .post(&url)
+        .json(&payload)
+        .send()
+        .await?;
+    let status = resp.status();
+    let body: Value = resp.json().await.context("gemini dupe json body")?;
+    if !status.is_success() {
+        anyhow::bail!("gemini http {status}");
+    }
+    let text = response_text(&body)?;
+    if text.trim().is_empty() {
+        anyhow::bail!("gemini returned empty response");
+    }
+    Ok(drops_from_groups(&parse_groups(&text)?, rows.len()))
+}
+
+fn parse_groups(text: &str) -> Result<Vec<Vec<String>>> {
+    let stripped = strip_code_fences(text.trim());
+    let parsed: Value = serde_json::from_str(&stripped).map_err(|e| {
+        anyhow!(
+            "dupe response invalid JSON: {e}; body: {}",
+            truncate(text, 300)
+        )
+    })?;
+    let groups = parsed
+        .get("groups")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("dupe response missing \"groups\" array"))?;
+    Ok(groups
+        .iter()
+        .filter_map(|g| g.as_array())
+        .map(|ids| {
+            ids.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .filter(|g| !g.is_empty())
+        .collect())
+}
+
+/// A group means "these ids are one event". If it touches a known row, every
+/// new id in it is a re-report and gets dropped; otherwise the lowest-indexed
+/// new id survives as the canonical record. Unknown or out-of-range ids are
+/// ignored.
+fn drops_from_groups(groups: &[Vec<String>], n_new: usize) -> Vec<usize> {
+    let mut drop = std::collections::BTreeSet::new();
+    for group in groups {
+        let mut news: Vec<usize> = group
+            .iter()
+            .filter_map(|id| id.strip_prefix('N').and_then(|n| n.parse().ok()))
+            .filter(|i| *i < n_new)
+            .collect();
+        news.sort_unstable();
+        news.dedup();
+        if news.is_empty() {
+            continue;
+        }
+        let touches_known = group.iter().any(|id| id.starts_with('K'));
+        for i in news.iter().skip(usize::from(!touches_known)) {
+            drop.insert(*i);
+        }
+    }
+    drop.into_iter().collect()
 }
 
 async fn extract_batch(
@@ -545,5 +702,39 @@ mod tests {
         };
         apply_offset(std::slice::from_mut(&mut a), 40);
         assert_eq!(a.source_index, 43);
+    }
+
+    #[test]
+    fn parses_group_response_shapes() {
+        assert_eq!(
+            parse_groups(r#"{"groups": [["N0","N2"], ["K1","N5"]]}"#).unwrap(),
+            vec![
+                vec!["N0".to_string(), "N2".to_string()],
+                vec!["K1".to_string(), "N5".to_string()]
+            ]
+        );
+        assert_eq!(
+            parse_groups("```json\n{\"groups\": []}\n```").unwrap(),
+            Vec::<Vec<String>>::new()
+        );
+        assert!(parse_groups("no json").is_err());
+        assert!(parse_groups(r#"{"actions": []}"#).is_err());
+    }
+
+    #[test]
+    fn drops_rereports_keeps_one_per_event() {
+        // pure new-vs-new group: keep lowest index
+        assert_eq!(
+            drops_from_groups(&[vec!["N3".into(), "N1".into(), "N7".into()]], 10),
+            vec![3, 7]
+        );
+        // group touching a known row: every new id is a re-report
+        assert_eq!(
+            drops_from_groups(&[vec!["K4".into(), "N2".into()]], 10),
+            vec![2]
+        );
+        // junk ids and out-of-range indices are ignored
+        assert!(drops_from_groups(&[vec!["N9".into(), "bogus".into()]], 3).is_empty());
+        assert!(drops_from_groups(&[], 3).is_empty());
     }
 }

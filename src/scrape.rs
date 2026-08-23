@@ -72,8 +72,10 @@ async fn scrape_once(
     let articles_seen = items.len();
     let fresh = news::enrich(client, items, &already_seen, max_items).await;
 
-    let (actions, llm_calls) = llm::extract(gemini_key, model, &fresh, delivery).await?;
+    let (actions, mut llm_calls) = llm::extract(gemini_key, model, &fresh, delivery).await?;
     let rows = build_rows(&fresh, &actions, delivery);
+    let (rows, collapse_calls) = collapse_dupes(pool, gemini_key, model, rows).await;
+    llm_calls += collapse_calls;
     let upserted = db::upsert_actions(pool, &rows).await?;
 
     Ok(ScrapeReport {
@@ -82,6 +84,42 @@ async fn scrape_once(
         actions_upserted: upserted,
         llm_calls,
     })
+}
+
+/// LLM pass that collapses re-reported events before insert; falls back to
+/// the db.rs name heuristics alone when the DB lookup or the call fails.
+async fn collapse_dupes(
+    pool: &sqlx::PgPool,
+    gemini_key: &str,
+    model: &str,
+    rows: Vec<ActionInsert>,
+) -> (Vec<ActionInsert>, usize) {
+    if rows.is_empty() {
+        return (rows, 0);
+    }
+    let recent = match db::recent_events(pool, 10).await {
+        Ok(recent) => recent,
+        Err(e) => {
+            eprintln!("recent_events unavailable ({e:#}); skipping dupe-collapse pass");
+            return (rows, 0);
+        }
+    };
+    let (drops, calls) = llm::collapse_dupes(gemini_key, model, &rows, &recent).await;
+    if drops.is_empty() {
+        return (rows, calls);
+    }
+    eprintln!(
+        "dupe-collapse dropping {} record(s): {drops:?}",
+        drops.len()
+    );
+    let drop_set: std::collections::HashSet<usize> = drops.into_iter().collect();
+    let kept = rows
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| !drop_set.contains(i))
+        .map(|(_, r)| r)
+        .collect();
+    (kept, calls)
 }
 
 pub fn build_rows(items: &[NewsItem], actions: &[LlmAction], delivery: bool) -> Vec<ActionInsert> {

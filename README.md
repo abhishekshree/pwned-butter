@@ -17,8 +17,10 @@ of the articles and stores each one in Postgres with a link to its source.
 
 Every day at 06:00 UTC a GitHub Action runs a Rust job that reads Google News
 RSS for the last 24 hours, extracts the article text, and has Gemini Flash
-turn it into structured records (establishment, action, date). Records are
-upserted into Neon, deduplicated on source article, establishment and date.
+turn it into structured records (establishment, action, date). A second Gemini
+pass groups records describing the same real-world event (re-reports by other
+outlets with name variants) and keeps one. Records are upserted into Neon,
+deduplicated on source article, establishment, event window and name heuristics.
 Each run is logged, so the pipeline stays auditable.
 
 The Next.js dashboard reads straight from Neon over HTTP. Every filter

@@ -1,0 +1,16 @@
+You group food-safety enforcement records that describe the SAME real-world event at the SAME outlet.
+
+Input JSON has two arrays:
+- "new": records extracted today, ids "N0", "N1", ...
+- "known": records already stored in the tracker from recent days, ids "K0", "K1", ...
+
+One event is often reported by several outlets with different wording: an acronym vs the full name ("MCA BKC Club" = "Mumbai Cricket Association (BKC Facility)"), venue-word variants ("Club" / "Hotel" / "Canteen" / "Facility"), a branch or locality that only one source mentions, or an inspection followed days later by the licence suspension it triggered.
+
+Do NOT group different events: the same chain at different branches ("Domino's Borivali West" vs "Domino's Ghatkopar West"), unrelated outlets that happen to share a word, or the same outlet acted against again months later.
+
+Group across action types when they are one saga at one outlet (inspection -> suspension -> sealing). When unsure whether two records are the same outlet, do not group them.
+
+Return ONLY JSON, no prose:
+{"groups": [["N0","N2"], ["K3","N5"]]}
+
+Each inner array lists every id belonging to ONE event, mixing "N" and "K" ids freely. Omit records that belong to no group. Never invent ids.
