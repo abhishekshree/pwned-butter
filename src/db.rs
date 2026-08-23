@@ -99,17 +99,15 @@ pub async fn upsert_actions(pool: &PgPool, rows: &[ActionInsert]) -> Result<usiz
     let mut tx = pool.begin().await?;
     let mut affected: usize = 0;
     for r in rows {
-        // Same outlet + same action within ±5 days = one event, re-reported by
-        // another outlet. SQL narrows to the window; name matching tolerates
-        // qualifier variants ("Otters Club" vs "Otters Club, Carter Road").
-        // ponytail: containment match, so "KFC" vs "KFC Andheri" still slips
-        // through; switch to pg_trgm similarity if variants show up in practice.
+        // Same outlet within ±5 days = one event, re-reported by another
+        // outlet — regardless of action_type, since outlets report the same
+        // saga as "inspection", then "licence suspension". SQL narrows to
+        // the window; name matching tolerates acronym and qualifier variants
+        // ("MCA BKC Club" vs "Mumbai Cricket Association (BKC Facility)").
         let candidates: Vec<String> = sqlx::query(
             "SELECT establishment FROM actions
-             WHERE action_type = $1
-               AND action_date BETWEEN $2 - 5 AND $2 + 5",
+             WHERE action_date BETWEEN $1 - 5 AND $1 + 5",
         )
-        .bind(&r.action_type)
         .bind(r.action_date)
         .fetch_all(&mut *tx)
         .await?
@@ -154,7 +152,7 @@ pub async fn insert_actions(pool: &PgPool, rows: &[ActionInsert]) -> Result<usiz
 /// Replace a date window of rows with a fresh, deduped extraction. Rows are
 /// deleted by published_at/action_date (Google News URLs rotate between
 /// fetches, so source_url is not a stable key), then inserted with
-/// within-batch dedup on (action_date, city, establishment-name overlap).
+/// within-batch dedup on (city, ±5 days, same_event name match).
 /// Returns (deleted, inserted).
 pub async fn replace_actions(
     pool: &PgPool,
@@ -172,9 +170,9 @@ pub async fn replace_actions(
     let mut kept: Vec<&ActionInsert> = Vec::new();
     for r in rows {
         if kept.iter().any(|k| {
-            k.action_date == r.action_date
-                && k.city == r.city
-                && name_overlap(&k.establishment, &r.establishment) > 0
+            k.city == r.city
+                && (k.action_date - r.action_date).num_days().abs() <= 5
+                && same_event(&k.establishment, &r.establishment)
         }) {
             continue;
         }
@@ -186,20 +184,42 @@ pub async fn replace_actions(
     Ok((usize::try_from(deleted.rows_affected())?, inserted))
 }
 
-fn name_overlap(a: &str, b: &str) -> usize {
-    let tokens = |s: &str| -> HashSet<String> {
-        s.to_lowercase()
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|t| !t.is_empty())
-            .map(str::to_string)
-            .collect()
-    };
-    tokens(a).intersection(&tokens(b)).count()
+/// Venue-type words that vary between reports of the same outlet.
+const GENERIC_WORDS: [&str; 7] = [
+    "club",
+    "facility",
+    "canteen",
+    "restaurant",
+    "hotel",
+    "outlet",
+    "kitchen",
+];
+
+fn tokens(s: &str) -> Vec<String> {
+    s.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty() && !GENERIC_WORDS.contains(t))
+        .map(str::to_string)
+        .collect()
+}
+
+/// "mca" = initials of the consecutive run "mumbai cricket association".
+fn is_acronym_of(acro: &str, words: &[String]) -> bool {
+    !acro.is_empty()
+        && acro.len() <= words.len()
+        && acro.chars().zip(words).all(|(c, w)| w.starts_with(c))
+}
+
+fn token_matches(t: &str, words: &[String]) -> bool {
+    words.iter().any(|w| w == t)
+        || (0..=words.len().saturating_sub(t.len())).any(|i| is_acronym_of(t, &words[i..]))
 }
 
 /// True when two establishment names refer to the same outlet: exact
-/// (case/punctuation-insensitive) or one name containing the other, so a bare
-/// name and its qualified variant collapse to one event.
+/// (case/punctuation-insensitive), one name containing the other, or every
+/// token of one name appearing in the other — literally or as an acronym
+/// ("MCA" ~ "Mumbai Cricket Association") — with at least one literal word
+/// of 3+ chars in common so a bare acronym can't match on initials alone.
 fn same_event(a: &str, b: &str) -> bool {
     let norm = |s: &str| -> String {
         s.to_lowercase()
@@ -212,8 +232,18 @@ fn same_event(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }
-    // containment of a very short name is too loose ("KFC" everywhere)
-    a.len().min(b.len()) >= 6 && (a.contains(&b) || b.contains(&a))
+    // containment of a very short name is too loose ("KFC" everywhere);
+    // the token fallback below keeps that bar via total matched length
+    if a.len().min(b.len()) >= 6 && (a.contains(&b) || b.contains(&a)) {
+        return true;
+    }
+    let side_matches = |from: &[String], to: &[String]| {
+        from.iter().map(|t| t.len()).sum::<usize>() >= 6
+            && from.iter().all(|t| token_matches(t, to))
+            && from.iter().any(|t| t.len() >= 3 && to.contains(t))
+    };
+    let (ta, tb) = (tokens(&a), tokens(&b));
+    side_matches(&ta, &tb) || side_matches(&tb, &ta)
 }
 
 pub async fn begin_run(pool: &PgPool) -> Result<i64> {
@@ -293,5 +323,14 @@ mod tests {
         // short names only match exactly
         assert!(!same_event("KFC", "KFC Andheri"));
         assert!(same_event("KFC", "kfc"));
+        // acronym expansion + venue-word drift (MCA BKC, Aug 2026 dupes)
+        assert!(same_event(
+            "MCA BKC Club",
+            "Mumbai Cricket Association (BKC Facility)"
+        ));
+        assert!(!same_event(
+            "Cricket Club of India Canteen",
+            "Mumbai Cricket Association (BKC Facility)"
+        ));
     }
 }
