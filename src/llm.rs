@@ -40,15 +40,15 @@ fn retry_delay(attempt: usize, retry_after: Option<u64>) -> Duration {
 const BATCH_SIZE: usize = 20;
 const MAX_CONCURRENT: usize = 2;
 
-/// Pinned GA Flash. The `gemini-flash-latest` alias floats between snapshots
-/// (quota/features shift under it) — pinning is Google's own stability advice.
-pub const DEFAULT_GEMINI_MODEL: &str = "gemini-3.5-flash";
+/// Floating alias: always tracks the newest Flash. Deliberate — pinned
+/// 3.5-flash underperformed, so we ride latest instead of a version.
+pub const DEFAULT_GEMINI_MODEL: &str = "gemini-flash-latest";
 
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_MAX_ATTEMPTS: usize = 3;
-/// Claude Haiku over the existing OpenRouter pipe: follows the strict-JSON
-/// extraction prompt where the old free fallback returned unparseable text.
-const DEFAULT_OPENROUTER_MODEL: &str = "anthropic/claude-haiku-4.5";
+/// Muse Spark over the existing OpenRouter pipe: near-free contributor
+/// pricing, follows the strict-JSON extraction prompt.
+const DEFAULT_OPENROUTER_MODEL: &str = "meta/muse-spark-1.3-contributor";
 
 pub async fn extract(
     api_key: &str,
