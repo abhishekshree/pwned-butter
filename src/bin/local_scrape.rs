@@ -4,7 +4,8 @@ use fda_mumbai_tracker::scrape::run_scrape;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
     let gemini_key = std::env::var("GEMINI_API_KEY")?;
-    let model = std::env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-flash-latest".into());
+    let model = std::env::var("GEMINI_MODEL")
+        .unwrap_or_else(|_| fda_mumbai_tracker::llm::DEFAULT_GEMINI_MODEL.into());
 
     let (run_id, report) = run_scrape(&gemini_key, &model).await?;
     println!(

@@ -9,7 +9,7 @@ use fda_mumbai_tracker::{db, llm, news, scrape};
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
     let gemini_key = std::env::var("GEMINI_API_KEY")?;
-    let model = std::env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-flash-latest".into());
+    let model = std::env::var("GEMINI_MODEL").unwrap_or_else(|_| llm::DEFAULT_GEMINI_MODEL.into());
     let window = std::env::args().nth(1).unwrap_or_else(|| "when:1d".into());
     let days = std::env::args()
         .nth(2)

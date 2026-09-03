@@ -17,7 +17,8 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     let gemini_key = std::env::var("GEMINI_API_KEY")?;
-    let model = std::env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-flash-latest".into());
+    let model = std::env::var("GEMINI_MODEL")
+        .unwrap_or_else(|_| fda_mumbai_tracker::llm::DEFAULT_GEMINI_MODEL.into());
     let today = Utc::now().date_naive();
 
     let (from_days_ago, to_days_ago) = parse_days(args.first(), args.get(1))?;
