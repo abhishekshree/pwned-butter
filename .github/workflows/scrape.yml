@@ -27,4 +27,61 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-        run: cargo run --release --bin local_scrape
+        shell: bash
+        run: set -eo pipefail; cargo run --release --bin local_scrape 2>&1 | tee /tmp/scrape.log
+
+      - name: Job summary and sanity check
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Daily scrape"
+            line="$(grep -o 'run [0-9]* ok: .*' /tmp/scrape.log | tail -1 || true)"
+            if [ -n "$line" ]; then
+              echo '```'
+              echo "$line"
+              echo '```'
+              seen="$(echo "$line" | sed -n 's/.*seen=\([0-9]*\).*/\1/p')"
+              upserted="$(echo "$line" | sed -n 's/.*upserted=\([0-9]*\).*/\1/p')"
+              if [ "${seen:-0}" -gt 0 ] && [ "${upserted:-0}" -eq 0 ]; then
+                echo "> ⚠️ **Zero records extracted despite $seen articles seen — pipeline may be degraded.**"
+              fi
+            else
+              echo "_No completion line emitted — scraper likely failed._"
+            fi
+            failed="$(grep -c 'llm batch .* failed\|rss query failed\|article fetch failed\|enrich task join error' /tmp/scrape.log || true)"
+            echo "Failed subtasks (LLM batches / RSS queries / article fetches): ${failed}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: DB snapshot
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        shell: bash
+        run: |
+          snapshot="$(psql "$DATABASE_URL" -tA -F ' | ' \
+            -c "SELECT COUNT(*) AS rows, MAX(action_date) AS latest_action, MAX(created_at) AS last_insert FROM actions" \
+            2>/dev/null || echo "unavailable")"
+          {
+            echo "### DB state"
+            echo '```'
+            echo "rows | latest_action_date | last_insert"
+            echo "$snapshot"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Ping healthchecks.io
+        if: always()
+        env:
+          HC_URL: ${{ secrets.HEALTHCHECKS_PING_URL }}
+        shell: bash
+        run: |
+          if [ -z "$HC_URL" ]; then
+            echo "HEALTHCHECKS_PING_URL not set; skipping ping"
+            exit 0
+          fi
+          suffix=""
+          if [ "${{ job.status }}" != "success" ]; then
+            suffix="/fail"
+          fi
+          curl -fsS --max-time 10 "$HC_URL$suffix" || echo "healthchecks ping failed (non-fatal)"
