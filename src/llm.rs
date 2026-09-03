@@ -176,7 +176,7 @@ async fn collapse_once(
                   city: &Option<String>,
                   area: &Option<String>| {
         json!({
-            "id": format!("{id_prefix}"),
+            "id": id_prefix.to_string(),
             "establishment": establishment,
             "actionType": action_type,
             "actionDate": action_date.to_string(),
