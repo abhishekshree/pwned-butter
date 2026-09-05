@@ -147,27 +147,37 @@ fn haystack(it: &NewsItem) -> String {
     .to_lowercase()
 }
 
+/// Keyword rules as data, not branches: each entry is alternative
+/// conjunctions + the action they signal. First match in table order wins,
+/// so entries run most- to least-specific. Adding a keyword edits this
+/// table, never the control flow below it.
+const SIGNAL_RULES: &[(&[&[&str]], ActionType)] = &[
+    (&[&["improvement notice"]], ActionType::ImprovementNotice),
+    (
+        &[&["licence", "suspend"], &["license", "suspend"]],
+        ActionType::LicenceSuspension,
+    ),
+    (
+        &[
+            &["stop business"],
+            &["closure", "order"],
+            &["shut down", "fda"],
+        ],
+        ActionType::StopBusiness,
+    ),
+    (&[&["seal"]], ActionType::Sealing),
+    (&[&["seiz"]], ActionType::Seizure),
+    (&[&["reopen"]], ActionType::Reopened),
+    (&[&["raid"], &["inspect"], &["fda"]], ActionType::Inspection),
+];
+
 fn signals(hay: &str) -> Option<ActionType> {
-    if hay.contains("improvement notice") {
-        Some(ActionType::ImprovementNotice)
-    } else if hay.contains("suspend") && (hay.contains("licence") || hay.contains("license")) {
-        Some(ActionType::LicenceSuspension)
-    } else if hay.contains("stop business")
-        || (hay.contains("closure") && hay.contains("order"))
-        || (hay.contains("shut down") && hay.contains("fda"))
-    {
-        Some(ActionType::StopBusiness)
-    } else if hay.contains("seal") {
-        Some(ActionType::Sealing)
-    } else if hay.contains("seiz") {
-        Some(ActionType::Seizure)
-    } else if hay.contains("reopen") {
-        Some(ActionType::Reopened)
-    } else if hay.contains("raid") || hay.contains("inspect") || hay.contains("fda") {
-        Some(ActionType::Inspection)
-    } else {
-        None
-    }
+    SIGNAL_RULES.iter().find_map(|(groups, action)| {
+        groups
+            .iter()
+            .any(|needles| needles.iter().all(|n| hay.contains(n)))
+            .then_some(*action)
+    })
 }
 
 // Only these corroborate a generic-English trigger: "fda" and
