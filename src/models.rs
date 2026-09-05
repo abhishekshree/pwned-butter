@@ -13,7 +13,7 @@ pub struct NewsItem {
     pub snippet: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionType {
     LicenceSuspension,
@@ -168,6 +168,34 @@ where
     D: serde::Deserializer<'de>,
 {
     Ok(Option::<Vec<String>>::deserialize(de)?.unwrap_or_default())
+}
+
+impl LlmAction {
+    /// Minimal record for the deterministic rule fallback: only what keyword
+    /// rules can know. Everything else stays empty for downstream defaults.
+    pub fn minimal(
+        establishment: String,
+        action_type: ActionType,
+        source_index: usize,
+        details: Option<String>,
+    ) -> Self {
+        Self {
+            establishment,
+            area: None,
+            city: None,
+            brand: None,
+            operator: None,
+            outlet_type: None,
+            action_type,
+            action_date: None,
+            violations: Vec::new(),
+            compliance_score: None,
+            fssai_number: None,
+            details,
+            platforms: Vec::new(),
+            source_index,
+        }
+    }
 }
 
 pub fn nonempty(v: Option<String>) -> Option<String> {
