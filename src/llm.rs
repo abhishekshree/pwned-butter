@@ -171,13 +171,36 @@ const SIGNAL_RULES: &[(&[&[&str]], ActionType)] = &[
     (&[&["raid"], &["inspect"], &["fda"]], ActionType::Inspection),
 ];
 
-fn signals(hay: &str) -> Option<ActionType> {
-    SIGNAL_RULES.iter().find_map(|(groups, action)| {
-        groups
+/// Validated keyword signal: prose in, typed action out. Parsing is the
+/// fallible boundary (TryFrom); mapping a signal to its action is total
+/// (From). Distinct from ActionType::from_str, which parses wire codes —
+/// one name, one concept per conversion.
+struct Signal(ActionType);
+
+#[derive(Debug)]
+struct NoSignal;
+
+impl TryFrom<&str> for Signal {
+    type Error = NoSignal;
+
+    fn try_from(hay: &str) -> Result<Self, Self::Error> {
+        SIGNAL_RULES
             .iter()
-            .any(|needles| needles.iter().all(|n| hay.contains(n)))
-            .then_some(*action)
-    })
+            .find_map(|(groups, action)| {
+                groups
+                    .iter()
+                    .any(|needles| needles.iter().all(|n| hay.contains(n)))
+                    .then_some(*action)
+            })
+            .map(Signal)
+            .ok_or(NoSignal)
+    }
+}
+
+impl From<Signal> for ActionType {
+    fn from(signal: Signal) -> Self {
+        signal.0
+    }
 }
 
 // Only these corroborate a generic-English trigger: "fda" and
@@ -187,7 +210,7 @@ fn signals(hay: &str) -> Option<ActionType> {
 const CORROBORATION: &[&str] = &["fda", "food safety", "licence", "license"];
 
 fn triage(hay: &str) -> Option<ActionType> {
-    let action = signals(hay)?;
+    let action = ActionType::from(Signal::try_from(hay).ok()?);
     let needs_corroboration = matches!(
         action,
         ActionType::Sealing | ActionType::Seizure | ActionType::Inspection
