@@ -1,53 +1,38 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::borrow::Cow;
+use std::collections::{BTreeSet, HashSet};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use chrono::NaiveDate;
 use serde_json::{json, Value};
-use tokio::sync::Semaphore;
 
 use crate::db::{ActionInsert, RecentEvent};
-use crate::models::{LlmAction, NewsItem};
+use crate::models::{ActionType, LlmAction, NewsItem};
 
 pub const SYSTEM_PROMPT: &str = include_str!("prompts/system.txt");
 
 const DELIVERY_MODE: &str = include_str!("prompts/delivery.txt");
 const DEDUPE_PROMPT: &str = include_str!("prompts/dedupe.txt");
 
-fn system_prompt(delivery: bool) -> String {
+fn system_prompt(delivery: bool) -> Cow<'static, str> {
     if delivery {
-        format!("{SYSTEM_PROMPT}{DELIVERY_MODE}")
+        format!("{SYSTEM_PROMPT}{DELIVERY_MODE}").into()
     } else {
-        SYSTEM_PROMPT.to_string()
+        SYSTEM_PROMPT.into()
     }
 }
 
 const MAX_ATTEMPTS: usize = 6;
-
-fn retry_delay(attempt: usize, retry_after: Option<u64>) -> Duration {
-    let secs = retry_after
-        .map(|s| s.min(120))
-        .unwrap_or_else(|| (15u64 * (1u64 << attempt.min(4))).min(120));
-    // full jitter (Google/AWS rec): shave up to half so concurrent batches
-    // don't re-hit the API in lockstep; nanos are enough entropy for 2 workers
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|t| t.subsec_nanos() as u64)
-        .unwrap_or(0);
-    Duration::from_secs(secs - nanos % (secs / 2 + 1))
-}
+const OPENROUTER_MAX_ATTEMPTS: usize = 3;
 const BATCH_SIZE: usize = 20;
-// ponytail: free-tier quota is 5 RPM / 20 RPD — 2 concurrent workers re-hit
-// 429s in lockstep, so run batches single-file and honor RetryInfo delays.
-const MAX_CONCURRENT: usize = 1;
+// ponytail: free-tier quota is 5 RPM / 20 RPD — concurrent batches re-hit
+// 429s in lockstep, so batches run single-file with no spawn/semaphore.
 
 /// Floating alias: always tracks the newest Flash. Deliberate — pinned
 /// 3.5-flash underperformed, so we ride latest instead of a version.
 pub const DEFAULT_GEMINI_MODEL: &str = "gemini-flash-latest";
 
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
-const OPENROUTER_MAX_ATTEMPTS: usize = 3;
 /// Verified live against the OpenRouter /models API. lfm-2.5 is built for
 /// data extraction with structured-output support; z-ai stays last as the
 /// privacy-safe resort under no-training settings.
@@ -58,107 +43,70 @@ const OPENROUTER_FALLBACKS: &[&str] = &[
     "z-ai/glm-5.2:free",
 ];
 
+/// A relevance-filtered batch item; `orig` indexes the caller's `items`
+/// slice so `source_index` still addresses it for `build_rows`.
+struct Job {
+    orig: usize,
+    item: NewsItem,
+}
+
 pub async fn extract(
     api_key: &str,
     model: &str,
     items: &[NewsItem],
     delivery: bool,
 ) -> Result<(Vec<LlmAction>, usize)> {
-    if items.is_empty() {
-        return Ok((Vec::new(), 0));
+    let mut jobs = Vec::with_capacity(items.len());
+    for (orig, item) in items.iter().cloned().enumerate() {
+        if triage(&haystack(&item)).is_some() {
+            jobs.push(Job { orig, item });
+        }
     }
-
-    // Algorithmic pre-filter: only spend quota on items with an FDA/enforcement
-    // signal. Drops obvious non-matches before batching; original indices are
-    // carried alongside so source_index still addresses `items` for build_rows.
-    let indexed: Vec<(usize, NewsItem)> = items
-        .iter()
-        .cloned()
-        .enumerate()
-        .filter(|(_, it)| is_likely_relevant(it))
-        .collect();
     eprintln!(
         "llm pre-filter: {}/{} items relevant",
-        indexed.len(),
+        jobs.len(),
         items.len()
     );
-    if indexed.is_empty() {
+    if jobs.is_empty() {
         return Ok((Vec::new(), 0));
     }
 
-    let api_key = api_key.to_owned();
-    let model = model.to_owned();
-    let requests = Arc::new(AtomicUsize::new(0));
-    let sem = Arc::new(Semaphore::new(MAX_CONCURRENT));
-    let mut tasks = Vec::new();
-
-    for (batch_no, chunk) in indexed.chunks(BATCH_SIZE).enumerate() {
-        let sem = Arc::clone(&sem);
-        let requests = Arc::clone(&requests);
-        let api_key = api_key.clone();
-        let model = model.clone();
-        let idx_map: Vec<usize> = chunk.iter().map(|(i, _)| *i).collect();
-        let chunk_items: Vec<NewsItem> = chunk.iter().map(|(_, it)| it.clone()).collect();
-        tasks.push(tokio::spawn(async move {
-            let _permit = sem.acquire_owned().await.expect("semaphore closed");
-            let batch = extract_batch(&api_key, &model, &chunk_items, &requests, delivery).await;
-            (batch_no, idx_map, chunk_items, batch)
-        }));
-    }
-
-    let batch_count = tasks.len();
-    let mut actions: Vec<LlmAction> = Vec::new();
-    let mut failed = 0usize;
-    for task in tasks {
-        let (batch_no, idx_map, chunk_items, result) = task.await.context("llm batch task join")?;
-        match result {
-            Ok(mut batch) => {
-                // Remap filtered-chunk positions back to original item indices.
-                let mut remapped = Vec::with_capacity(batch.len());
-                for a in batch.drain(..) {
-                    if let Some(orig) = idx_map.get(a.source_index).copied() {
-                        let mut a = a;
-                        a.source_index = orig;
-                        remapped.push(a);
-                    }
-                }
-                actions.append(&mut remapped);
-            }
+    let mut calls = 0;
+    let mut actions = Vec::new();
+    let mut failed = 0;
+    for (batch_no, chunk) in jobs.chunks(BATCH_SIZE).enumerate() {
+        match extract_batch(api_key, model, chunk, &mut calls, delivery).await {
+            Ok(batch) => actions.extend(batch),
             Err(e) => {
-                // Rule fallback keeps this batch's data instead of losing it.
-                let base: Vec<(usize, NewsItem)> = idx_map.into_iter().zip(chunk_items).collect();
-                let fallback = rule_extract(&base);
-                if fallback.is_empty() {
+                let kept = rule_extract(chunk);
+                if kept.is_empty() {
                     failed += 1;
-                    eprintln!("llm batch {batch_no} failed: {e}");
+                    eprintln!("llm batch {batch_no} failed: {e:#}");
                 } else {
                     eprintln!(
                         "llm batch {batch_no} failed ({e:#}); rule fallback kept {}",
-                        fallback.len()
+                        kept.len()
                     );
-                    actions.extend(fallback);
+                    actions.extend(kept);
                 }
             }
         }
     }
-
-    let calls = requests.load(Ordering::Relaxed);
+    let batch_count = jobs.len().div_ceil(BATCH_SIZE);
     if failed == batch_count {
         return Err(anyhow!("all {batch_count} llm batches failed"));
     }
 
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
     actions = actions
         .into_iter()
         .filter(|a| !a.establishment.trim().is_empty())
         .filter(|a| {
-            let key = format!(
-                "{}|{}|{}",
+            seen.insert((
                 a.source_index,
                 a.establishment.to_lowercase(),
-                a.action_type
-            );
-            seen.insert(key)
+                a.action_type,
+            ))
         })
         .map(sanitize_action)
         .collect();
@@ -196,83 +144,71 @@ fn haystack(it: &NewsItem) -> String {
     .to_lowercase()
 }
 
-fn action_signal(text: &str) -> Option<crate::models::ActionType> {
-    if text.contains("improvement notice") {
-        Some(crate::models::ActionType::ImprovementNotice)
-    } else if text.contains("licence") && text.contains("suspend")
-        || text.contains("license") && text.contains("suspend")
+fn signals(hay: &str) -> Option<ActionType> {
+    if hay.contains("improvement notice") {
+        Some(ActionType::ImprovementNotice)
+    } else if hay.contains("suspend") && (hay.contains("licence") || hay.contains("license")) {
+        Some(ActionType::LicenceSuspension)
+    } else if hay.contains("stop business")
+        || hay.contains("closure") && hay.contains("order")
+        || hay.contains("shut down") && hay.contains("fda")
     {
-        Some(crate::models::ActionType::LicenceSuspension)
-    } else if text.contains("stop business")
-        || text.contains("closure") && text.contains("order")
-        || text.contains("shut down") && text.contains("fda")
-    {
-        Some(crate::models::ActionType::StopBusiness)
-    } else if text.contains("seal") {
-        Some(crate::models::ActionType::Sealing)
-    } else if text.contains("seiz") {
-        Some(crate::models::ActionType::Seizure)
-    } else if text.contains("reopen") {
-        Some(crate::models::ActionType::Reopened)
-    } else if text.contains("raid") || text.contains("inspect") || text.contains("fda") {
-        Some(crate::models::ActionType::Inspection)
+        Some(ActionType::StopBusiness)
+    } else if hay.contains("seal") {
+        Some(ActionType::Sealing)
+    } else if hay.contains("seiz") {
+        Some(ActionType::Seizure)
+    } else if hay.contains("reopen") {
+        Some(ActionType::Reopened)
+    } else if hay.contains("raid") || hay.contains("inspect") || hay.contains("fda") {
+        Some(ActionType::Inspection)
     } else {
         None
     }
 }
 
-fn is_likely_relevant(it: &NewsItem) -> bool {
-    let h = haystack(it);
-    action_signal(&h).is_some()
-        && (h.contains("fda")
-            || h.contains("food safety")
-            || h.contains("licence")
-            || h.contains("license")
-            || h.contains("seal")
-            || h.contains("seiz")
-            || h.contains("raid")
-            || h.contains("inspect"))
+/// A signal only counts with FDA/enforcement context — a bare "sealed"
+/// headline without it is not our jurisdiction.
+fn triage(hay: &str) -> Option<ActionType> {
+    const CONTEXT: &[&str] = &[
+        "fda",
+        "food safety",
+        "licence",
+        "license",
+        "seal",
+        "seiz",
+        "raid",
+        "inspect",
+    ];
+    let action = signals(hay)?;
+    CONTEXT.iter().any(|c| hay.contains(c)).then_some(action)
 }
 
 // Deterministic safety net: when a batch's LLM path fails, keep one minimal
 // record per signal-bearing item so the run degrades instead of zeroing out.
 // Fields the rules can't know (area, violations, dates) stay empty —
 // build_rows + coerce_action_date fill date defaults downstream.
-fn rule_extract(indexed: &[(usize, NewsItem)]) -> Vec<crate::models::LlmAction> {
-    indexed
-        .iter()
-        .filter_map(|(orig, it)| {
-            let h = haystack(it);
-            let action_type = action_signal(&h)?;
-            let name = it
+fn rule_extract(jobs: &[Job]) -> Vec<LlmAction> {
+    jobs.iter()
+        .filter_map(|j| {
+            let action_type = triage(&haystack(&j.item))?;
+            let name: String = j
+                .item
                 .title
                 .split(['|', '-', ':'])
-                .next()
-                .unwrap_or(it.title.as_str())
+                .next()?
                 .trim()
                 .chars()
                 .take(120)
-                .collect::<String>()
-                .trim()
-                .to_string();
-            if name.is_empty() {
-                return None;
-            }
-            Some(crate::models::LlmAction {
-                establishment: name,
-                area: None,
-                city: None,
-                brand: None,
-                operator: None,
-                outlet_type: None,
-                action_type,
-                action_date: None,
-                violations: Vec::new(),
-                compliance_score: None,
-                fssai_number: None,
-                details: it.snippet.clone(),
-                platforms: Vec::new(),
-                source_index: *orig,
+                .collect();
+            let name = name.trim();
+            (!name.is_empty()).then(|| {
+                LlmAction::minimal(
+                    name.to_string(),
+                    action_type,
+                    j.orig,
+                    j.item.snippet.clone(),
+                )
             })
         })
         .collect()
@@ -288,10 +224,8 @@ pub async fn collapse_dupes(
     rows: &[ActionInsert],
     recent: &[RecentEvent],
 ) -> (Vec<usize>, usize) {
-    let requests = AtomicUsize::new(0);
-    let result = collapse_once(api_key, model, rows, recent, &requests).await;
-    let calls = requests.load(Ordering::Relaxed);
-    match result {
+    let mut calls = 0;
+    match collapse_once(api_key, model, rows, recent, &mut calls).await {
         Ok(drops) => (drops, calls),
         Err(e) => {
             eprintln!("dupe-collapse llm failed ({e:#}); using name heuristics only");
@@ -305,7 +239,7 @@ async fn collapse_once(
     model: &str,
     rows: &[ActionInsert],
     recent: &[RecentEvent],
-    requests: &AtomicUsize,
+    calls: &mut usize,
 ) -> Result<Vec<usize>> {
     let record = |id_prefix: &str,
                   establishment: &str,
@@ -362,21 +296,13 @@ async fn collapse_once(
             "maxOutputTokens": 2048
         }
     });
-    let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-    );
-    requests.fetch_add(1, Ordering::Relaxed);
-    let resp = crate::http_client()
-        .post(&url)
-        .json(&payload)
-        .send()
-        .await?;
+    let resp = post(&gemini_url(model, api_key), None, &payload, calls).await?;
     let status = resp.status();
     let body: Value = resp.json().await.context("gemini dupe json body")?;
     if !status.is_success() {
         anyhow::bail!("gemini http {status}");
     }
-    let text = response_text(&body)?;
+    let text = response_text(&body);
     if text.trim().is_empty() {
         anyhow::bail!("gemini returned empty response");
     }
@@ -412,7 +338,7 @@ fn parse_groups(text: &str) -> Result<Vec<Vec<String>>> {
 /// new id survives as the canonical record. Unknown or out-of-range ids are
 /// ignored.
 fn drops_from_groups(groups: &[Vec<String>], n_new: usize) -> Vec<usize> {
-    let mut drop = std::collections::BTreeSet::new();
+    let mut drop = BTreeSet::new();
     for group in groups {
         let mut news: Vec<usize> = group
             .iter()
@@ -432,41 +358,85 @@ fn drops_from_groups(groups: &[Vec<String>], n_new: usize) -> Vec<usize> {
     drop.into_iter().collect()
 }
 
+fn gemini_url(model: &str, api_key: &str) -> String {
+    format!("https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}")
+}
+
+fn retry_delay(attempt: usize, retry_after: Option<u64>) -> Duration {
+    let secs = retry_after
+        .map(|s| s.min(120))
+        .unwrap_or_else(|| (15u64 * (1u64 << attempt.min(4))).min(120));
+    // full jitter so concurrent batches don't re-hit the API in lockstep;
+    // nanos are enough entropy for sequential workers
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|t| t.subsec_nanos() as u64)
+        .unwrap_or(0);
+    Duration::from_secs(secs - nanos % (secs / 2 + 1))
+}
+
+fn retry_after(resp: &reqwest::Response) -> Option<u64> {
+    resp.headers()
+        .get("retry-after")?
+        .to_str()
+        .ok()?
+        .parse()
+        .ok()
+}
+
+async fn post(
+    url: &str,
+    key: Option<&str>,
+    payload: &Value,
+    calls: &mut usize,
+) -> Result<reqwest::Response> {
+    *calls += 1;
+    let mut req = crate::http_client().post(url).json(payload);
+    if let Some(key) = key {
+        req = req.bearer_auth(key);
+    }
+    req.send().await.map_err(|e| anyhow!("request error: {e}"))
+}
+
 async fn extract_batch(
     api_key: &str,
     model: &str,
-    items: &[NewsItem],
-    requests: &AtomicUsize,
+    chunk: &[Job],
+    calls: &mut usize,
     delivery: bool,
 ) -> Result<Vec<LlmAction>> {
     let payload = json!({
         "system_instruction": {"parts": [{"text": system_prompt(delivery)}]},
-        "contents": [{"parts": [{"text": serde_json::to_string(&json!({ "items": items })).context("serialize news batch")?}]}],
+        "contents": [{"parts": [{"text": serde_json::to_string(
+            &json!({ "items": chunk.iter().map(|j| &j.item).collect::<Vec<_>>() })
+        ).context("serialize news batch")?}]}],
         "generationConfig": {
             "temperature": 0.0,
             "responseMimeType": "application/json",
             "maxOutputTokens": 8192
         }
     });
-    let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-    );
-    let client = crate::http_client();
+    let url = gemini_url(model, api_key);
     let openrouter_key = std::env::var("OPENROUTER_API_KEY").ok();
 
     for attempt in 0..MAX_ATTEMPTS {
-        requests.fetch_add(1, Ordering::Relaxed);
-        let resp = match client.post(&url).json(&payload).send().await {
+        let resp = match post(&url, None, &payload, calls).await {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("gemini request error: {e}");
+                eprintln!("gemini {e:#}");
                 tokio::time::sleep(retry_delay(attempt, None)).await;
                 continue;
             }
         };
-        if resp.status().is_success() {
-            let body: Value = resp.json().await.context("gemini json")?;
-            let text = response_text(&body)?;
+        let wait = retry_after(&resp);
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .unwrap_or_else(|e| format!("<unreadable body: {e}>"));
+        if status.is_success() {
+            let body: Value = serde_json::from_str(&text).context("gemini json")?;
+            let text = response_text(&body);
             if text.trim().is_empty() {
                 // ponytail: thinking models can burn the token budget and return
                 // 200 with zero text; retry, then OpenRouter via the normal path
@@ -479,32 +449,39 @@ async fn extract_batch(
                 tokio::time::sleep(retry_delay(attempt, None)).await;
                 continue;
             }
-            return parse_llm_text(&text);
+            return remap(parse_llm_text(&text)?, chunk);
         }
-        let status = resp.status();
-        let retry_after = resp
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u64>().ok());
-        let text = resp
-            .text()
-            .await
-            .unwrap_or_else(|e| format!("<unreadable body: {e}>"));
         if status.as_u16() == 429 || status.is_server_error() {
             eprintln!("gemini http {status}, attempt {attempt}; {text}");
             if is_quota_exhausted(&text) {
-                return extract_openrouter(openrouter_key.as_deref(), items, requests, delivery)
-                    .await;
+                let batch: Vec<NewsItem> = chunk.iter().map(|j| j.item.clone()).collect();
+                let (actions, _n) =
+                    fallback(openrouter_key.as_deref(), &batch, calls, delivery).await?;
+                return remap(actions, chunk);
             }
-            let wait = retry_after.or_else(|| retry_delay_from_body(&text));
+            let wait = wait.or_else(|| retry_delay_from_body(&text));
             tokio::time::sleep(retry_delay(attempt, wait)).await;
             continue;
         }
         return Err(anyhow!("gemini http {status}: {text}"));
     }
     eprintln!("gemini API failed after {MAX_ATTEMPTS} attempts; falling back to openrouter");
-    extract_openrouter(openrouter_key.as_deref(), items, requests, delivery).await
+    let batch: Vec<NewsItem> = chunk.iter().map(|j| j.item.clone()).collect();
+    let (actions, _n) = fallback(openrouter_key.as_deref(), &batch, calls, delivery).await?;
+    remap(actions, chunk)
+}
+
+/// Readdress filtered-chunk positions back to the caller's item indices;
+/// orphan indices the LLM invented are dropped, not trusted.
+fn remap(mut actions: Vec<LlmAction>, chunk: &[Job]) -> Result<Vec<LlmAction>> {
+    let mut out = Vec::with_capacity(actions.len());
+    for mut a in actions.drain(..) {
+        if let Some(job) = chunk.get(a.source_index) {
+            a.source_index = job.orig;
+            out.push(a);
+        }
+    }
+    Ok(out)
 }
 
 fn is_quota_exhausted(text: &str) -> bool {
@@ -529,12 +506,12 @@ fn retry_delay_from_body(text: &str) -> Option<u64> {
     })
 }
 
-async fn extract_openrouter(
+async fn fallback(
     api_key: Option<&str>,
     items: &[NewsItem],
-    requests: &AtomicUsize,
+    calls: &mut usize,
     delivery: bool,
-) -> Result<Vec<LlmAction>> {
+) -> Result<(Vec<LlmAction>, usize)> {
     let Some(api_key) = api_key else {
         return Err(anyhow!(
             "gemini API failed and no OPENROUTER_API_KEY fallback configured"
@@ -543,38 +520,46 @@ async fn extract_openrouter(
     // ponytail: env override so the next model rot is a secret change, not a deploy
     let model =
         std::env::var("OPENROUTER_MODEL").unwrap_or_else(|_| DEFAULT_OPENROUTER_MODEL.to_string());
-    openrouter_with_model(api_key, &model, items, requests, delivery).await
+    let before = *calls;
+    let actions = openrouter_with_model(api_key, &model, items, calls, delivery).await?;
+    Ok((actions, *calls - before))
+}
+
+/// OpenRouter 404s/4xx on guardrails never succeed on retry — fail fast
+/// instead of burning backoffs per batch. Returns the error to abort with.
+fn openrouter_fatal(status: u16, text: &str) -> Option<anyhow::Error> {
+    match status {
+        400 | 401 | 403 | 404 => Some(anyhow!("openrouter http {status} (non-retryable): {text}")),
+        402 if text.contains("Insufficient credits")
+            || text.contains("never purchased credits") =>
+        {
+            Some(anyhow!("openrouter 402 insufficient credits: {text}"))
+        }
+        _ => None,
+    }
 }
 
 async fn openrouter_with_model(
     api_key: &str,
     model: &str,
     items: &[NewsItem],
-    requests: &AtomicUsize,
+    calls: &mut usize,
     delivery: bool,
 ) -> Result<Vec<LlmAction>> {
     eprintln!("openrouter attempt: model={model}, items={}", items.len());
-    let fallbacks: Vec<String> = std::env::var("OPENROUTER_FALLBACKS")
+    let mut fallbacks: Vec<String> = std::env::var("OPENROUTER_FALLBACKS")
         .map(|s| {
             s.split(',')
-                .map(|m| m.trim().to_string())
-                .filter(|m| !m.is_empty() && m != model)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_else(|_| {
-            OPENROUTER_FALLBACKS
-                .iter()
-                .filter(|m| **m != model)
-                .map(|m| m.to_string())
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .map(str::to_string)
                 .collect()
-        });
-    let fallbacks_json: Vec<serde_json::Value> = fallbacks
-        .iter()
-        .map(|m| serde_json::Value::String(m.clone()))
-        .collect();
+        })
+        .unwrap_or_else(|_| OPENROUTER_FALLBACKS.iter().map(|m| m.to_string()).collect());
+    fallbacks.retain(|m| m != model);
     let mut payload = json!({
         "model": model,
-        "models": fallbacks_json,
+        "models": fallbacks,
         "messages": [
             {"role": "system", "content": system_prompt(delivery)},
             {"role": "user", "content": serde_json::to_string(&json!({ "items": items })).context("serialize news batch")?}
@@ -585,17 +570,8 @@ async fn openrouter_with_model(
         "temperature": 0.0,
         "max_tokens": 32768
     });
-    let client = crate::http_client();
-
     for attempt in 0..OPENROUTER_MAX_ATTEMPTS {
-        requests.fetch_add(1, Ordering::Relaxed);
-        let resp = match client
-            .post(OPENROUTER_URL)
-            .bearer_auth(api_key)
-            .json(&payload)
-            .send()
-            .await
-        {
+        let resp = match post(OPENROUTER_URL, Some(api_key), &payload, calls).await {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("openrouter request error: {e}");
@@ -603,8 +579,14 @@ async fn openrouter_with_model(
                 continue;
             }
         };
-        if resp.status().is_success() {
-            let body: Value = resp.json().await.context("openrouter json")?;
+        let wait = retry_after(&resp);
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .unwrap_or_else(|e| format!("<unreadable body: {e}>"));
+        if status.is_success() {
+            let body: Value = serde_json::from_str(&text).context("openrouter json")?;
             let responded = body["model"].as_str().unwrap_or(model);
             let citations = body["citations"].as_array().map_or(0, Vec::len);
             eprintln!("openrouter ok: model={responded}, web_searches={citations}");
@@ -613,27 +595,11 @@ async fn openrouter_with_model(
                 .ok_or_else(|| anyhow!("no text in openrouter response"))?;
             return parse_llm_text(text);
         }
-        let status = resp.status();
-        let retry_after = resp
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u64>().ok());
-        let text = resp
-            .text()
-            .await
-            .unwrap_or_else(|e| format!("<unreadable body: {e}>"));
         eprintln!("openrouter http {status}, attempt {attempt}; {text}");
-        // 4xx guardrails (privacy 404, auth, bad request, dead balance) never
-        // succeed on retry — fail fast instead of burning 3 backoffs per batch.
-        let code = status.as_u16();
-        if matches!(code, 400 | 401 | 403 | 404) {
-            return Err(anyhow!("openrouter http {status} (non-retryable): {text}"));
+        if let Some(e) = openrouter_fatal(status.as_u16(), &text) {
+            return Err(e);
         }
         if status.as_u16() == 402 {
-            if text.contains("Insufficient credits") || text.contains("never purchased credits") {
-                return Err(anyhow!("openrouter 402 insufficient credits: {text}"));
-            }
             let cur = payload["max_tokens"].as_u64().unwrap_or(32768);
             if cur > 8192 {
                 let lower = cur / 2;
@@ -643,29 +609,24 @@ async fn openrouter_with_model(
             }
             return Err(anyhow!("openrouter low balance (402): {text}"));
         }
-        tokio::time::sleep(retry_delay(attempt, retry_after)).await;
+        tokio::time::sleep(retry_delay(attempt, wait)).await;
     }
     Err(anyhow!(
         "openrouter {model} failed after {OPENROUTER_MAX_ATTEMPTS} attempts"
     ))
 }
 
-fn response_text(body: &Value) -> Result<String> {
-    Ok(body
-        .get("candidates")
-        .and_then(|c| c.as_array())
-        .and_then(|c| c.first())
-        .and_then(|c| c.get("content"))
-        .and_then(|c| c.get("parts"))
-        .and_then(|p| p.as_array())
+fn response_text(body: &Value) -> String {
+    body.pointer("/candidates/0/content/parts")
+        .and_then(Value::as_array)
         .map(|parts| {
             parts
                 .iter()
-                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                .filter_map(|p| p.get("text").and_then(Value::as_str))
                 .collect::<Vec<_>>()
                 .join("")
         })
-        .unwrap_or_default())
+        .unwrap_or_default()
 }
 
 fn parse_llm_text(text: &str) -> Result<Vec<LlmAction>> {
@@ -687,7 +648,7 @@ fn parse_llm_text(text: &str) -> Result<Vec<LlmAction>> {
         _ => return Err(anyhow!("unexpected LLM response shape")),
     };
 
-    let mut actions = Vec::new();
+    let mut actions = Vec::with_capacity(raw.len());
     for v in raw {
         match serde_json::from_value::<LlmAction>(v.clone()) {
             Ok(a) => actions.push(a),
@@ -765,7 +726,6 @@ fn strip_code_fences(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::ActionType;
 
     #[test]
     fn strips_fences() {
@@ -780,7 +740,7 @@ mod tests {
                 "content": {"parts": [{"text": "[{\"establishment\":\"Domino's\",\"actionType\":\"licence_suspension\",\"sourceIndex\":0}]"}]}
             }]
         });
-        let actions = parse_llm_text(&response_text(&body).unwrap()).unwrap();
+        let actions = parse_llm_text(&response_text(&body)).unwrap();
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].establishment, "Domino's");
         assert_eq!(actions[0].action_type, ActionType::LicenceSuspension);
@@ -793,7 +753,7 @@ mod tests {
                 "content": {"parts": [{"text": "[{\"establishment\":\"X\",\"action_type\":\"inspection\",\"source_index\":0}]"}]}
             }]
         });
-        let actions = parse_llm_text(&response_text(&body).unwrap()).unwrap();
+        let actions = parse_llm_text(&response_text(&body)).unwrap();
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].action_type, ActionType::Inspection);
     }
@@ -805,7 +765,7 @@ mod tests {
                 "content": {"parts": [{"text": "[{\"establishment\":\"X\",\"actionType\":\"sealing\",\"violations\":null,\"platforms\":null,\"source_index\":0}]"}]}
             }]
         });
-        let actions = parse_llm_text(&response_text(&body).unwrap()).unwrap();
+        let actions = parse_llm_text(&response_text(&body)).unwrap();
         assert_eq!(actions.len(), 1);
         assert!(actions[0].violations.is_empty());
         assert!(actions[0].platforms.is_empty());
@@ -818,12 +778,7 @@ mod tests {
                 "content": {"parts": [{"text": "[{\"establishment\":\"X\",\"actionType\":\"bogus\",\"sourceIndex\":0}]"}]}
             }]
         });
-        assert_eq!(
-            parse_llm_text(&response_text(&body).unwrap())
-                .unwrap()
-                .len(),
-            0
-        );
+        assert_eq!(parse_llm_text(&response_text(&body)).unwrap().len(), 0);
     }
 
     #[tokio::test]
@@ -838,8 +793,8 @@ mod tests {
         let body = json!({
             "candidates": [{"finishReason": "MAX_TOKENS", "content": {"parts": []}}]
         });
-        assert_eq!(response_text(&body).unwrap(), "");
-        assert!(response_text(&json!({})).unwrap().is_empty());
+        assert_eq!(response_text(&body), "");
+        assert!(response_text(&json!({})).is_empty());
     }
 
     #[test]
@@ -880,25 +835,31 @@ mod tests {
 
     #[test]
     fn rule_fallback_keeps_signal_items_only() {
-        let mk = |title: &str| NewsItem {
-            title: title.into(),
-            url: "https://x.test/1".into(),
-            source: None,
-            published: None,
-            snippet: None,
+        let mk = |title: &str| Job {
+            orig: 0,
+            item: NewsItem {
+                title: title.into(),
+                url: "https://x.test/1".into(),
+                source: None,
+                published: None,
+                snippet: None,
+            },
         };
-        let items = vec![
-            (4, mk("Domino's licence suspended in Mumbai over pests")),
-            (7, mk("cricket highlights and match report")),
+        let jobs = vec![
+            Job {
+                orig: 4,
+                item: mk("Domino's licence suspended in Mumbai over pests").item,
+            },
+            Job {
+                orig: 7,
+                item: mk("cricket highlights and match report").item,
+            },
         ];
-        assert!(!is_likely_relevant(&items[1].1));
-        let kept = rule_extract(&items);
+        assert!(triage(&haystack(&jobs[1].item)).is_none());
+        let kept = rule_extract(&jobs);
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].source_index, 4);
-        assert_eq!(
-            kept[0].action_type,
-            crate::models::ActionType::LicenceSuspension
-        );
+        assert_eq!(kept[0].action_type, ActionType::LicenceSuspension);
     }
 
     #[test]
