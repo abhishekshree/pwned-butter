@@ -38,7 +38,9 @@ fn retry_delay(attempt: usize, retry_after: Option<u64>) -> Duration {
     Duration::from_secs(secs - nanos % (secs / 2 + 1))
 }
 const BATCH_SIZE: usize = 20;
-const MAX_CONCURRENT: usize = 2;
+// ponytail: free-tier quota is 5 RPM / 20 RPD — 2 concurrent workers re-hit
+// 429s in lockstep, so run batches single-file and honor RetryInfo delays.
+const MAX_CONCURRENT: usize = 1;
 
 /// Floating alias: always tracks the newest Flash. Deliberate — pinned
 /// 3.5-flash underperformed, so we ride latest instead of a version.
@@ -46,9 +48,15 @@ pub const DEFAULT_GEMINI_MODEL: &str = "gemini-flash-latest";
 
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_MAX_ATTEMPTS: usize = 3;
-/// Muse Spark over the existing OpenRouter pipe: near-free contributor
-/// pricing, follows the strict-JSON extraction prompt.
-const DEFAULT_OPENROUTER_MODEL: &str = "meta/muse-spark-1.3-contributor";
+/// Verified live against the OpenRouter /models API. lfm-2.5 is built for
+/// data extraction with structured-output support; z-ai stays last as the
+/// privacy-safe resort under no-training settings.
+const DEFAULT_OPENROUTER_MODEL: &str = "liquid/lfm-2.5-2.6b:free";
+const OPENROUTER_FALLBACKS: &[&str] = &[
+    "cohere/north-mini-code:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "z-ai/glm-5.2:free",
+];
 
 pub async fn extract(
     api_key: &str,
@@ -60,22 +68,41 @@ pub async fn extract(
         return Ok((Vec::new(), 0));
     }
 
+    // Algorithmic pre-filter: only spend quota on items with an FDA/enforcement
+    // signal. Drops obvious non-matches before batching; original indices are
+    // carried alongside so source_index still addresses `items` for build_rows.
+    let indexed: Vec<(usize, NewsItem)> = items
+        .iter()
+        .cloned()
+        .enumerate()
+        .filter(|(_, it)| is_likely_relevant(it))
+        .collect();
+    eprintln!(
+        "llm pre-filter: {}/{} items relevant",
+        indexed.len(),
+        items.len()
+    );
+    if indexed.is_empty() {
+        return Ok((Vec::new(), 0));
+    }
+
     let api_key = api_key.to_owned();
     let model = model.to_owned();
     let requests = Arc::new(AtomicUsize::new(0));
     let sem = Arc::new(Semaphore::new(MAX_CONCURRENT));
     let mut tasks = Vec::new();
 
-    for (offset, chunk) in items.chunks(BATCH_SIZE).enumerate() {
+    for (batch_no, chunk) in indexed.chunks(BATCH_SIZE).enumerate() {
         let sem = Arc::clone(&sem);
         let requests = Arc::clone(&requests);
         let api_key = api_key.clone();
         let model = model.clone();
-        let chunk = chunk.to_vec();
+        let idx_map: Vec<usize> = chunk.iter().map(|(i, _)| *i).collect();
+        let chunk_items: Vec<NewsItem> = chunk.iter().map(|(_, it)| it.clone()).collect();
         tasks.push(tokio::spawn(async move {
             let _permit = sem.acquire_owned().await.expect("semaphore closed");
-            let batch = extract_batch(&api_key, &model, &chunk, &requests, delivery).await;
-            (offset, batch)
+            let batch = extract_batch(&api_key, &model, &chunk_items, &requests, delivery).await;
+            (batch_no, idx_map, chunk_items, batch)
         }));
     }
 
@@ -83,15 +110,34 @@ pub async fn extract(
     let mut actions: Vec<LlmAction> = Vec::new();
     let mut failed = 0usize;
     for task in tasks {
-        let (offset, result) = task.await.context("llm batch task join")?;
+        let (batch_no, idx_map, chunk_items, result) = task.await.context("llm batch task join")?;
         match result {
             Ok(mut batch) => {
-                apply_offset(&mut batch, offset * BATCH_SIZE);
-                actions.append(&mut batch);
+                // Remap filtered-chunk positions back to original item indices.
+                let mut remapped = Vec::with_capacity(batch.len());
+                for a in batch.drain(..) {
+                    if let Some(orig) = idx_map.get(a.source_index).copied() {
+                        let mut a = a;
+                        a.source_index = orig;
+                        remapped.push(a);
+                    }
+                }
+                actions.append(&mut remapped);
             }
             Err(e) => {
-                failed += 1;
-                eprintln!("llm batch {offset} failed: {e}");
+                // Rule fallback keeps this batch's data instead of losing it.
+                let base: Vec<(usize, NewsItem)> = idx_map.into_iter().zip(chunk_items).collect();
+                let fallback = rule_extract(&base);
+                if fallback.is_empty() {
+                    failed += 1;
+                    eprintln!("llm batch {batch_no} failed: {e}");
+                } else {
+                    eprintln!(
+                        "llm batch {batch_no} failed ({e:#}); rule fallback kept {}",
+                        fallback.len()
+                    );
+                    actions.extend(fallback);
+                }
             }
         }
     }
@@ -140,10 +186,96 @@ pub async fn extract(
     Ok((actions, calls))
 }
 
-fn apply_offset(actions: &mut [LlmAction], offset: usize) {
-    for a in actions.iter_mut() {
-        a.source_index += offset;
+fn haystack(it: &NewsItem) -> String {
+    format!(
+        "{} {} {}",
+        it.title,
+        it.snippet.as_deref().unwrap_or(""),
+        it.source.as_deref().unwrap_or("")
+    )
+    .to_lowercase()
+}
+
+fn action_signal(text: &str) -> Option<crate::models::ActionType> {
+    if text.contains("improvement notice") {
+        Some(crate::models::ActionType::ImprovementNotice)
+    } else if text.contains("licence") && text.contains("suspend")
+        || text.contains("license") && text.contains("suspend")
+    {
+        Some(crate::models::ActionType::LicenceSuspension)
+    } else if text.contains("stop business")
+        || text.contains("closure") && text.contains("order")
+        || text.contains("shut down") && text.contains("fda")
+    {
+        Some(crate::models::ActionType::StopBusiness)
+    } else if text.contains("seal") {
+        Some(crate::models::ActionType::Sealing)
+    } else if text.contains("seiz") {
+        Some(crate::models::ActionType::Seizure)
+    } else if text.contains("reopen") {
+        Some(crate::models::ActionType::Reopened)
+    } else if text.contains("raid") || text.contains("inspect") || text.contains("fda") {
+        Some(crate::models::ActionType::Inspection)
+    } else {
+        None
     }
+}
+
+fn is_likely_relevant(it: &NewsItem) -> bool {
+    let h = haystack(it);
+    action_signal(&h).is_some()
+        && (h.contains("fda")
+            || h.contains("food safety")
+            || h.contains("licence")
+            || h.contains("license")
+            || h.contains("seal")
+            || h.contains("seiz")
+            || h.contains("raid")
+            || h.contains("inspect"))
+}
+
+// Deterministic safety net: when a batch's LLM path fails, keep one minimal
+// record per signal-bearing item so the run degrades instead of zeroing out.
+// Fields the rules can't know (area, violations, dates) stay empty —
+// build_rows + coerce_action_date fill date defaults downstream.
+fn rule_extract(indexed: &[(usize, NewsItem)]) -> Vec<crate::models::LlmAction> {
+    indexed
+        .iter()
+        .filter_map(|(orig, it)| {
+            let h = haystack(it);
+            let action_type = action_signal(&h)?;
+            let name = it
+                .title
+                .split(['|', '-', ':'])
+                .next()
+                .unwrap_or(it.title.as_str())
+                .trim()
+                .chars()
+                .take(120)
+                .collect::<String>()
+                .trim()
+                .to_string();
+            if name.is_empty() {
+                return None;
+            }
+            Some(crate::models::LlmAction {
+                establishment: name,
+                area: None,
+                city: None,
+                brand: None,
+                operator: None,
+                outlet_type: None,
+                action_type,
+                action_date: None,
+                violations: Vec::new(),
+                compliance_score: None,
+                fssai_number: None,
+                details: it.snippet.clone(),
+                platforms: Vec::new(),
+                source_index: *orig,
+            })
+        })
+        .collect()
 }
 
 /// Ask Gemini which of today's records describe an event already covered by
@@ -365,7 +497,8 @@ async fn extract_batch(
                 return extract_openrouter(openrouter_key.as_deref(), items, requests, delivery)
                     .await;
             }
-            tokio::time::sleep(retry_delay(attempt, retry_after)).await;
+            let wait = retry_after.or_else(|| retry_delay_from_body(&text));
+            tokio::time::sleep(retry_delay(attempt, wait)).await;
             continue;
         }
         return Err(anyhow!("gemini http {status}: {text}"));
@@ -376,6 +509,24 @@ async fn extract_batch(
 
 fn is_quota_exhausted(text: &str) -> bool {
     text.contains("Quota exceeded") || text.contains("RESOURCE_EXHAUSTED")
+}
+
+// Gemini sends the backoff in the error body
+// (google.rpc.RetryInfo.retryDelay, e.g. "58s"), not the retry-after header
+// the old code read. Honor it so retries stop escalating 5/min into 20/day.
+fn retry_delay_from_body(text: &str) -> Option<u64> {
+    let body: Value = serde_json::from_str(text).ok()?;
+    let details = body.get("error")?.get("details")?.as_array()?;
+    details.iter().find_map(|d| {
+        let s = d.get("retryDelay")?.as_str()?;
+        let num: String = s
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
+        num.parse::<f64>()
+            .ok()
+            .map(|secs| secs.ceil().max(1.0) as u64)
+    })
 }
 
 async fn extract_openrouter(
@@ -403,13 +554,34 @@ async fn openrouter_with_model(
     delivery: bool,
 ) -> Result<Vec<LlmAction>> {
     eprintln!("openrouter attempt: model={model}, items={}", items.len());
+    let fallbacks: Vec<String> = std::env::var("OPENROUTER_FALLBACKS")
+        .map(|s| {
+            s.split(',')
+                .map(|m| m.trim().to_string())
+                .filter(|m| !m.is_empty() && m != model)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|_| {
+            OPENROUTER_FALLBACKS
+                .iter()
+                .filter(|m| **m != model)
+                .map(|m| m.to_string())
+                .collect()
+        });
+    let fallbacks_json: Vec<serde_json::Value> = fallbacks
+        .iter()
+        .map(|m| serde_json::Value::String(m.clone()))
+        .collect();
     let mut payload = json!({
         "model": model,
+        "models": fallbacks_json,
         "messages": [
             {"role": "system", "content": system_prompt(delivery)},
             {"role": "user", "content": serde_json::to_string(&json!({ "items": items })).context("serialize news batch")?}
         ],
         "tools": [{"type": "openrouter:web_search"}],
+        "response_format": {"type": "json_object"},
+        "plugins": [{"id": "response-healing"}],
         "temperature": 0.0,
         "max_tokens": 32768
     });
@@ -452,6 +624,12 @@ async fn openrouter_with_model(
             .await
             .unwrap_or_else(|e| format!("<unreadable body: {e}>"));
         eprintln!("openrouter http {status}, attempt {attempt}; {text}");
+        // 4xx guardrails (privacy 404, auth, bad request, dead balance) never
+        // succeed on retry — fail fast instead of burning 3 backoffs per batch.
+        let code = status.as_u16();
+        if matches!(code, 400 | 401 | 403 | 404) {
+            return Err(anyhow!("openrouter http {status} (non-retryable): {text}"));
+        }
         if status.as_u16() == 402 {
             if text.contains("Insufficient credits") || text.contains("never purchased credits") {
                 return Err(anyhow!("openrouter 402 insufficient credits: {text}"));
@@ -692,25 +870,35 @@ mod tests {
     }
 
     #[test]
-    fn applies_batch_offset_to_source_index() {
-        let mut a = LlmAction {
-            establishment: "X".into(),
-            area: None,
-            city: None,
-            brand: None,
-            operator: None,
-            outlet_type: None,
-            action_type: ActionType::Inspection,
-            action_date: None,
-            violations: vec![],
-            compliance_score: None,
-            fssai_number: None,
-            details: None,
-            platforms: vec![],
-            source_index: 3,
+    fn retry_delay_reads_gemini_retry_info() {
+        let body = r#"{"error": {"details": [{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "58s"}]}}"#;
+        assert_eq!(retry_delay_from_body(body), Some(58));
+        let frac = r#"{"error": {"details": [{"retryDelay": "6.13s"}]}}"#;
+        assert_eq!(retry_delay_from_body(frac), Some(7));
+        assert_eq!(retry_delay_from_body("not json"), None);
+    }
+
+    #[test]
+    fn rule_fallback_keeps_signal_items_only() {
+        let mk = |title: &str| NewsItem {
+            title: title.into(),
+            url: "https://x.test/1".into(),
+            source: None,
+            published: None,
+            snippet: None,
         };
-        apply_offset(std::slice::from_mut(&mut a), 40);
-        assert_eq!(a.source_index, 43);
+        let items = vec![
+            (4, mk("Domino's licence suspended in Mumbai over pests")),
+            (7, mk("cricket highlights and match report")),
+        ];
+        assert!(!is_likely_relevant(&items[1].1));
+        let kept = rule_extract(&items);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].source_index, 4);
+        assert_eq!(
+            kept[0].action_type,
+            crate::models::ActionType::LicenceSuspension
+        );
     }
 
     #[test]
