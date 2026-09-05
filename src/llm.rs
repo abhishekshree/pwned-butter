@@ -56,10 +56,13 @@ pub async fn extract(
     items: &[NewsItem],
     delivery: bool,
 ) -> Result<(Vec<LlmAction>, usize)> {
-    let mut jobs = Vec::with_capacity(items.len());
-    for (orig, item) in items.iter().cloned().enumerate() {
-        if triage(&haystack(&item)).is_some() {
-            jobs.push(Job { orig, item });
+    let mut jobs = Vec::new();
+    for (orig, item) in items.iter().enumerate() {
+        if triage(&haystack(item)).is_some() {
+            jobs.push(Job {
+                orig,
+                item: item.clone(),
+            });
         }
     }
     eprintln!(
@@ -150,8 +153,8 @@ fn signals(hay: &str) -> Option<ActionType> {
     } else if hay.contains("suspend") && (hay.contains("licence") || hay.contains("license")) {
         Some(ActionType::LicenceSuspension)
     } else if hay.contains("stop business")
-        || hay.contains("closure") && hay.contains("order")
-        || hay.contains("shut down") && hay.contains("fda")
+        || (hay.contains("closure") && hay.contains("order"))
+        || (hay.contains("shut down") && hay.contains("fda"))
     {
         Some(ActionType::StopBusiness)
     } else if hay.contains("seal") {
@@ -167,21 +170,19 @@ fn signals(hay: &str) -> Option<ActionType> {
     }
 }
 
-/// A signal only counts with FDA/enforcement context — a bare "sealed"
-/// headline without it is not our jurisdiction.
+// Only these corroborate a generic-English trigger: "fda" and
+// licence/license are unambiguous enough. Deliberately excludes
+// seal/seiz/raid/inspect — those ARE the ambiguous words, so they
+// can't corroborate themselves.
+const CORROBORATION: &[&str] = &["fda", "food safety", "licence", "license"];
+
 fn triage(hay: &str) -> Option<ActionType> {
-    const CONTEXT: &[&str] = &[
-        "fda",
-        "food safety",
-        "licence",
-        "license",
-        "seal",
-        "seiz",
-        "raid",
-        "inspect",
-    ];
     let action = signals(hay)?;
-    CONTEXT.iter().any(|c| hay.contains(c)).then_some(action)
+    let needs_corroboration = matches!(
+        action,
+        ActionType::Sealing | ActionType::Seizure | ActionType::Inspection
+    );
+    (!needs_corroboration || CORROBORATION.iter().any(|c| hay.contains(c))).then_some(action)
 }
 
 // Deterministic safety net: when a batch's LLM path fails, keep one minimal
@@ -449,15 +450,12 @@ async fn extract_batch(
                 tokio::time::sleep(retry_delay(attempt, None)).await;
                 continue;
             }
-            return remap(parse_llm_text(&text)?, chunk);
+            return Ok(remap(parse_llm_text(&text)?, chunk));
         }
         if status.as_u16() == 429 || status.is_server_error() {
             eprintln!("gemini http {status}, attempt {attempt}; {text}");
             if is_quota_exhausted(&text) {
-                let batch: Vec<NewsItem> = chunk.iter().map(|j| j.item.clone()).collect();
-                let (actions, _n) =
-                    fallback(openrouter_key.as_deref(), &batch, calls, delivery).await?;
-                return remap(actions, chunk);
+                return escalate(openrouter_key.as_deref(), chunk, calls, delivery).await;
             }
             let wait = wait.or_else(|| retry_delay_from_body(&text));
             tokio::time::sleep(retry_delay(attempt, wait)).await;
@@ -466,22 +464,32 @@ async fn extract_batch(
         return Err(anyhow!("gemini http {status}: {text}"));
     }
     eprintln!("gemini API failed after {MAX_ATTEMPTS} attempts; falling back to openrouter");
-    let batch: Vec<NewsItem> = chunk.iter().map(|j| j.item.clone()).collect();
-    let (actions, _n) = fallback(openrouter_key.as_deref(), &batch, calls, delivery).await?;
-    remap(actions, chunk)
+    escalate(openrouter_key.as_deref(), chunk, calls, delivery).await
 }
 
-/// Readdress filtered-chunk positions back to the caller's item indices;
-/// orphan indices the LLM invented are dropped, not trusted.
-fn remap(mut actions: Vec<LlmAction>, chunk: &[Job]) -> Result<Vec<LlmAction>> {
-    let mut out = Vec::with_capacity(actions.len());
-    for mut a in actions.drain(..) {
-        if let Some(job) = chunk.get(a.source_index) {
+/// Single OpenRouter escalation path: fall back, then readdress positions
+/// to the caller's item indices; orphan indices the LLM invented are dropped.
+async fn escalate(
+    openrouter_key: Option<&str>,
+    chunk: &[Job],
+    calls: &mut usize,
+    delivery: bool,
+) -> Result<Vec<LlmAction>> {
+    Ok(remap(
+        fallback(openrouter_key, chunk, calls, delivery).await?,
+        chunk,
+    ))
+}
+
+fn remap(actions: Vec<LlmAction>, chunk: &[Job]) -> Vec<LlmAction> {
+    actions
+        .into_iter()
+        .filter_map(|mut a| {
+            let job = chunk.get(a.source_index)?;
             a.source_index = job.orig;
-            out.push(a);
-        }
-    }
-    Ok(out)
+            Some(a)
+        })
+        .collect()
 }
 
 fn is_quota_exhausted(text: &str) -> bool {
@@ -508,10 +516,10 @@ fn retry_delay_from_body(text: &str) -> Option<u64> {
 
 async fn fallback(
     api_key: Option<&str>,
-    items: &[NewsItem],
+    chunk: &[Job],
     calls: &mut usize,
     delivery: bool,
-) -> Result<(Vec<LlmAction>, usize)> {
+) -> Result<Vec<LlmAction>> {
     let Some(api_key) = api_key else {
         return Err(anyhow!(
             "gemini API failed and no OPENROUTER_API_KEY fallback configured"
@@ -520,9 +528,7 @@ async fn fallback(
     // ponytail: env override so the next model rot is a secret change, not a deploy
     let model =
         std::env::var("OPENROUTER_MODEL").unwrap_or_else(|_| DEFAULT_OPENROUTER_MODEL.to_string());
-    let before = *calls;
-    let actions = openrouter_with_model(api_key, &model, items, calls, delivery).await?;
-    Ok((actions, *calls - before))
+    openrouter_with_model(api_key, &model, chunk, calls, delivery).await
 }
 
 /// OpenRouter 404s/4xx on guardrails never succeed on retry — fail fast
@@ -542,11 +548,11 @@ fn openrouter_fatal(status: u16, text: &str) -> Option<anyhow::Error> {
 async fn openrouter_with_model(
     api_key: &str,
     model: &str,
-    items: &[NewsItem],
+    chunk: &[Job],
     calls: &mut usize,
     delivery: bool,
 ) -> Result<Vec<LlmAction>> {
-    eprintln!("openrouter attempt: model={model}, items={}", items.len());
+    eprintln!("openrouter attempt: model={model}, items={}", chunk.len());
     let mut fallbacks: Vec<String> = std::env::var("OPENROUTER_FALLBACKS")
         .map(|s| {
             s.split(',')
@@ -562,7 +568,9 @@ async fn openrouter_with_model(
         "models": fallbacks,
         "messages": [
             {"role": "system", "content": system_prompt(delivery)},
-            {"role": "user", "content": serde_json::to_string(&json!({ "items": items })).context("serialize news batch")?}
+            {"role": "user", "content": serde_json::to_string(
+                &json!({ "items": chunk.iter().map(|j| &j.item).collect::<Vec<_>>() })
+            ).context("serialize news batch")?}
         ],
         "tools": [{"type": "openrouter:web_search"}],
         "response_format": {"type": "json_object"},
@@ -831,6 +839,24 @@ mod tests {
         let frac = r#"{"error": {"details": [{"retryDelay": "6.13s"}]}}"#;
         assert_eq!(retry_delay_from_body(frac), Some(7));
         assert_eq!(retry_delay_from_body("not json"), None);
+    }
+
+    #[test]
+    fn triage_needs_corroboration_only_for_ambiguous_types() {
+        let yes_fda = "fda raid seals eatery";
+        let no_ctx = "shop sealed after fire";
+        assert_eq!(triage(yes_fda), Some(ActionType::Sealing));
+        assert_eq!(triage(no_ctx), None);
+        // unambiguous types pass with no corroboration
+        assert_eq!(
+            triage("outlet served improvement notice"),
+            Some(ActionType::ImprovementNotice)
+        );
+        assert_eq!(triage("eatery reopened"), Some(ActionType::Reopened));
+        assert_eq!(
+            triage("licence suspended over pests"),
+            Some(ActionType::LicenceSuspension)
+        );
     }
 
     #[test]
