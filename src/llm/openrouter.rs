@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::models::LlmAction;
 
@@ -8,14 +8,24 @@ use super::system_prompt;
 use super::triage::Job;
 
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
-/// Verified live against the OpenRouter /models API. lfm-2.5 is built for
-/// data extraction with structured-output support; z-ai stays last as the
-/// privacy-safe resort under no-training settings.
+/// Verified live against the OpenRouter /models API on 2026-10-10, plus
+/// live-probe reliability reports. lfm-2.5 stays primary: purpose-built
+/// for extraction, full structured-output flags, consistently answers.
+/// Fallbacks are current-generation only: nemotron-3.5-lightning (newest
+/// NVIDIA, 1M context), dots-3-note (structured outputs, 512k context),
+/// gemma-4-31b (strong dense instruct). Deliberately excluded: cohere
+/// north-mini-code (code model, no response_format support), reasoning
+/// models (burn output budget, break JSON-only replies), inkling
+/// (403 unless called from an agentic harness), poolside laguna
+/// (flaky/empty answers in probes).
+/// NOTE: free endpoints offer no ZDR, so an account that requires
+/// zero-data-retention 404s on all of these — relax the privacy setting
+/// or fund credits plus a ZDR-capable model instead.
 pub(crate) const DEFAULT_OPENROUTER_MODEL: &str = "liquid/lfm-2.5-2.6b:free";
 pub(crate) const OPENROUTER_FALLBACKS: &[&str] = &[
-    "cohere/north-mini-code:free",
-    "nvidia/nemotron-3-super-120b-a12b:free",
-    "z-ai/glm-5.2:free",
+    "nvidia/nemotron-3.5-lightning:free",
+    "dots-studio/dots-3-note-preview:free",
+    "google/gemma-4-31b-it:free",
 ];
 const OPENROUTER_MAX_ATTEMPTS: usize = 3;
 
