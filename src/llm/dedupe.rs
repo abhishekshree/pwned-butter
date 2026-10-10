@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::db::{ActionInsert, RecentEvent};
 

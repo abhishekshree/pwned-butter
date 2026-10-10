@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 use crate::db::{ActionInsert, RecentEvent};
 use crate::models::{LlmAction, NewsItem};

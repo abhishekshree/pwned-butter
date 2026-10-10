@@ -52,7 +52,7 @@ pub(crate) fn check(a: &LlmAction) -> Result<(), &'static str> {
     if details.chars().count() < MIN_DETAILS_CHARS {
         return Err("no substantive details");
     }
-    if a.city.as_deref().map(str::trim).unwrap_or("").is_empty() {
+    if a.city.as_deref().is_none_or(|s| s.trim().is_empty()) {
         return Err("no city");
     }
     Ok(())

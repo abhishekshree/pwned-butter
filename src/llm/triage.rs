@@ -165,7 +165,9 @@ mod tests {
             None,
         );
         assert_eq!(
-            triage("maharashtra fda awaits replies from five mca restaurants over licensing violations"),
+            triage(
+                "maharashtra fda awaits replies from five mca restaurants over licensing violations"
+            ),
             None,
         );
         assert_eq!(

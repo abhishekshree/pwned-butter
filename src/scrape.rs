@@ -4,7 +4,7 @@ use serde_json::json;
 
 use crate::db::{self, ActionInsert};
 use crate::llm;
-use crate::models::{canonical_outlet_type, coerce_action_date, nonempty, LlmAction, NewsItem};
+use crate::models::{LlmAction, NewsItem, canonical_outlet_type, coerce_action_date, nonempty};
 use crate::news;
 
 #[derive(Debug, Clone)]

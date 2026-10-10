@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::models::LlmAction;
 
@@ -12,7 +12,9 @@ use super::{strip_code_fences, system_prompt, truncate};
 const MAX_ATTEMPTS: usize = 6;
 
 pub(crate) fn gemini_url(model: &str, api_key: &str) -> String {
-    format!("https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}")
+    format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    )
 }
 
 pub(crate) fn retry_delay(attempt: usize, retry_after: Option<u64>) -> Duration {
@@ -291,7 +293,9 @@ mod tests {
 
     #[test]
     fn parses_minimal_action() {
-        let text = gemini_text("[{\"establishment\":\"Domino's\",\"actionType\":\"licence_suspension\",\"sourceIndex\":0}]");
+        let text = gemini_text(
+            "[{\"establishment\":\"Domino's\",\"actionType\":\"licence_suspension\",\"sourceIndex\":0}]",
+        );
         let actions = parse_llm_text(&text).unwrap();
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].establishment, "Domino's");
@@ -310,7 +314,9 @@ mod tests {
 
     #[test]
     fn tolerates_null_arrays() {
-        let text = gemini_text("[{\"establishment\":\"X\",\"actionType\":\"sealing\",\"violations\":null,\"platforms\":null,\"source_index\":0}]");
+        let text = gemini_text(
+            "[{\"establishment\":\"X\",\"actionType\":\"sealing\",\"violations\":null,\"platforms\":null,\"source_index\":0}]",
+        );
         let actions = parse_llm_text(&text).unwrap();
         assert_eq!(actions.len(), 1);
         assert!(actions[0].violations.is_empty());

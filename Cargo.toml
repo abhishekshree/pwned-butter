@@ -1,7 +1,8 @@
 [package]
 name = "fda-mumbai-tracker"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+rust-version = "1.85"
 description = "A Rust ETL that tracks Maharashtra FDA food-safety actions and stores them in Neon for a Next.js dashboard."
 license = "MIT"
 
@@ -16,10 +17,6 @@ path = "src/bin/local_scrape.rs"
 [[bin]]
 name = "migrate"
 path = "src/bin/migrate.rs"
-
-[[bin]]
-name = "backfill"
-path = "src/bin/backfill.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
