@@ -18,6 +18,10 @@ path = "src/bin/local_scrape.rs"
 name = "migrate"
 path = "src/bin/migrate.rs"
 
+[[bin]]
+name = "cache_bust"
+path = "src/bin/cache_bust.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 serde = { version = "1", features = ["derive"] }
