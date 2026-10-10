@@ -4,7 +4,7 @@ import { sql } from "./db";
 import { activeFilter } from "./href";
 import type { ActionRow, DimCount, Filters, RunSummary, Stats } from "./types";
 
-const DAILY = { revalidate: 21600 };
+const DAILY = { revalidate: 21600, tags: ["actions"] };
 
 const toInt = (v: unknown): number =>
   typeof v === "string" ? parseInt(v, 10) : Number(v ?? 0);
@@ -167,7 +167,7 @@ function normalizeRun(r: Record<string, unknown>): RunSummary {
 
 export const getStats = unstable_cache(
   async (): Promise<Stats> => {
-    const [total, runs, byStatus, byActionType, byCity] = await Promise.all([
+    const [total, runs, byStatus, byActionType, byCity, byArea, range] = await Promise.all([
       queryRows<{ n: unknown }>("SELECT COUNT(*)::int AS n FROM actions"),
       queryRows<Record<string, unknown>>(`SELECT id::int AS id, started_at, finished_at, status,
             articles_seen::int AS articles_seen, articles_new::int AS articles_new,
@@ -176,6 +176,10 @@ export const getStats = unstable_cache(
       dims("status"),
       dims("action_type"),
       dims("city", 8),
+      dims("area", 50),
+      queryRows<Record<string, unknown>>(
+        "SELECT MIN(action_date)::text AS min_d, MAX(action_date)::text AS max_d, COUNT(DISTINCT action_date)::int AS days FROM actions",
+      ),
     ]);
 
     return {
@@ -184,6 +188,14 @@ export const getStats = unstable_cache(
       byStatus,
       byActionType,
       byCity,
+      byArea,
+      dateRange: range[0]?.max_d
+        ? {
+            from: String(range[0].min_d ?? ""),
+            to: String(range[0].max_d ?? ""),
+            days: toInt(range[0].days),
+          }
+        : null,
     };
   },
   ["get-stats", "v2"],

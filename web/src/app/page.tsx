@@ -10,18 +10,16 @@ import {
 } from "lucide-react";
 
 import { ActionCard } from "@/components/action-card";
-import { BarChartCard, DonutChart } from "@/components/charts";
-import { Controls } from "@/components/filters";
+import { Analytics } from "@/components/analytics";
+import { AreaMap } from "@/components/area-map";
+import { SearchInput } from "@/components/search-input";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { buttonVariants } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
-import { formatDateTime, formatNumber } from "@/lib/format";
+import { formatDate, formatDateTime, formatNumber } from "@/lib/format";
 import { buildHref } from "@/lib/href";
 import {
   getStats,
   listActions,
-  listBrands,
-  listCities,
 } from "@/lib/queries";
 import type { Filters } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -67,14 +65,10 @@ export default async function Home({
   const hasFilters = href !== "/";
 
   let stats;
-  let brands: string[];
-  let cities: string[];
   let data: { total: number; actions: import("@/lib/types").ActionRow[] };
   try {
-    [stats, brands, cities, data] = await Promise.all([
+    [stats, data] = await Promise.all([
       getStats(),
-      listBrands(),
-      listCities(),
       listActions(filters, { limit: PAGE_SIZE, offset: (page - 1) * PAGE_SIZE }),
     ]);
   } catch (error) {
@@ -104,38 +98,6 @@ export default async function Home({
   const totalActions = stats.totalActions;
   const suspendedCount = byStatus.get("suspended") ?? 0;
   const reopenedCount = byStatus.get("reopened") ?? 0;
-  const activeCount = byStatus.get("active") ?? 0;
-
-  const kpis = [
-    {
-      label: "TOTAL ACTIONS",
-      value: formatNumber(totalActions),
-      sub: "Logged enforcement actions",
-      border: "border-primary/20 hover:border-primary/40",
-      indicator: "bg-blue-500",
-    },
-    {
-      label: "SUSPENDED",
-      value: formatNumber(suspendedCount),
-      sub: `${totalActions > 0 ? Math.round((suspendedCount / totalActions) * 100) : 0}% of all recorded actions`,
-      border: "border-red-500/20 hover:border-red-500/40",
-      indicator: "bg-red-500",
-    },
-    {
-      label: "REOPENED",
-      value: formatNumber(reopenedCount),
-      sub: "Cleared post-compliance verification",
-      border: "border-emerald-500/20 hover:border-emerald-500/40",
-      indicator: "bg-emerald-500",
-    },
-    {
-      label: "NOTICES & RAIDS",
-      value: formatNumber(activeCount),
-      sub: "Active inspection hearings & seizures",
-      border: "border-amber-500/20 hover:border-amber-500/40",
-      indicator: "bg-amber-500",
-    },
-  ];
 
   return (
     <main className="min-h-screen">
@@ -158,6 +120,9 @@ export default async function Home({
               </div>
               <p className="truncate font-mono text-[11px] text-muted-foreground">
                 live FDA raids, suspensions &amp; seizures across Maharashtra
+                {stats.dateRange
+                  ? ` · ${stats.dateRange.days}d of data (${formatDate(stats.dateRange.from)} – ${formatDate(stats.dateRange.to)})`
+                  : null}
               </p>
             </div>
           </div>
@@ -184,104 +149,87 @@ export default async function Home({
       </header>
 
       {/* Main Container */}
-      <div className="mx-auto max-w-6xl space-y-6 px-4 py-6 sm:px-6">
-        {/* KPI Metrics Grid */}
-        <section className="grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-4">
-          {kpis.map((k) => {
-            return (
-              <div
-                key={k.label}
-                className={cn(
-                  "group relative flex flex-col justify-between rounded-xl border bg-card p-3.5 sm:p-4 shadow-xs transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md dark:bg-card/90",
-                  k.border,
-                )}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="font-mono text-[11px] font-semibold tracking-wider text-muted-foreground uppercase">
-                    {k.label}
-                  </span>
-                  <span className={cn("size-2 rounded-full", k.indicator)} />
-                </div>
-                <div className="mt-2">
-                  <div className="font-mono text-2xl font-bold tracking-tight text-foreground sm:text-3xl">
-                    {k.value}
-                  </div>
-                  <div className="mt-1 line-clamp-1 text-[11px] text-muted-foreground">
-                    {k.sub}
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </section>
-
-        {/* Filters and Search Strip */}
-        <section className="rounded-xl border border-border/80 bg-card p-4 shadow-xs dark:bg-card/90">
-          <Controls key={href} initial={filters} brands={brands} cities={cities} />
-
-          {/* Status Tabs & Active Filters */}
-          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-border/50 pt-3">
-            <div className="flex flex-wrap items-center gap-1.5">
-              <span className="font-mono text-[10px] font-semibold uppercase text-muted-foreground mr-1">
-                Status:
-              </span>
-              {STATUS_CHIPS.map((chip) => {
-                const active =
-                  chip.v === null ? !filters.status : filters.status === chip.v;
-                const count =
-                  chip.v === null ? stats.totalActions : (byStatus.get(chip.v) ?? 0);
-                return (
-                  <Link
-                    key={chip.v ?? "all"}
-                    href={buildHref({ ...filters, status: chip.v ?? undefined })}
-                    aria-current={active ? "page" : undefined}
-                    className={cn(
-                      "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors",
-                      active
-                        ? "border-primary bg-primary text-primary-foreground font-semibold shadow-xs"
-                        : "border-border bg-muted/40 text-muted-foreground hover:bg-muted hover:text-foreground",
-                    )}
-                  >
-                    <span>{chip.label}</span>
-                    <span
-                      className={cn(
-                        "rounded px-1 font-mono text-[10px] font-bold",
-                        active
-                          ? "bg-primary-foreground/20 text-primary-foreground"
-                          : "bg-background text-muted-foreground",
-                      )}
-                    >
-                      {formatNumber(count)}
-                    </span>
-                  </Link>
-                );
-              })}
+      <div className="mx-auto max-w-6xl space-y-5 px-4 py-6 sm:px-6">
+        {/* Stats + map (two columns) */}
+        <section className="grid grid-cols-1 gap-4 md:grid-cols-3">
+          <div className="flex flex-col justify-center gap-3 rounded-xl border border-border/80 bg-card p-4 shadow-xs dark:bg-card/90">
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="text-sm text-muted-foreground">Total actions</span>
+              <span className="font-mono text-2xl font-bold text-foreground">{formatNumber(totalActions)}</span>
             </div>
-
-            {hasFilters ? (
-              <Link
-                href="/"
-                className="inline-flex items-center gap-1 font-mono text-xs font-medium text-primary hover:underline"
-              >
-                <RotateCcw className="size-3" />
-                <span>Clear all filters</span>
-              </Link>
+            <div className="flex items-baseline justify-between gap-2 border-t border-border/50 pt-3">
+              <span className="text-sm text-muted-foreground">Suspended</span>
+              <span className="font-mono text-2xl font-bold text-red-600 dark:text-red-400">{formatNumber(suspendedCount)}</span>
+            </div>
+            <div className="flex items-baseline justify-between gap-2 border-t border-border/50 pt-3">
+              <span className="text-sm text-muted-foreground">Reopened</span>
+              <span className="font-mono text-2xl font-bold text-emerald-600 dark:text-emerald-400">{formatNumber(reopenedCount)}</span>
+            </div>
+            {stats.lastRun?.finished_at ? (
+              <p className="inline-flex items-center gap-1 border-t border-border/50 pt-3 font-mono text-xs text-muted-foreground">
+                <Clock className="size-3 text-muted-foreground/70" />
+                Updated {formatDateTime(stats.lastRun.finished_at)}
+              </p>
             ) : null}
+          </div>
+
+          <div className="md:col-span-2">
+            <AreaMap data={stats.byArea} filters={filters} />
           </div>
         </section>
 
-        {/* Visual Analytics / Charts Grid */}
-        <section className="grid grid-cols-1 gap-4 md:grid-cols-3">
-          <Card className="rounded-xl border-border/80 bg-card p-4 shadow-xs dark:bg-card/90">
-            <DonutChart title="Actions by Status" data={stats.byStatus} tag="// STATUS RATIO" />
-          </Card>
-          <Card className="rounded-xl border-border/80 bg-card p-4 shadow-xs dark:bg-card/90">
-            <BarChartCard title="Enforcement Actions" data={stats.byActionType} tag="// ACTION TYPES" />
-          </Card>
-          <Card className="rounded-xl border-border/80 bg-card p-4 shadow-xs dark:bg-card/90">
-            <BarChartCard title="Top Regional Centers" data={stats.byCity} tag="// TOP CITIES" />
-          </Card>
-        </section>
+        {/* Name search */}
+        <SearchInput initial={filters.q ?? ""} filters={filters} />
+
+        {/* Status Tabs & Active Filters */}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="font-mono text-[10px] font-semibold uppercase text-muted-foreground mr-1">
+                  Status:
+                </span>
+                {STATUS_CHIPS.map((chip) => {
+                  const active =
+                    chip.v === null ? !filters.status : filters.status === chip.v;
+                  const count =
+                    chip.v === null ? stats.totalActions : (byStatus.get(chip.v) ?? 0);
+                  return (
+                    <Link
+                      key={chip.v ?? "all"}
+                      href={buildHref({ ...filters, status: chip.v ?? undefined })}
+                      aria-current={active ? "page" : undefined}
+                      className={cn(
+                        "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors",
+                        active
+                          ? "border-primary bg-primary text-primary-foreground font-semibold shadow-xs"
+                          : "border-border bg-muted/40 text-muted-foreground hover:bg-muted hover:text-foreground",
+                      )}
+                    >
+                      <span>{chip.label}</span>
+                      <span
+                        className={cn(
+                          "rounded px-1 font-mono text-[10px] font-bold",
+                          active
+                            ? "bg-primary-foreground/20 text-primary-foreground"
+                            : "bg-background text-muted-foreground",
+                        )}
+                      >
+                        {formatNumber(count)}
+                      </span>
+                    </Link>
+                  );
+                })}
+              </div>
+
+              {hasFilters ? (
+                <Link
+                  href="/"
+                  className="inline-flex items-center gap-1 font-mono text-xs font-medium text-primary hover:underline"
+                >
+                  <RotateCcw className="size-3" />
+                  <span>Clear all filters</span>
+                </Link>
+              ) : null}
+        </div>
 
         {/* Action Feed Section Header */}
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 pb-3">
@@ -296,19 +244,13 @@ export default async function Home({
           </div>
 
           <div className="flex items-center gap-3 font-mono text-xs text-muted-foreground">
-            {stats.lastRun?.finished_at ? (
-              <span className="hidden sm:inline-flex items-center gap-1">
-                <Clock className="size-3 text-muted-foreground/70" />
-                Updated {formatDateTime(stats.lastRun.finished_at)}
-              </span>
-            ) : null}
             <span>
               Page {page} of {totalPages}
             </span>
           </div>
         </div>
 
-        {/* Action Cards Feed (2-Column Grid) */}
+        {/* Action Cards Feed (single column, centered) */}
         <section id="list" className="scroll-mt-20">
           {data.actions.length ? (
             <div className="grid grid-cols-1 gap-3.5 md:grid-cols-2">
@@ -340,7 +282,7 @@ export default async function Home({
         </section>
 
         {/* Pagination Controls */}
-        <div className="flex items-center justify-between gap-3 border-t border-border/60 pt-4 pb-6">
+        <div className="flex items-center justify-between gap-3 border-t border-border/60 pt-4 pb-2">
           <div className="font-mono text-xs text-muted-foreground">
             Showing {data.actions.length > 0 ? (page - 1) * PAGE_SIZE + 1 : 0}–
             {Math.min(page * PAGE_SIZE, total)} of {formatNumber(total)}
@@ -401,28 +343,20 @@ export default async function Home({
           </div>
         </div>
 
+        {/* Analytics (collapsed — charts mount only when opened) */}
+        <Analytics
+          byStatus={stats.byStatus}
+          byActionType={stats.byActionType}
+          byCity={stats.byCity}
+        />
+
         {/* Footer */}
-        <footer className="border-t border-border/80 pt-6 pb-12 text-xs">
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-            <p className="max-w-xl leading-relaxed text-muted-foreground">
-              An independent, unofficial compilation of food-safety enforcement actions across
-              Maharashtra, aggregated from public news reporting. Not affiliated with or endorsed
-              by any government body. Use as a reference only — data is news-derived and may
-              contain errors, and is not the definitive truth.
-            </p>
-            <div className="flex flex-wrap gap-2">
-              <span className="rounded-md border border-border/80 bg-card px-2 py-1 font-mono text-[11px] text-muted-foreground">
-                ⚡ Rust Engine
-              </span>
-              <span className="rounded-md border border-border/80 bg-card px-2 py-1 font-mono text-[11px] text-muted-foreground">
-                ☁️ Next.js 16
-              </span>
-              <span className="rounded-md border border-border/80 bg-card px-2 py-1 font-mono text-[11px] text-muted-foreground">
-                🐘 Neon Postgres
-              </span>
-            </div>
-          </div>
-          <div className="mt-6 border-t border-border/40 pt-4 text-muted-foreground">
+        <footer className="border-t border-border/80 pt-6 pb-12 text-xs text-muted-foreground">
+          <p className="max-w-3xl leading-relaxed">
+            Unofficial compilation of Maharashtra food-safety enforcement from public news
+            reporting — not an FDA register, may contain errors. Every record links to its source.
+          </p>
+          <p className="mt-3">
             Built by{" "}
             <a
               href="https://abhishekshree.github.io"
@@ -441,10 +375,9 @@ export default async function Home({
             >
               GitHub
             </a>
-          </div>
+          </p>
         </footer>
       </div>
     </main>
   );
 }
-

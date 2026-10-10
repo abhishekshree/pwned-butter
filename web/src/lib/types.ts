@@ -43,6 +43,8 @@ export type Stats = {
   byStatus: DimCount[];
   byActionType: DimCount[];
   byCity: DimCount[];
+  byArea: DimCount[];
+  dateRange: { from: string; to: string; days: number } | null;
 };
 
 export type Filters = {
