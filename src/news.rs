@@ -47,7 +47,14 @@ const QUERIES: &[&str] = &[
     "site:x.com Blinkit OR Zepto OR Instamart FDA",
 ];
 
-pub const MAX_ITEMS: usize = 50;
+/// The number of distinct, high-signal articles to enrich in one scheduled run.
+///
+/// A single FDA press note can name dozens of outlets, so dropping a relevant
+/// roundup is much more costly than reading a few more articles. This is
+/// deliberately applied before article fetching: Google News returns the same
+/// story from several queries and fetching all of them used to spend the run's
+/// time budget before the later truncation discarded them.
+pub const MAX_ITEMS: usize = 100;
 const FETCH_CONCURRENCY: usize = 8;
 const RSS_CONCURRENCY: usize = 8;
 
@@ -138,7 +145,78 @@ pub async fn fetch_items(client: &reqwest::Client, window: &str) -> Result<Vec<N
             Err(e) => eprintln!("rss query failed: {e}"),
         }
     }
+    let fetched = items.len();
+    let mut seen = HashSet::new();
+    items.retain(|item| seen.insert(item.url.clone()));
+    eprintln!(
+        "rss: {fetched} hits from {} queries, {} distinct Google News URLs",
+        QUERIES.len(),
+        items.len()
+    );
     Ok(items)
+}
+
+/// Rank likely enforcement stories from their RSS metadata before downloading
+/// publisher pages. This is only a priority signal, never an exclusion: a
+/// lower-scoring item still gets selected when there is room.
+fn enforcement_score(item: &NewsItem) -> u8 {
+    let haystack = format!(
+        "{} {} {}",
+        item.title,
+        item.snippet.as_deref().unwrap_or(""),
+        item.source.as_deref().unwrap_or("")
+    )
+    .to_lowercase();
+
+    let mut score = 0;
+    if haystack.contains("maharashtra fda")
+        || haystack.contains("food and drug administration")
+        || haystack.contains("tukaram mundhe")
+    {
+        score += 8;
+    }
+    let has_licence = haystack.contains("licence") || haystack.contains("license");
+    let has_licence_action =
+        haystack.contains("suspend") || haystack.contains("cancel") || haystack.contains("revok");
+    if has_licence && has_licence_action {
+        score += 3;
+    }
+    for signal in [
+        "ordered to shut",
+        "ordered to stop",
+        "cease business",
+        "stop operations",
+        "sealed",
+        "seized",
+    ] {
+        if haystack.contains(signal) {
+            score += 3;
+        }
+    }
+    if haystack.contains("restaurant")
+        || haystack.contains("hotel")
+        || haystack.contains("cafe")
+        || haystack.contains("caterer")
+        || haystack.contains("dark store")
+        || haystack.contains("quick-commerce")
+    {
+        score += 1;
+    }
+    score
+}
+
+fn select_for_enrichment(mut items: Vec<NewsItem>, max_items: usize) -> Vec<NewsItem> {
+    // enforcement_score lowercases the whole haystack, so compute it once per
+    // item via sort_by_cached_key instead of on every comparison.
+    items.sort_by_cached_key(|item| {
+        (
+            std::cmp::Reverse(enforcement_score(item)),
+            std::cmp::Reverse(item.published.unwrap_or(chrono::DateTime::<Utc>::MIN_UTC)),
+            item.url.clone(),
+        )
+    });
+    items.truncate(max_items);
+    items
 }
 
 static OG_TITLE_SEL: OnceLock<Selector> = OnceLock::new();
@@ -183,7 +261,10 @@ fn extract_snippet(document: &str) -> Option<String> {
             }
         })
         .collect();
-    paras.truncate(8);
+    // Roundups often put the complete list of affected outlets after the
+    // opening paragraphs. Keep enough article text for the extractor to see
+    // all names while remaining comfortably below a Flash batch context.
+    paras.truncate(30);
 
     if title.is_none() && paras.is_empty() {
         return None;
@@ -195,8 +276,8 @@ fn extract_snippet(document: &str) -> Option<String> {
         }
         body.push_str(&paras.join(" "));
     }
-    if body.chars().count() > 2500 {
-        body = body.chars().take(2500).collect();
+    if body.chars().count() > 12_000 {
+        body = body.chars().take(12_000).collect();
     }
     if body.to_lowercase().starts_with("google news") || body.trim().is_empty() {
         return None;
@@ -237,6 +318,13 @@ pub async fn enrich(
     seen: &HashSet<String>,
     max_items: usize,
 ) -> Vec<NewsItem> {
+    let available = items.len();
+    let items = select_for_enrichment(items, max_items);
+    eprintln!(
+        "article enrichment: selected {}/{} highest-signal RSS items",
+        items.len(),
+        available
+    );
     let jobs = items
         .into_iter()
         .enumerate()
@@ -282,13 +370,14 @@ pub async fn enrich(
             .unwrap_or(chrono::DateTime::<Utc>::MIN_UTC)
             .cmp(&a.published.unwrap_or(chrono::DateTime::<Utc>::MIN_UTC))
     });
-    out.truncate(max_items);
     out
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{already_seen, extract_snippet};
+    use super::{already_seen, extract_snippet, select_for_enrichment};
+    use crate::models::NewsItem;
+    use chrono::{Duration, Utc};
     use std::collections::HashSet;
 
     #[test]
@@ -331,5 +420,26 @@ mod tests {
             !already_seen(&urls, &seen, "https://fresh.test/2"),
             "fresh url passes"
         );
+    }
+
+    #[test]
+    fn prioritises_explicit_enforcement_before_generic_news() {
+        let now = Utc::now();
+        let generic = NewsItem {
+            title: "Maharashtra food trends this Diwali".into(),
+            url: "https://example.test/generic".into(),
+            source: None,
+            published: Some(now),
+            snippet: None,
+        };
+        let action = NewsItem {
+            title: "Maharashtra FDA orders restaurant to cease business after raid".into(),
+            url: "https://example.test/action".into(),
+            source: None,
+            published: Some(now - Duration::hours(2)),
+            snippet: None,
+        };
+        let selected = select_for_enrichment(vec![generic, action], 1);
+        assert_eq!(selected[0].url, "https://example.test/action");
     }
 }

@@ -15,8 +15,9 @@ of the articles and stores each one in Postgres with a link to its source.
 
 ## How it works
 
-Every day at 06:00 UTC a GitHub Action runs a Rust job that reads Google News
-RSS for the last 24 hours, extracts the article text, and has Gemini Flash
+Every day at 06:00 UTC a GitHub Action runs a Rust job that reads targeted
+Google News RSS searches over an overlapping 72-hour window, prioritises
+explicit enforcement reports, extracts the article text, and has Gemini Flash
 turn it into structured records (establishment, action, date). A second Gemini
 pass groups records describing the same real-world event (re-reports by other
 outlets with name variants) and keeps one. Records are upserted into Neon,

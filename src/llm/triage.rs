@@ -32,13 +32,26 @@ const RULES: &[Rule] = &[
         action: ActionType::ImprovementNotice,
     },
     Rule {
-        needs: &[&["licence", "suspend"], &["license", "suspend"]],
+        needs: &[
+            &["licence", "suspend"],
+            &["license", "suspend"],
+            &["licence", "suspension"],
+            &["license", "suspension"],
+            &["licence", "cancel"],
+            &["license", "cancel"],
+            &["licence", "revok"],
+            &["license", "revok"],
+        ],
         action: ActionType::LicenceSuspension,
     },
     Rule {
         needs: &[
             &["stop business"],
+            &["cease business"],
+            &["stop operations"],
+            &["operations", "stopped"],
             &["closure", "order"],
+            &["ordered", "shut"],
             &["shut down", "fda"],
         ],
         action: ActionType::StopBusiness,
@@ -91,11 +104,18 @@ fn signal(hay: &str) -> Option<ActionType> {
 // can't corroborate themselves.
 const CORROBORATION: &[&str] = &["fda", "food safety", "licence", "license"];
 
+/// Keyword signal plus a corroboration gate for ambiguous action types.
+/// `hay` must already be lowercase: needle matching and the `CORROBORATION`
+/// checks are case-sensitive `contains` calls. Callers build `hay` with
+/// [`haystack`], which lowercases title + snippet + source.
 pub(crate) fn triage(hay: &str) -> Option<ActionType> {
     let action = signal(hay)?;
     let needs_corroboration = matches!(
         action,
-        ActionType::Sealing | ActionType::Seizure | ActionType::Inspection
+        ActionType::StopBusiness
+            | ActionType::Sealing
+            | ActionType::Seizure
+            | ActionType::Inspection
     );
     (!needs_corroboration || CORROBORATION.iter().any(|c| hay.contains(c))).then_some(action)
 }
@@ -190,6 +210,22 @@ mod tests {
         assert_eq!(
             triage("licence suspended over pests"),
             Some(ActionType::LicenceSuspension)
+        );
+        assert_eq!(
+            triage("maharashtra fda orders rajdhani biryani centre to cease business"),
+            Some(ActionType::StopBusiness)
+        );
+        assert_eq!(
+            triage("fda revoked the food licence after hygiene violations"),
+            Some(ActionType::LicenceSuspension)
+        );
+    }
+
+    #[test]
+    fn triage_does_not_treat_a_non_regulatory_closure_as_enforcement() {
+        assert_eq!(
+            triage("Restaurant ordered to shut after a landlord dispute"),
+            None
         );
     }
 

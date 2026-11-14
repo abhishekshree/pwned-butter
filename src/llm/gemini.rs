@@ -102,7 +102,7 @@ pub(crate) async fn extract_batch(
         "generationConfig": {
             "temperature": 0.0,
             "responseMimeType": "application/json",
-            "maxOutputTokens": 8192
+            "maxOutputTokens": 16384
         }
     });
     let url = gemini_url(model, api_key);
@@ -146,7 +146,17 @@ pub(crate) async fn extract_batch(
             tokio::time::sleep(retry_delay(attempt, None)).await;
             continue;
         }
-        return Ok(remap(parse_llm_text(&text)?, chunk));
+        let actions = parse_llm_text(&text).map_err(|e| {
+            // finishReason=MAX_TOKENS means the JSON was cut off mid-array —
+            // the signature failure mode of a big roundup batch — so surface
+            // it (with the token count) in the error the salvage path logs.
+            let finish = body["candidates"][0]["finishReason"]
+                .as_str()
+                .unwrap_or("unknown");
+            let tokens = body["usageMetadata"]["candidatesTokenCount"].as_i64();
+            anyhow::anyhow!("parse failed (finishReason={finish}, outputTokens={tokens:?}): {e}")
+        })?;
+        return Ok(remap(actions, chunk));
     }
     eprintln!("gemini API failed after {MAX_ATTEMPTS} attempts; falling back to openrouter");
     escalate(

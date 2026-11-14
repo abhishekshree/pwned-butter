@@ -16,7 +16,10 @@ pub struct ScrapeReport {
 }
 
 pub async fn run_scrape(gemini_key: &str, model: &str) -> Result<(i64, ScrapeReport)> {
-    run_with_window(gemini_key, model, "when:1d", 14, news::MAX_ITEMS, false).await
+    // Google News indexes regional enforcement reports hours after publication
+    // surprisingly often. Search an overlapping window and rely on source and
+    // event deduplication rather than making each daily run a one-shot.
+    run_with_window(gemini_key, model, "when:3d", 21, news::MAX_ITEMS, false).await
 }
 
 pub async fn run_with_window(

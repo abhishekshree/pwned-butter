@@ -18,6 +18,11 @@ pub(crate) fn system_prompt(delivery: bool) -> Cow<'static, str> {
     }
 }
 
+/// Batch size trades request count against per-request crowding. The
+/// extractor prompt now requires every separately named establishment and
+/// the output ceiling is 16k tokens, so crowding is handled downstream —
+/// keep batches large to respect the free-tier ~5 requests/min budget
+/// (halving the batch size doubles the sequential calls per run).
 pub(crate) const BATCH_SIZE: usize = 20;
 // ponytail: Gemini free tier allows ~5 requests/min — concurrent batches
 // hit 429s together, so batches run sequentially with backoff, no semaphore.
@@ -153,12 +158,13 @@ fn salvaged(
     failed: &mut usize,
 ) -> Vec<LlmAction> {
     let kept = triage::rule_extract(chunk);
+    let n = chunk.len();
     if kept.is_empty() {
         *failed += 1;
-        eprintln!("llm batch {batch_no} failed: {err:#}");
+        eprintln!("llm batch {batch_no} ({n} items) failed: {err:#}");
     } else {
         eprintln!(
-            "llm batch {batch_no} failed ({err:#}); rule fallback kept {}",
+            "llm batch {batch_no} ({n} items) failed ({err:#}); rule fallback kept {}",
             kept.len()
         );
     }
