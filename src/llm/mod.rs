@@ -205,7 +205,7 @@ pub(crate) fn strip_code_fences(s: &str) -> String {
     let Some(body) = s.strip_prefix("```") else {
         return s.to_string();
     };
-    let body = body.trim_end_matches('`').trim();
+    let body = body.trim_suffix("```").trim();
     match body.split_once('\n') {
         Some((_lang, rest)) => rest.trim().to_string(),
         None => body.to_string(),
