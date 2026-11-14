@@ -121,7 +121,9 @@ async fn execute_insert(
          ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) \
          ON CONFLICT (source_url, establishment, action_date) {conflict_tail}"
     );
-    let res = sqlx::query(&sql)
+    // `conflict_tail` is a compile-time constant (ON CONFLICT DO NOTHING / UPDATE),
+    // not user input — audited for injection, safe to assert.
+    let res = sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(&r.establishment)
         .bind(&r.area)
         .bind(&r.city)
