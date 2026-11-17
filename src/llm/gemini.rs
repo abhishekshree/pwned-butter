@@ -139,7 +139,9 @@ async fn extract_batch_model(
         })?;
         return Ok(actions);
     }
-    Err(anyhow::anyhow!("gemini {model} failed after {MAX_ATTEMPTS} attempts"))
+    Err(anyhow::anyhow!(
+        "gemini {model} failed after {MAX_ATTEMPTS} attempts"
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -254,7 +256,9 @@ pub(crate) fn parse_llm_text(text: &str) -> Result<Vec<LlmAction>> {
             } else if let Some(arr) = map.values().find_map(Value::as_array) {
                 arr.clone()
             } else {
-                return Err(anyhow::anyhow!("expected JSON array or object with array of actions/records"));
+                return Err(anyhow::anyhow!(
+                    "expected JSON array or object with array of actions/records"
+                ));
             }
         }
         _ => return Err(anyhow::anyhow!("unexpected LLM response shape")),

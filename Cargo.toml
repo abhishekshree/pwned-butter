@@ -34,6 +34,8 @@ scraper = "0.29"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "json", "chrono", "migrate", "macros"] }
 urlencoding = "2"
 dotenvy = "0.15"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 
 [profile.release]
 opt-level = 3

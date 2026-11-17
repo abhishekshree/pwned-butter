@@ -1,6 +1,7 @@
 use anyhow::Result;
 use chrono::{Duration as ChronoDuration, Utc};
 use serde_json::json;
+use tracing::{info, warn};
 
 use crate::db::{self, ActionInsert};
 use crate::llm;
@@ -103,7 +104,7 @@ async fn collapse_dupes(
     let recent = match db::recent_events(pool, 10).await {
         Ok(recent) => recent,
         Err(e) => {
-            eprintln!("recent_events unavailable ({e:#}); skipping dupe-collapse pass");
+            warn!("recent_events unavailable ({e:#}); skipping dupe-collapse pass");
             return (rows, 0);
         }
     };
@@ -111,7 +112,7 @@ async fn collapse_dupes(
     if drops.is_empty() {
         return (rows, calls);
     }
-    eprintln!(
+    info!(
         "dupe-collapse dropping {} record(s): {drops:?}",
         drops.len()
     );

@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 
 use anyhow::{Result, anyhow};
+use tracing::{debug, error, info, warn};
 
 use crate::db::{ActionInsert, RecentEvent};
 use crate::models::{LlmAction, NewsItem};

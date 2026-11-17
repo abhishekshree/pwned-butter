@@ -6,12 +6,12 @@ use chrono::{DateTime, Utc};
 use rss::Channel;
 use scraper::{Html, Selector};
 use tokio::sync::Semaphore;
+use tracing::{error, info, warn};
 use urlencoding::encode;
 
 use crate::models::NewsItem;
 
-pub const USER_AGENT: &str =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+pub const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 const QUERIES: &[&str] = &[
     "\"Maharashtra FDA\"",
@@ -90,7 +90,7 @@ where
     for h in handles {
         match h.await {
             Ok(v) => out.push(v),
-            Err(e) => eprintln!("fan-out task failed: {e}"),
+            Err(e) => error!("fan-out task failed: {e}"),
         }
     }
     out
@@ -159,13 +159,13 @@ pub async fn fetch_items(client: &reqwest::Client, window: &str) -> Result<Vec<N
     for res in fan_out(RSS_CONCURRENCY, jobs).await {
         match res {
             Ok(found) => items.extend(found),
-            Err(e) => eprintln!("rss query failed: {e}"),
+            Err(e) => warn!("rss query failed: {e}"),
         }
     }
     let fetched = items.len();
     let mut seen = HashSet::new();
     items.retain(|item| seen.insert(item.url.clone()));
-    eprintln!(
+    info!(
         "rss: {fetched} hits from {} queries, {} distinct Google News URLs",
         QUERIES.len(),
         items.len()
@@ -337,7 +337,7 @@ pub async fn enrich(
 ) -> Vec<NewsItem> {
     let available = items.len();
     let items = select_for_enrichment(items, max_items);
-    eprintln!(
+    info!(
         "article enrichment: selected {}/{} highest-signal RSS items",
         items.len(),
         available
@@ -370,7 +370,7 @@ pub async fn enrich(
                 item.snippet = snippet;
             }
             Err(e) => {
-                eprintln!("article fetch failed ({}): {e}", item.url);
+                warn!("article fetch failed ({}): {e}", item.url);
                 if already_seen(&urls, seen, &item.url) {
                     continue;
                 }

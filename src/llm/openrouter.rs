@@ -12,9 +12,7 @@ const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 /// and conforms with the account data policies (including zero data retention).
 /// Fallbacks include specific free models and user-supplied paid models if set.
 pub(crate) const DEFAULT_OPENROUTER_MODEL: &str = "openrouter/free";
-pub(crate) const OPENROUTER_FALLBACKS: &[&str] = &[
-    "inclusionai/ling-3.2-flash:free",
-];
+pub(crate) const OPENROUTER_FALLBACKS: &[&str] = &["inclusionai/ling-3.2-flash:free"];
 const OPENROUTER_MAX_ATTEMPTS: usize = 2;
 
 /// Single OpenRouter escalation path: fall back, then readdress positions
@@ -84,7 +82,10 @@ async fn fallback(
                     return Err(e);
                 }
                 if idx + 1 < candidate_models.len() {
-                    eprintln!("trying next openrouter fallback: {}", candidate_models[idx + 1]);
+                    eprintln!(
+                        "trying next openrouter fallback: {}",
+                        candidate_models[idx + 1]
+                    );
                 }
                 last_err = Some(e);
             }

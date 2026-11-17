@@ -186,7 +186,10 @@ fn clean_establishment_name(raw: &str) -> String {
         "FDA",
     ] {
         if s.to_lowercase().starts_with(&prefix.to_lowercase()) {
-            let rest = s[prefix.len()..].trim().trim_start_matches([':', '-', ',', ' ']).trim();
+            let rest = s[prefix.len()..]
+                .trim()
+                .trim_start_matches([':', '-', ',', ' '])
+                .trim();
             if !rest.is_empty() {
                 s = rest;
                 break;
@@ -221,12 +224,8 @@ pub(crate) fn rule_extract(jobs: &[Job<'_>]) -> Vec<LlmAction> {
                 } else {
                     cleaned_name
                 };
-                let mut action = LlmAction::minimal(
-                    final_name,
-                    action_type,
-                    j.orig,
-                    j.item.snippet.clone(),
-                );
+                let mut action =
+                    LlmAction::minimal(final_name, action_type, j.orig, j.item.snippet.clone());
                 let city = city_of(&format!(
                     "{} {}",
                     j.item.title,
@@ -365,7 +364,10 @@ mod tests {
 
     #[test]
     fn city_of_prefers_the_longer_place_name() {
-        assert_eq!(city_of("outlet sealed in Navi Mumbai").as_deref(), Some("Navi Mumbai"));
+        assert_eq!(
+            city_of("outlet sealed in Navi Mumbai").as_deref(),
+            Some("Navi Mumbai")
+        );
         assert_eq!(city_of("FDA raid in Pune").as_deref(), Some("Pune"));
         assert_eq!(city_of("no location here"), None);
     }

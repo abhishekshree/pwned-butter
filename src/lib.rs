@@ -12,6 +12,17 @@ use reqwest::Client;
 
 static HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
 
+pub fn init_logging() {
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .without_time()
+        .with_target(false)
+        .try_init();
+}
+
 pub fn http_client() -> &'static Client {
     HTTP_CLIENT.get_or_init(|| {
         Client::builder()
