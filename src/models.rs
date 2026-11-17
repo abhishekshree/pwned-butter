@@ -36,22 +36,18 @@ impl ActionType {
         (Self::Inspection, "inspection"),
         (Self::Reopened, "reopened"),
     ];
-    pub const ALL: [Self; 7] = [
-        Self::TABLE[0].0,
-        Self::TABLE[1].0,
-        Self::TABLE[2].0,
-        Self::TABLE[3].0,
-        Self::TABLE[4].0,
-        Self::TABLE[5].0,
-        Self::TABLE[6].0,
-    ];
-
     fn as_code(self) -> &'static str {
-        Self::TABLE
-            .iter()
-            .find(|(t, _)| *t == self)
-            .map(|(_, code)| *code)
-            .unwrap_or("unknown")
+        // Exhaustive so adding a variant is a compile error, not a silent
+        // "unknown" row in the DB.
+        match self {
+            Self::LicenceSuspension => "licence_suspension",
+            Self::StopBusiness => "stop_business",
+            Self::ImprovementNotice => "improvement_notice",
+            Self::Sealing => "sealing",
+            Self::Seizure => "seizure",
+            Self::Inspection => "inspection",
+            Self::Reopened => "reopened",
+        }
     }
 }
 
@@ -161,7 +157,7 @@ pub struct LlmAction {
     pub details: Option<String>,
     #[serde(default, deserialize_with = "deserialize_string_vec")]
     pub platforms: Vec<String>,
-    #[serde(default, alias = "source_index")]
+    #[serde(alias = "source_index")]
     pub source_index: usize,
 }
 
@@ -212,7 +208,7 @@ mod tests {
 
     #[test]
     fn action_type_round_trips() {
-        for t in ActionType::ALL {
+        for t in ActionType::TABLE.iter().map(|(t, _)| *t) {
             let code = t.to_string();
             assert_eq!(code.parse::<ActionType>().unwrap(), t, "{code} round-trips");
         }

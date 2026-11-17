@@ -36,13 +36,13 @@ pub struct RecentEvent {
 
 /// Establishments acted against in the last `days` days, for the LLM
 /// duplicate-grouping pass. Capped to bound prompt size.
-pub async fn recent_events(pool: &PgPool, days: i64) -> Result<Vec<RecentEvent>> {
+pub async fn recent_events(pool: &PgPool, days: i32) -> Result<Vec<RecentEvent>> {
     let rows = sqlx::query(
         "SELECT establishment, action_type, action_date, city, area FROM actions \
          WHERE action_date >= CURRENT_DATE - ($1::int) \
          ORDER BY action_date DESC LIMIT 200",
     )
-    .bind(days as i32)
+    .bind(days)
     .fetch_all(pool)
     .await?;
     Ok(rows
@@ -319,10 +319,10 @@ pub async fn finish_run(
          articles_seen = $1, articles_new = $2, actions_upserted = $3, llm_calls = $4, details = $5
          WHERE id = $6",
     )
-    .bind(articles_seen as i64)
-    .bind(articles_new as i64)
-    .bind(actions_upserted as i64)
-    .bind(llm_calls as i64)
+    .bind(i64::try_from(articles_seen)?)
+    .bind(i64::try_from(articles_new)?)
+    .bind(i64::try_from(actions_upserted)?)
+    .bind(i64::try_from(llm_calls)?)
     .bind(details)
     .bind(run_id)
     .execute(pool)

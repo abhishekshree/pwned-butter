@@ -57,6 +57,9 @@ const QUERIES: &[&str] = &[
 /// time budget before the later truncation discarded them.
 pub const MAX_ITEMS: usize = 100;
 const FETCH_CONCURRENCY: usize = 8;
+/// Publisher pages are untrusted; without a ceiling one huge article OOMs
+/// the run before the snippet is truncated.
+const MAX_ARTICLE_BYTES: u64 = 5 * 1024 * 1024;
 // Google answers all 32 queries from one runner IP at once with 503s when we
 // fan out too wide; four at a time keeps the burst below the threshold.
 const RSS_CONCURRENCY: usize = 4;
@@ -206,9 +209,7 @@ fn enforcement_score(item: &NewsItem) -> u8 {
         "sealed",
         "seized",
     ] {
-        if haystack.contains(signal) {
-            score += 3;
-        }
+        score += 3 * u8::from(haystack.contains(signal));
     }
     if haystack.contains("restaurant")
         || haystack.contains("hotel")
@@ -271,11 +272,7 @@ fn extract_snippet(document: &str) -> Option<String> {
         .filter_map(|e| {
             let t = e.text().collect::<String>();
             let t = t.trim();
-            if t.len() >= 40 {
-                Some(t.to_string())
-            } else {
-                None
-            }
+            (t.len() >= 40).then(|| t.to_string())
         })
         .collect();
     // Roundups often put the complete list of affected outlets after the
@@ -317,6 +314,9 @@ async fn fetch_article(client: &reqwest::Client, url: &str) -> Result<FetchedArt
         .with_context(|| format!("article get: {url}"))?
         .error_for_status()?;
     let final_url = resp.url().to_string();
+    if resp.content_length().is_some_and(|n| n > MAX_ARTICLE_BYTES) {
+        anyhow::bail!("article too large: {url}");
+    }
     let bytes = resp.bytes().await.context("article body")?;
     let text = String::from_utf8_lossy(&bytes);
     Ok(FetchedArticle {

@@ -186,10 +186,12 @@ fn clean_establishment_name(raw: &str) -> String {
         "FDA",
     ] {
         if s.to_lowercase().starts_with(&prefix.to_lowercase()) {
-            let rest = s[prefix.len()..]
-                .trim()
-                .trim_start_matches([':', '-', ',', ' '])
-                .trim();
+            // Lowercasing can change byte length, so the prefix offset may not
+            // be a char boundary in `s`; skip rather than panic on odd UTF-8.
+            let Some(rest) = s.get(prefix.len()..) else {
+                continue;
+            };
+            let rest = rest.trim().trim_start_matches([':', '-', ',', ' ']).trim();
             if !rest.is_empty() {
                 s = rest;
                 break;
@@ -233,7 +235,15 @@ pub(crate) fn rule_extract(jobs: &[Job<'_>]) -> Vec<LlmAction> {
                 ))
                 .unwrap_or_else(|| "Mumbai".to_string());
                 action.city = Some(city);
-                if action.details.as_deref().map(str::trim).unwrap_or("").len() < 20 {
+                if action
+                    .details
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or("")
+                    .chars()
+                    .count()
+                    < 20
+                {
                     action.details = Some(format!("FDA enforcement action: {}", j.item.title));
                 }
                 action

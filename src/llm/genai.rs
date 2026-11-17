@@ -311,7 +311,7 @@ pub(crate) fn drops_from_groups(groups: &[Vec<String>], n_new: usize) -> Vec<usi
             continue;
         }
         let touches_known = group.iter().any(|id| id.starts_with('K'));
-        for index in news.iter().skip(usize::from(!touches_known)) {
+        for index in news.iter().skip(if touches_known { 0 } else { 1 }) {
             drops.insert(*index);
         }
     }
@@ -341,6 +341,7 @@ mod tests {
         let mut action: LlmAction = serde_json::from_value(json!({
             "establishment": "  X  ",
             "actionType": "inspection",
+            "sourceIndex": 0,
             "violations": ["  issue  ", ""],
             "platforms": [" Swiggy ", " "]
         }))
