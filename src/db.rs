@@ -9,6 +9,8 @@ use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 
+use crate::models::{ActionType, OutletType};
+
 static POOL: OnceLock<PgPool> = OnceLock::new();
 
 pub async fn pool() -> Result<&'static PgPool> {
@@ -79,8 +81,8 @@ pub struct ActionInsert {
     pub city: Option<String>,
     pub brand: Option<String>,
     pub operator: Option<String>,
-    pub outlet_type: Option<String>,
-    pub action_type: String,
+    pub outlet_type: Option<OutletType>,
+    pub action_type: ActionType,
     pub action_date: NaiveDate,
     pub violations: Vec<String>,
     pub compliance_score: Option<i32>,
@@ -129,8 +131,8 @@ async fn execute_insert(
         .bind(&r.city)
         .bind(&r.brand)
         .bind(&r.operator)
-        .bind(&r.outlet_type)
-        .bind(&r.action_type)
+        .bind(r.outlet_type.map(|t| t.to_string()))
+        .bind(r.action_type.to_string())
         .bind(r.action_date)
         .bind(&r.violations)
         .bind(r.compliance_score)

@@ -13,6 +13,14 @@ pub struct NewsItem {
     pub snippet: Option<String>,
 }
 
+/// Extraction profile. `Delivery` adds the delivery-only prompt and keeps only
+/// outlets with a platform listing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    General,
+    Delivery,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionType {
@@ -125,10 +133,6 @@ impl fmt::Display for OutletType {
     }
 }
 
-pub fn canonical_outlet_type(s: &str) -> String {
-    OutletType::from(s).to_string()
-}
-
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LlmAction {
@@ -220,9 +224,9 @@ mod tests {
 
     #[test]
     fn outlet_type_unknown_maps_to_other() {
-        assert_eq!(canonical_outlet_type("restaurant"), "restaurant");
-        assert_eq!(canonical_outlet_type("stand"), "other");
-        assert_eq!(canonical_outlet_type(""), "other");
+        assert_eq!(OutletType::from("restaurant"), OutletType::Restaurant);
+        assert_eq!(OutletType::from("stand"), OutletType::Other);
+        assert_eq!(OutletType::from(""), OutletType::Other);
     }
 
     #[test]

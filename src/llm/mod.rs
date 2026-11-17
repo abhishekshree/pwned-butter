@@ -4,17 +4,16 @@ use std::collections::HashSet;
 use anyhow::{Result, anyhow};
 
 use crate::db::{ActionInsert, RecentEvent};
-use crate::models::{LlmAction, NewsItem};
+use crate::models::{LlmAction, NewsItem, Scope};
 
 pub const SYSTEM_PROMPT: &str = include_str!("../prompts/system.txt");
 
 const DELIVERY_MODE: &str = include_str!("../prompts/delivery.txt");
 
-pub(crate) fn system_prompt(delivery: bool) -> Cow<'static, str> {
-    if delivery {
-        format!("{SYSTEM_PROMPT}{DELIVERY_MODE}").into()
-    } else {
-        SYSTEM_PROMPT.into()
+pub(crate) fn system_prompt(scope: Scope) -> Cow<'static, str> {
+    match scope {
+        Scope::Delivery => format!("{SYSTEM_PROMPT}{DELIVERY_MODE}").into(),
+        Scope::General => SYSTEM_PROMPT.into(),
     }
 }
 
@@ -43,7 +42,7 @@ pub async fn extract(
     api_key: &str,
     model: &str,
     items: &[NewsItem],
-    delivery: bool,
+    scope: Scope,
 ) -> Result<(Vec<LlmAction>, usize)> {
     let mut jobs = Vec::new();
     for (orig, item) in items.iter().enumerate() {
@@ -89,7 +88,7 @@ pub async fn extract(
             model,
             chunk,
             &mut calls,
-            delivery,
+            scope,
             openrouter_key.as_deref(),
             &openrouter_model,
             &openrouter_fallbacks,
@@ -220,10 +219,11 @@ pub(crate) fn strip_code_fences(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::extract;
+    use crate::models::Scope;
 
     #[tokio::test]
     async fn empty_items_skip_llm() {
-        let (actions, calls) = extract("key", "model", &[], false).await.unwrap();
+        let (actions, calls) = extract("key", "model", &[], Scope::General).await.unwrap();
         assert!(actions.is_empty());
         assert_eq!(calls, 0);
     }

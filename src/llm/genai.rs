@@ -7,7 +7,7 @@ use genai::chat::{ChatMessage, ChatOptions, ChatRequest, JsonSpec};
 use genai::resolver::AuthData;
 use serde_json::{Value, json};
 
-use crate::models::LlmAction;
+use crate::models::{LlmAction, Scope};
 
 use super::triage::Job;
 use super::{strip_code_fences, system_prompt, truncate};
@@ -70,7 +70,7 @@ pub(crate) async fn extract_batch(
     model: &str,
     chunk: &[Job<'_>],
     calls: &mut usize,
-    delivery: bool,
+    scope: Scope,
     openrouter_key: Option<&str>,
     openrouter_model: &str,
     openrouter_fallbacks: &[String],
@@ -81,7 +81,7 @@ pub(crate) async fn extract_batch(
     }))
     .context("serialize news batch")?;
     let request =
-        ChatRequest::from_system(system_prompt(delivery)).append_message(ChatMessage::user(user));
+        ChatRequest::from_system(system_prompt(scope)).append_message(ChatMessage::user(user));
     let options = json_options(16_384, json!({"type": "array"}));
 
     let mut gemini_models = vec![model];
@@ -156,7 +156,7 @@ pub(crate) async fn collapse_once(
             record(
                 format!("N{i}"),
                 &row.establishment,
-                &row.action_type,
+                &row.action_type.to_string(),
                 row.action_date,
                 &row.city,
                 &row.area,

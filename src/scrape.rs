@@ -5,7 +5,7 @@ use tracing::{info, warn};
 
 use crate::db::{self, ActionInsert};
 use crate::llm;
-use crate::models::{LlmAction, NewsItem, canonical_outlet_type, coerce_action_date, nonempty};
+use crate::models::{LlmAction, NewsItem, OutletType, Scope, coerce_action_date, nonempty};
 use crate::news;
 
 #[derive(Debug, Clone)]
@@ -20,7 +20,15 @@ pub async fn run_scrape(gemini_key: &str, model: &str) -> Result<(i64, ScrapeRep
     // Google News indexes regional enforcement reports hours after publication
     // surprisingly often. Search an overlapping window and rely on source and
     // event deduplication rather than making each daily run a one-shot.
-    run_with_window(gemini_key, model, "when:3d", 21, news::MAX_ITEMS, false).await
+    run_with_window(
+        gemini_key,
+        model,
+        "when:3d",
+        21,
+        news::MAX_ITEMS,
+        Scope::General,
+    )
+    .await
 }
 
 pub async fn run_with_window(
@@ -29,16 +37,12 @@ pub async fn run_with_window(
     window: &str,
     seen_days: i64,
     max_items: usize,
-    delivery: bool,
+    scope: Scope,
 ) -> Result<(i64, ScrapeReport)> {
     let pool = db::pool().await?;
     let run_id = db::begin_run(pool).await?;
 
-    match scrape_once(
-        pool, gemini_key, model, window, seen_days, max_items, delivery,
-    )
-    .await
-    {
+    match scrape_once(pool, gemini_key, model, window, seen_days, max_items, scope).await {
         Ok(report) => {
             db::finish_run(
                 pool,
@@ -47,7 +51,7 @@ pub async fn run_with_window(
                 report.articles_new,
                 report.actions_upserted,
                 report.llm_calls,
-                &json!({"model": model, "window": window, "delivery": delivery}),
+                &json!({"model": model, "window": window, "delivery": scope == Scope::Delivery}),
             )
             .await?;
             Ok((run_id, report))
@@ -66,7 +70,7 @@ async fn scrape_once(
     window: &str,
     seen_days: i64,
     max_items: usize,
-    delivery: bool,
+    scope: Scope,
 ) -> Result<ScrapeReport> {
     let client = crate::http_client();
     let seen = Utc::now() - ChronoDuration::days(seen_days);
@@ -76,8 +80,8 @@ async fn scrape_once(
     let articles_seen = items.len();
     let fresh = news::enrich(client, items, &already_seen, max_items).await;
 
-    let (actions, mut llm_calls) = llm::extract(gemini_key, model, &fresh, delivery).await?;
-    let rows = build_rows(&fresh, &actions, delivery);
+    let (actions, mut llm_calls) = llm::extract(gemini_key, model, &fresh, scope).await?;
+    let rows = build_rows(&fresh, &actions, scope);
     let (rows, collapse_calls) = collapse_dupes(pool, gemini_key, model, rows).await;
     llm_calls += collapse_calls;
     let upserted = db::upsert_actions(pool, &rows).await?;
@@ -126,11 +130,11 @@ async fn collapse_dupes(
     (kept, calls)
 }
 
-pub fn build_rows(items: &[NewsItem], actions: &[LlmAction], delivery: bool) -> Vec<ActionInsert> {
+pub fn build_rows(items: &[NewsItem], actions: &[LlmAction], scope: Scope) -> Vec<ActionInsert> {
     actions
         .iter()
         .filter_map(|a| {
-            if delivery && a.platforms.is_empty() {
+            if scope == Scope::Delivery && a.platforms.is_empty() {
                 return None;
             }
             let item = items.get(a.source_index)?;
@@ -141,8 +145,8 @@ pub fn build_rows(items: &[NewsItem], actions: &[LlmAction], delivery: bool) -> 
                 city: nonempty(a.city.as_deref()),
                 brand: nonempty(a.brand.as_deref()),
                 operator: nonempty(a.operator.as_deref()),
-                outlet_type: a.outlet_type.as_deref().map(canonical_outlet_type),
-                action_type: a.action_type.to_string(),
+                outlet_type: a.outlet_type.as_deref().map(OutletType::from),
+                action_type: a.action_type,
                 action_date: coerce_action_date(a.action_date.as_deref(), item.published),
                 violations: a.violations.clone(),
                 compliance_score: a.compliance_score.filter(|s| (0..=100).contains(s)),
@@ -194,11 +198,11 @@ mod tests {
             source_index: 0,
             ..Default::default()
         }];
-        let rows = build_rows(&items, &actions, false);
+        let rows = build_rows(&items, &actions, Scope::General);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].brand.as_deref(), Some("Domino's"));
-        assert_eq!(rows[0].action_type, "licence_suspension");
-        assert_eq!(rows[0].outlet_type.as_deref(), Some("restaurant"));
+        assert_eq!(rows[0].action_type, ActionType::LicenceSuspension);
+        assert_eq!(rows[0].outlet_type, Some(OutletType::Restaurant));
         assert_eq!(rows[0].source_url, "https://a.test/1");
     }
 
@@ -212,9 +216,9 @@ mod tests {
             source_index: 0,
             ..Default::default()
         };
-        let rows = build_rows(&items, &[action], false);
+        let rows = build_rows(&items, &[action], Scope::General);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].outlet_type.as_deref(), Some("other"));
+        assert_eq!(rows[0].outlet_type, Some(OutletType::Other));
     }
 
     #[test]
@@ -226,7 +230,7 @@ mod tests {
             source_index: 5,
             ..Default::default()
         };
-        assert!(build_rows(&items, &[action], false).is_empty());
+        assert!(build_rows(&items, &[action], Scope::General).is_empty());
     }
 
     #[test]
@@ -241,7 +245,7 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            build_rows(&items, &[action], true).is_empty(),
+            build_rows(&items, &[action], Scope::Delivery).is_empty(),
             "delivery mode drops platform-less outlets"
         );
     }
@@ -259,7 +263,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            build_rows(&items, &[action], true).len(),
+            build_rows(&items, &[action], Scope::Delivery).len(),
             1,
             "listed outlet survives delivery filter"
         );
@@ -279,7 +283,7 @@ mod tests {
     fn compliance_score_in_range_passes_through() {
         let items = vec![item("a", "b")];
         assert_eq!(
-            build_rows(&items, &[scored(Some(54))], false)[0].compliance_score,
+            build_rows(&items, &[scored(Some(54))], Scope::General)[0].compliance_score,
             Some(54)
         );
     }
@@ -289,7 +293,7 @@ mod tests {
         let items = vec![item("a", "b")];
         for score in [Some(999), Some(-5), Some(101), None] {
             assert_eq!(
-                build_rows(&items, &[scored(score)], false)[0].compliance_score,
+                build_rows(&items, &[scored(score)], Scope::General)[0].compliance_score,
                 None,
                 "{score:?} becomes None"
             );
