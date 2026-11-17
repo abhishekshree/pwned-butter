@@ -27,13 +27,13 @@ pub(crate) const BATCH_SIZE: usize = 20;
 // ponytail: Gemini free tier allows ~5 requests/min — concurrent batches
 // hit 429s together, so batches run sequentially with backoff, no semaphore.
 
-/// Latest Flash-lite alias for fast response times, high RPM, and stable availability.
-pub const DEFAULT_GEMINI_MODEL: &str = "gemini-flash-lite-latest";
-pub const GEMINI_FALLBACK_MODELS: &[&str] = &[
-    "gemini-3.5-flash-lite",
-    "gemini-3-flash-preview",
-    "gemini-flash-latest",
-];
+/// `gemini-flash-latest` is the only Gemini ID that answers `generateContent`
+/// with this key: the lite aliases and specific `gemini-3.x` IDs return empty
+/// 404s (they now point at the Interactions API), so a dead default just burns
+/// a call per batch before failing over. OpenRouter is the cross-provider
+/// fallback.
+pub const DEFAULT_GEMINI_MODEL: &str = "gemini-flash-latest";
+pub const GEMINI_FALLBACK_MODELS: &[&str] = &["gemini-flash-latest"];
 
 mod dedupe;
 mod gemini;
