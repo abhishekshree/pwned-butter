@@ -85,6 +85,63 @@ async fn gemini_round(
     Some((status, text, wait))
 }
 
+async fn extract_batch_model(
+    api_key: &str,
+    model: &str,
+    payload: &Value,
+    calls: &mut usize,
+) -> Result<Vec<LlmAction>> {
+    let url = gemini_url(model, api_key);
+    for attempt in 0..MAX_ATTEMPTS {
+        let Some((status, text, wait)) = gemini_round(&url, payload, calls).await else {
+            tokio::time::sleep(retry_delay(attempt, None)).await;
+            continue;
+        };
+        let retryable = status.as_u16() == 429 || status.is_server_error();
+        if !status.is_success() && !retryable {
+            return Err(anyhow::anyhow!("gemini http {status}: {text}"));
+        }
+        if !status.is_success() && is_quota_exhausted(&text) {
+            eprintln!("gemini http {status}, attempt {attempt}; {text}");
+            return Err(anyhow::anyhow!("gemini quota exhausted: {text}"));
+        }
+        if !status.is_success() {
+            eprintln!("gemini http {status}, attempt {attempt}; {text}");
+            if status.as_u16() == 503 && attempt + 1 >= 2 {
+                eprintln!("gemini {model} 503 persistent; failing fast to next model");
+                return Err(anyhow::anyhow!("gemini {model} 503 unavailable"));
+            }
+            let wait = wait.or_else(|| retry_delay_from_body(&text));
+            let delay = if status.as_u16() == 503 {
+                Duration::from_secs(wait.unwrap_or(4).min(10))
+            } else {
+                retry_delay(attempt, wait)
+            };
+            tokio::time::sleep(delay).await;
+            continue;
+        }
+        let body: Value = serde_json::from_str(&text).context("gemini json")?;
+        let text = response_text(&body);
+        if text.trim().is_empty() {
+            let finish = body["candidates"][0]["finishReason"]
+                .as_str()
+                .unwrap_or("unknown");
+            eprintln!("gemini empty response (finishReason={finish}), attempt {attempt}; retrying");
+            tokio::time::sleep(retry_delay(attempt, None)).await;
+            continue;
+        }
+        let actions = parse_llm_text(&text).map_err(|e| {
+            let finish = body["candidates"][0]["finishReason"]
+                .as_str()
+                .unwrap_or("unknown");
+            let tokens = body["usageMetadata"]["candidatesTokenCount"].as_i64();
+            anyhow::anyhow!("parse failed (finishReason={finish}, outputTokens={tokens:?}): {e}")
+        })?;
+        return Ok(actions);
+    }
+    Err(anyhow::anyhow!("gemini {model} failed after {MAX_ATTEMPTS} attempts"))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn extract_batch(
     api_key: &str,
@@ -107,60 +164,27 @@ pub(crate) async fn extract_batch(
             "maxOutputTokens": 16384
         }
     });
-    let url = gemini_url(model, api_key);
 
-    for attempt in 0..MAX_ATTEMPTS {
-        let Some((status, text, wait)) = gemini_round(&url, &payload, calls).await else {
-            tokio::time::sleep(retry_delay(attempt, None)).await;
-            continue;
-        };
-        let retryable = status.as_u16() == 429 || status.is_server_error();
-        if !status.is_success() && !retryable {
-            return Err(anyhow::anyhow!("gemini http {status}: {text}"));
+    let mut candidate_models = vec![model];
+    for fallback in crate::llm::GEMINI_FALLBACK_MODELS {
+        if *fallback != model {
+            candidate_models.push(*fallback);
         }
-        if !status.is_success() && is_quota_exhausted(&text) {
-            eprintln!("gemini http {status}, attempt {attempt}; {text}");
-            return escalate(
-                openrouter_key,
-                chunk,
-                calls,
-                delivery,
-                openrouter_model,
-                openrouter_fallbacks,
-            )
-            .await;
-        }
-        if !status.is_success() {
-            eprintln!("gemini http {status}, attempt {attempt}; {text}");
-            let wait = wait.or_else(|| retry_delay_from_body(&text));
-            tokio::time::sleep(retry_delay(attempt, wait)).await;
-            continue;
-        }
-        let body: Value = serde_json::from_str(&text).context("gemini json")?;
-        let text = response_text(&body);
-        if text.trim().is_empty() {
-            // ponytail: thinking models can burn the token budget and return
-            // 200 with zero text; retry, then OpenRouter via the normal path
-            let finish = body["candidates"][0]["finishReason"]
-                .as_str()
-                .unwrap_or("unknown");
-            eprintln!("gemini empty response (finishReason={finish}), attempt {attempt}; retrying");
-            tokio::time::sleep(retry_delay(attempt, None)).await;
-            continue;
-        }
-        let actions = parse_llm_text(&text).map_err(|e| {
-            // finishReason=MAX_TOKENS means the JSON was cut off mid-array —
-            // the signature failure mode of a big roundup batch — so surface
-            // it (with the token count) in the error the salvage path logs.
-            let finish = body["candidates"][0]["finishReason"]
-                .as_str()
-                .unwrap_or("unknown");
-            let tokens = body["usageMetadata"]["candidatesTokenCount"].as_i64();
-            anyhow::anyhow!("parse failed (finishReason={finish}, outputTokens={tokens:?}): {e}")
-        })?;
-        return Ok(remap(actions, chunk));
     }
-    eprintln!("gemini API failed after {MAX_ATTEMPTS} attempts; falling back to openrouter");
+
+    for (idx, m) in candidate_models.iter().enumerate() {
+        match extract_batch_model(api_key, m, &payload, calls).await {
+            Ok(actions) => return Ok(remap(actions, chunk)),
+            Err(e) => {
+                eprintln!("gemini model {m} failed: {e:#}");
+                if idx + 1 < candidate_models.len() {
+                    eprintln!("falling back to gemini model {}", candidate_models[idx + 1]);
+                }
+            }
+        }
+    }
+
+    eprintln!("all gemini models failed; falling back to openrouter");
     escalate(
         openrouter_key,
         chunk,
@@ -218,13 +242,21 @@ pub(crate) fn parse_llm_text(text: &str) -> Result<Vec<LlmAction>> {
 
     let raw = match parsed {
         Value::Array(arr) => arr,
-        Value::Object(map) => map
-            .get("actions")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .ok_or_else(|| {
-                anyhow::anyhow!("expected JSON array or object with \"actions\" array")
-            })?,
+        Value::Object(map) => {
+            if let Some(arr) = map.get("actions").and_then(Value::as_array) {
+                arr.clone()
+            } else if let Some(arr) = map.get("records").and_then(Value::as_array) {
+                arr.clone()
+            } else if let Some(arr) = map.get("items").and_then(Value::as_array) {
+                arr.clone()
+            } else if let Some(arr) = map.get("data").and_then(Value::as_array) {
+                arr.clone()
+            } else if let Some(arr) = map.values().find_map(Value::as_array) {
+                arr.clone()
+            } else {
+                return Err(anyhow::anyhow!("expected JSON array or object with array of actions/records"));
+            }
+        }
         _ => return Err(anyhow::anyhow!("unexpected LLM response shape")),
     };
 
@@ -312,6 +344,19 @@ mod tests {
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].establishment, "Domino's");
         assert_eq!(actions[0].action_type, ActionType::LicenceSuspension);
+    }
+
+    #[test]
+    fn parses_records_and_items_object_wrapper() {
+        let text1 = "{\"records\": [{\"establishment\":\"Subway\",\"actionType\":\"inspection\",\"sourceIndex\":0}]}";
+        let actions1 = parse_llm_text(text1).unwrap();
+        assert_eq!(actions1.len(), 1);
+        assert_eq!(actions1[0].establishment, "Subway");
+
+        let text2 = "{\"items\": [{\"establishment\":\"Burger King\",\"actionType\":\"sealing\",\"sourceIndex\":1}]}";
+        let actions2 = parse_llm_text(text2).unwrap();
+        assert_eq!(actions2.len(), 1);
+        assert_eq!(actions2[0].establishment, "Burger King");
     }
 
     #[test]

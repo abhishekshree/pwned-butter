@@ -39,10 +39,10 @@ pub struct RecentEvent {
 pub async fn recent_events(pool: &PgPool, days: i64) -> Result<Vec<RecentEvent>> {
     let rows = sqlx::query(
         "SELECT establishment, action_type, action_date, city, area FROM actions \
-         WHERE action_date >= CURRENT_DATE - $1 \
+         WHERE action_date >= CURRENT_DATE - ($1::int) \
          ORDER BY action_date DESC LIMIT 200",
     )
-    .bind(days)
+    .bind(days as i32)
     .fetch_all(pool)
     .await?;
     Ok(rows

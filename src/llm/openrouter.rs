@@ -8,26 +8,14 @@ use super::system_prompt;
 use super::triage::Job;
 
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
-/// Verified live against the OpenRouter /models API on 2026-10-10, plus
-/// live-probe reliability reports. lfm-2.5 stays primary: purpose-built
-/// for extraction, full structured-output flags, consistently answers.
-/// Fallbacks are current-generation only: nemotron-3.5-lightning (newest
-/// NVIDIA, 1M context), dots-3-note (structured outputs, 512k context),
-/// gemma-4-31b (strong dense instruct). Deliberately excluded: cohere
-/// north-mini-code (code model, no response_format support), reasoning
-/// models (burn output budget, break JSON-only replies), inkling
-/// (403 unless called from an agentic harness), poolside laguna
-/// (flaky/empty answers in probes).
-/// NOTE: free endpoints offer no ZDR, so an account that requires
-/// zero-data-retention 404s on all of these — relax the privacy setting
-/// or fund credits plus a ZDR-capable model instead.
-pub(crate) const DEFAULT_OPENROUTER_MODEL: &str = "liquid/lfm-2.5-2.6b:free";
+/// openrouter/free auto-routes to whatever free model is currently healthy
+/// and conforms with the account data policies (including zero data retention).
+/// Fallbacks include specific free models and user-supplied paid models if set.
+pub(crate) const DEFAULT_OPENROUTER_MODEL: &str = "openrouter/free";
 pub(crate) const OPENROUTER_FALLBACKS: &[&str] = &[
-    "nvidia/nemotron-3.5-lightning:free",
-    "dots-studio/dots-3-note-preview:free",
-    "google/gemma-4-31b-it:free",
+    "inclusionai/ling-3.2-flash:free",
 ];
-const OPENROUTER_MAX_ATTEMPTS: usize = 3;
+const OPENROUTER_MAX_ATTEMPTS: usize = 2;
 
 /// Single OpenRouter escalation path: fall back, then readdress positions
 /// to the caller's item indices; orphan indices the LLM invented are dropped.
@@ -77,15 +65,32 @@ async fn fallback(
             "gemini API failed and no OPENROUTER_API_KEY fallback configured"
         ));
     };
-    openrouter_with_model(
-        key,
-        openrouter_model,
-        chunk,
-        calls,
-        delivery,
-        openrouter_fallbacks,
-    )
-    .await
+
+    let mut candidate_models = vec![openrouter_model.to_string()];
+    for m in openrouter_fallbacks {
+        if m != openrouter_model {
+            candidate_models.push(m.clone());
+        }
+    }
+
+    let mut last_err = None;
+    for (idx, m) in candidate_models.iter().enumerate() {
+        match openrouter_with_model(key, m, chunk, calls, delivery).await {
+            Ok(actions) => return Ok(actions),
+            Err(e) => {
+                eprintln!("openrouter model {m} failed: {e:#}");
+                let err_str = e.to_string();
+                if err_str.contains("http 401") {
+                    return Err(e);
+                }
+                if idx + 1 < candidate_models.len() {
+                    eprintln!("trying next openrouter fallback: {}", candidate_models[idx + 1]);
+                }
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("all openrouter models failed")))
 }
 
 /// OpenRouter 404s/4xx on guardrails never succeed on retry — fail fast
@@ -96,8 +101,10 @@ fn openrouter_fatal(status: u16, text: &str) -> Option<anyhow::Error> {
     // short and actionable instead of dumping the routing metadata per batch.
     if status == 404 && text.contains("zdr-violation") {
         return Some(anyhow::anyhow!(
-            "openrouter: account requires zero-data-retention and every free endpoint violates it; \
-             relax it at https://openrouter.ai/settings/privacy or fund a ZDR-capable model"
+            "openrouter: ZDR-only routing excludes every free endpoint; enabling \
+             'Allow free endpoints that train on request data' (and 'publish prompts' \
+             if needed) at https://openrouter.ai/settings/privacy fixes it, or fund a \
+             ZDR-capable model"
         ));
     }
     match status {
@@ -173,28 +180,19 @@ async fn openrouter_with_model(
     chunk: &[Job<'_>],
     calls: &mut usize,
     delivery: bool,
-    openrouter_fallbacks: &[String],
 ) -> Result<Vec<LlmAction>> {
     eprintln!("openrouter attempt: model={model}, items={}", chunk.len());
-    let fallbacks: Vec<String> = openrouter_fallbacks
-        .iter()
-        .filter(|m| m.as_str() != model)
-        .cloned()
-        .collect();
     let mut payload = json!({
         "model": model,
-        "models": fallbacks,
         "messages": [
             {"role": "system", "content": system_prompt(delivery)},
             {"role": "user", "content": serde_json::to_string(
                 &json!({ "items": chunk.iter().map(|j| j.item).collect::<Vec<_>>() })
             ).context("serialize news batch")?}
         ],
-        "tools": [{"type": "openrouter:web_search"}],
         "response_format": {"type": "json_object"},
-        "plugins": [{"id": "response-healing"}],
         "temperature": 0.0,
-        "max_tokens": 32768
+        "max_tokens": 16384
     });
     for attempt in 0..OPENROUTER_MAX_ATTEMPTS {
         let Some((status, text, wait)) = openrouter_round(api_key, &payload, calls).await else {

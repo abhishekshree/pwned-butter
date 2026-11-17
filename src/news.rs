@@ -10,7 +10,8 @@ use urlencoding::encode;
 
 use crate::models::NewsItem;
 
-pub const USER_AGENT: &str = "Mozilla/5.0 (compatible; fda-mumbai-tracker/0.1; news aggregator)";
+pub const USER_AGENT: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 const QUERIES: &[&str] = &[
     "\"Maharashtra FDA\"",

@@ -27,9 +27,13 @@ pub(crate) const BATCH_SIZE: usize = 20;
 // ponytail: Gemini free tier allows ~5 requests/min — concurrent batches
 // hit 429s together, so batches run sequentially with backoff, no semaphore.
 
-/// Latest Flash alias, not a pinned version: pinned 3.5-flash extracted
-/// worse, so we track latest until a pinned version beats it.
-pub const DEFAULT_GEMINI_MODEL: &str = "gemini-flash-latest";
+/// Latest Flash-lite alias for fast response times, high RPM, and stable availability.
+pub const DEFAULT_GEMINI_MODEL: &str = "gemini-flash-lite-latest";
+pub const GEMINI_FALLBACK_MODELS: &[&str] = &[
+    "gemini-3.5-flash-lite",
+    "gemini-3-flash-preview",
+    "gemini-flash-latest",
+];
 
 mod dedupe;
 mod gemini;

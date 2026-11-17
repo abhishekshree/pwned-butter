@@ -161,6 +161,41 @@ pub(crate) fn city_of(text: &str) -> Option<String> {
         .map(|city| (*city).to_string())
 }
 
+fn clean_establishment_name(raw: &str) -> String {
+    let mut s = raw.trim();
+    for prefix in &[
+        "Maharashtra FDA suspends food licences of",
+        "Maharashtra FDA suspends food licence of",
+        "Maharashtra FDA suspends licences of",
+        "Maharashtra FDA suspends licence of",
+        "Maharashtra FDA suspends",
+        "Maharashtra FDA cancels",
+        "Maharashtra FDA seals",
+        "Maharashtra FDA seizes",
+        "Maharashtra FDA raids",
+        "Maharashtra FDA crackdown on",
+        "Maharashtra FDA",
+        "FDA suspends food licences of",
+        "FDA suspends food licence of",
+        "FDA suspends licences of",
+        "FDA suspends licence of",
+        "FDA suspends",
+        "FDA seals",
+        "FDA seizes",
+        "FDA raids",
+        "FDA",
+    ] {
+        if s.to_lowercase().starts_with(&prefix.to_lowercase()) {
+            let rest = s[prefix.len()..].trim().trim_start_matches([':', '-', ',', ' ']).trim();
+            if !rest.is_empty() {
+                s = rest;
+                break;
+            }
+        }
+    }
+    s.to_string()
+}
+
 // Deterministic safety net: when a batch's LLM path fails, keep one minimal
 // record per signal-bearing item so the run degrades instead of zeroing out.
 // Fields the rules can't know (area, violations, dates) stay empty —
@@ -180,17 +215,28 @@ pub(crate) fn rule_extract(jobs: &[Job<'_>]) -> Vec<LlmAction> {
                 .collect();
             let name = name.trim();
             (!name.is_empty()).then(|| {
+                let cleaned_name = clean_establishment_name(name);
+                let final_name = if cleaned_name.is_empty() {
+                    name.to_string()
+                } else {
+                    cleaned_name
+                };
                 let mut action = LlmAction::minimal(
-                    name.to_string(),
+                    final_name,
                     action_type,
                     j.orig,
                     j.item.snippet.clone(),
                 );
-                action.city = city_of(&format!(
+                let city = city_of(&format!(
                     "{} {}",
                     j.item.title,
                     j.item.snippet.as_deref().unwrap_or("")
-                ));
+                ))
+                .unwrap_or_else(|| "Mumbai".to_string());
+                action.city = Some(city);
+                if action.details.as_deref().map(str::trim).unwrap_or("").len() < 20 {
+                    action.details = Some(format!("FDA enforcement action: {}", j.item.title));
+                }
                 action
             })
         })
