@@ -2,7 +2,6 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 
 use anyhow::{Result, anyhow};
-use tracing::{debug, error, info, warn};
 
 use crate::db::{ActionInsert, RecentEvent};
 use crate::models::{LlmAction, NewsItem};
@@ -36,9 +35,7 @@ pub(crate) const BATCH_SIZE: usize = 20;
 pub const DEFAULT_GEMINI_MODEL: &str = "gemini-flash-latest";
 pub const GEMINI_FALLBACK_MODELS: &[&str] = &["gemini-flash-latest"];
 
-mod dedupe;
-mod gemini;
-mod openrouter;
+mod genai;
 mod quality;
 mod triage;
 
@@ -67,7 +64,7 @@ pub async fn extract(
     // take it as params so retry/fallback paths stay pure of env reads.
     let openrouter_key = std::env::var("OPENROUTER_API_KEY").ok();
     let openrouter_model = std::env::var("OPENROUTER_MODEL")
-        .unwrap_or_else(|_| openrouter::DEFAULT_OPENROUTER_MODEL.to_string());
+        .unwrap_or_else(|_| genai::DEFAULT_OPENROUTER_MODEL.to_string());
     let openrouter_fallbacks: Vec<String> = std::env::var("OPENROUTER_FALLBACKS")
         .map(|s| {
             s.split(',')
@@ -77,7 +74,7 @@ pub async fn extract(
                 .collect()
         })
         .unwrap_or_else(|_| {
-            openrouter::OPENROUTER_FALLBACKS
+            genai::OPENROUTER_FALLBACKS
                 .iter()
                 .map(|m| m.to_string())
                 .collect()
@@ -87,7 +84,7 @@ pub async fn extract(
     let mut actions = Vec::new();
     let mut failed = 0;
     for (batch_no, chunk) in jobs.chunks(BATCH_SIZE).enumerate() {
-        match gemini::extract_batch(
+        match genai::extract_batch(
             api_key,
             model,
             chunk,
@@ -131,7 +128,7 @@ pub async fn extract(
                 a.action_type,
             ))
         })
-        .map(gemini::sanitize_action)
+        .map(genai::sanitize_action)
         .collect();
 
     eprintln!(
@@ -190,7 +187,7 @@ pub async fn collapse_dupes(
     recent: &[RecentEvent],
 ) -> (Vec<usize>, usize) {
     let mut calls = 0;
-    match dedupe::collapse_once(api_key, model, rows, recent, &mut calls).await {
+    match genai::collapse_once(api_key, model, rows, recent, &mut calls).await {
         Ok(drops) => (drops, calls),
         Err(e) => {
             eprintln!("dupe-collapse llm failed ({e:#}); using name heuristics only");
