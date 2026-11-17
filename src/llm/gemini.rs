@@ -9,7 +9,9 @@ use super::openrouter::{escalate, remap};
 use super::triage::Job;
 use super::{strip_code_fences, system_prompt, truncate};
 
-const MAX_ATTEMPTS: usize = 6;
+// 15+30s of backoff covers a transient 503; a sustained outage used to burn
+// ~8 min per batch and push the whole run past its 30 min timeout.
+const MAX_ATTEMPTS: usize = 3;
 
 pub(crate) fn gemini_url(model: &str, api_key: &str) -> String {
     format!(

@@ -45,12 +45,22 @@ jobs:
               upserted="$(echo "$line" | sed -n 's/.*upserted=\([0-9]*\).*/\1/p')"
               if [ "${seen:-0}" -gt 0 ] && [ "${upserted:-0}" -eq 0 ]; then
                 echo "> ⚠️ **Zero records extracted despite $seen articles seen — pipeline may be degraded.**"
+              elif [ "${seen:-0}" -eq 0 ]; then
+                echo "> ⚠️ **No articles seen at all — news fetch returned nothing.**"
               fi
             else
               echo "_No completion line emitted — scraper likely failed._"
             fi
             failed="$(grep -c 'llm batch .* failed\|rss query failed\|article fetch failed\|enrich task join error' /tmp/scrape.log || true)"
             echo "Failed subtasks (LLM batches / RSS queries / article fetches): ${failed}"
+            fallback="$(grep -c 'rule fallback kept' /tmp/scrape.log || true)"
+            if [ "${fallback:-0}" -gt 0 ]; then
+              echo "> ⚠️ **${fallback} batch(es) used the keyword fallback — no LLM extraction.**"
+            fi
+            if [ "${seen:-0}" -eq 0 ]; then
+              echo "::error::No articles seen; news fetch returned nothing."
+              exit 1
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: DB snapshot

@@ -91,6 +91,15 @@ async fn fallback(
 /// OpenRouter 404s/4xx on guardrails never succeed on retry — fail fast
 /// instead of burning backoffs per batch. Returns the error to abort with.
 fn openrouter_fatal(status: u16, text: &str) -> Option<anyhow::Error> {
+    // Free endpoints do not offer zero-data-retention, so an account with ZDR
+    // enforced gets "0 endpoints available" for every model. Keep the log line
+    // short and actionable instead of dumping the routing metadata per batch.
+    if status == 404 && text.contains("zdr-violation") {
+        return Some(anyhow::anyhow!(
+            "openrouter: account requires zero-data-retention and every free endpoint violates it; \
+             relax it at https://openrouter.ai/settings/privacy or fund a ZDR-capable model"
+        ));
+    }
     match status {
         400 | 401 | 403 | 404 => Some(anyhow::anyhow!(
             "openrouter http {status} (non-retryable): {text}"
@@ -220,6 +229,17 @@ mod tests {
         assert!(openrouter_fatal(401, "bad key").is_some());
         assert!(openrouter_fatal(429, "slow down").is_none());
         assert!(openrouter_fatal(500, "boom").is_none());
+    }
+
+    #[test]
+    fn zdr_404_names_the_account_setting() {
+        let e = openrouter_fatal(
+            404,
+            r#"{"ineligibility_reasons":[{"reason":"zdr-violation-by-account"}]}"#,
+        )
+        .expect("zdr 404 is fatal")
+        .to_string();
+        assert!(e.contains("settings/privacy"), "{e}");
     }
 
     #[test]

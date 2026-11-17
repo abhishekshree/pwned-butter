@@ -56,7 +56,9 @@ const QUERIES: &[&str] = &[
 /// time budget before the later truncation discarded them.
 pub const MAX_ITEMS: usize = 100;
 const FETCH_CONCURRENCY: usize = 8;
-const RSS_CONCURRENCY: usize = 8;
+// Google answers all 32 queries from one runner IP at once with 503s when we
+// fan out too wide; four at a time keeps the burst below the threshold.
+const RSS_CONCURRENCY: usize = 4;
 
 pub fn google_news_url(query: &str, window: Option<&str>) -> String {
     let q = match window {
@@ -93,7 +95,21 @@ where
     out
 }
 
+/// One retry covers Google News' transient 503 storms; a sustained IP-level
+/// block still surfaces as `seen=0` in the run summary.
 async fn fetch_feed(client: &reqwest::Client, url: &str) -> Result<Vec<NewsItem>> {
+    match fetch_feed_once(client, url).await {
+        Ok(items) => Ok(items),
+        Err(first) => {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            fetch_feed_once(client, url)
+                .await
+                .map_err(|second| second.context(format!("after retry; first: {first:#}")))
+        }
+    }
+}
+
+async fn fetch_feed_once(client: &reqwest::Client, url: &str) -> Result<Vec<NewsItem>> {
     let resp = client
         .get(url)
         .send()

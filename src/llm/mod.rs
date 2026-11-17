@@ -94,7 +94,20 @@ pub async fn extract(
         )
         .await
         {
-            Ok(batch) => actions.extend(batch),
+            // Gate LLM output only. Rule-fallback rows are grounded in a real
+            // headline and have no LLM to name a city or tighten the name, so
+            // the calibration below would drop every one of them exactly when
+            // the fallback is needed.
+            Ok(batch) => actions.extend(batch.into_iter().filter(|a| match quality::check(a) {
+                Ok(()) => true,
+                Err(reason) => {
+                    eprintln!(
+                        "dropping low-quality LLM record ({reason}): {}",
+                        truncate(&a.establishment, 80)
+                    );
+                    false
+                }
+            })),
             Err(e) => actions.extend(salvaged(batch_no, &e, chunk, &mut failed)),
         }
     }
@@ -106,16 +119,6 @@ pub async fn extract(
     let mut seen = HashSet::new();
     actions = actions
         .into_iter()
-        .filter(|a| match quality::check(a) {
-            Ok(()) => true,
-            Err(reason) => {
-                eprintln!(
-                    "dropping low-quality LLM record ({reason}): {}",
-                    truncate(&a.establishment, 80)
-                );
-                false
-            }
-        })
         .filter(|a| {
             seen.insert((
                 a.source_index,

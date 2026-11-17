@@ -121,6 +121,46 @@ pub(crate) fn triage(hay: &str) -> Option<ActionType> {
     (!needs_corroboration || CORROBORATION.iter().any(|c| hay.contains(c))).then_some(action)
 }
 
+/// Cities that appear in Maharashtra FDA coverage, longest first so
+/// "Navi Mumbai" wins over "Mumbai". Rule-extracted rows have no LLM to name
+/// the city, so read it from the headline/body instead of leaving the
+/// dashboard's area filters empty.
+const CITIES: &[&str] = &[
+    "Navi Mumbai",
+    "Pimpri-Chinchwad",
+    "Mahabaleshwar",
+    "Aurangabad",
+    "Chandrapur",
+    "Ratnagiri",
+    "Kolhapur",
+    "Amravati",
+    "Jalgaon",
+    "Solapur",
+    "Nanded",
+    "Palghar",
+    "Mumbai",
+    "Thane",
+    "Nashik",
+    "Nagpur",
+    "Pune",
+    "Sangli",
+    "Satara",
+    "Akola",
+    "Latur",
+    "Dhule",
+    "Kalyan",
+    "Vasai",
+    "Panvel",
+];
+
+pub(crate) fn city_of(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    CITIES
+        .iter()
+        .find(|city| lower.contains(&city.to_lowercase()))
+        .map(|city| (*city).to_string())
+}
+
 // Deterministic safety net: when a batch's LLM path fails, keep one minimal
 // record per signal-bearing item so the run degrades instead of zeroing out.
 // Fields the rules can't know (area, violations, dates) stay empty —
@@ -140,12 +180,18 @@ pub(crate) fn rule_extract(jobs: &[Job<'_>]) -> Vec<LlmAction> {
                 .collect();
             let name = name.trim();
             (!name.is_empty()).then(|| {
-                LlmAction::minimal(
+                let mut action = LlmAction::minimal(
                     name.to_string(),
                     action_type,
                     j.orig,
                     j.item.snippet.clone(),
-                )
+                );
+                action.city = city_of(&format!(
+                    "{} {}",
+                    j.item.title,
+                    j.item.snippet.as_deref().unwrap_or("")
+                ));
+                action
             })
         })
         .collect()
@@ -264,5 +310,17 @@ mod tests {
             ActionType::LicenceSuspension,
             "licence suspension detected"
         );
+        assert_eq!(
+            kept[0].city.as_deref(),
+            Some("Mumbai"),
+            "city inferred from the headline"
+        );
+    }
+
+    #[test]
+    fn city_of_prefers_the_longer_place_name() {
+        assert_eq!(city_of("outlet sealed in Navi Mumbai").as_deref(), Some("Navi Mumbai"));
+        assert_eq!(city_of("FDA raid in Pune").as_deref(), Some("Pune"));
+        assert_eq!(city_of("no location here"), None);
     }
 }
