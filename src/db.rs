@@ -9,6 +9,8 @@ use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 
+use crate::models::{ActionType, OutletType};
+
 static POOL: OnceLock<PgPool> = OnceLock::new();
 
 pub async fn pool() -> Result<&'static PgPool> {
@@ -36,10 +38,10 @@ pub struct RecentEvent {
 
 /// Establishments acted against in the last `days` days, for the LLM
 /// duplicate-grouping pass. Capped to bound prompt size.
-pub async fn recent_events(pool: &PgPool, days: i64) -> Result<Vec<RecentEvent>> {
+pub async fn recent_events(pool: &PgPool, days: i32) -> Result<Vec<RecentEvent>> {
     let rows = sqlx::query(
         "SELECT establishment, action_type, action_date, city, area FROM actions \
-         WHERE action_date >= CURRENT_DATE - $1 \
+         WHERE action_date >= CURRENT_DATE - ($1::int) \
          ORDER BY action_date DESC LIMIT 200",
     )
     .bind(days)
@@ -79,8 +81,8 @@ pub struct ActionInsert {
     pub city: Option<String>,
     pub brand: Option<String>,
     pub operator: Option<String>,
-    pub outlet_type: Option<String>,
-    pub action_type: String,
+    pub outlet_type: Option<OutletType>,
+    pub action_type: ActionType,
     pub action_date: NaiveDate,
     pub violations: Vec<String>,
     pub compliance_score: Option<i32>,
@@ -129,8 +131,8 @@ async fn execute_insert(
         .bind(&r.city)
         .bind(&r.brand)
         .bind(&r.operator)
-        .bind(&r.outlet_type)
-        .bind(&r.action_type)
+        .bind(r.outlet_type.map(|t| t.to_string()))
+        .bind(r.action_type.to_string())
         .bind(r.action_date)
         .bind(&r.violations)
         .bind(r.compliance_score)
@@ -319,10 +321,10 @@ pub async fn finish_run(
          articles_seen = $1, articles_new = $2, actions_upserted = $3, llm_calls = $4, details = $5
          WHERE id = $6",
     )
-    .bind(articles_seen as i64)
-    .bind(articles_new as i64)
-    .bind(actions_upserted as i64)
-    .bind(llm_calls as i64)
+    .bind(i64::try_from(articles_seen)?)
+    .bind(i64::try_from(articles_new)?)
+    .bind(i64::try_from(actions_upserted)?)
+    .bind(i64::try_from(llm_calls)?)
     .bind(details)
     .bind(run_id)
     .execute(pool)

@@ -4,17 +4,16 @@ use std::collections::HashSet;
 use anyhow::{Result, anyhow};
 
 use crate::db::{ActionInsert, RecentEvent};
-use crate::models::{LlmAction, NewsItem};
+use crate::models::{LlmAction, NewsItem, Scope};
 
 pub const SYSTEM_PROMPT: &str = include_str!("../prompts/system.txt");
 
 const DELIVERY_MODE: &str = include_str!("../prompts/delivery.txt");
 
-pub(crate) fn system_prompt(delivery: bool) -> Cow<'static, str> {
-    if delivery {
-        format!("{SYSTEM_PROMPT}{DELIVERY_MODE}").into()
-    } else {
-        SYSTEM_PROMPT.into()
+pub(crate) fn system_prompt(scope: Scope) -> Cow<'static, str> {
+    match scope {
+        Scope::Delivery => format!("{SYSTEM_PROMPT}{DELIVERY_MODE}").into(),
+        Scope::General => SYSTEM_PROMPT.into(),
     }
 }
 
@@ -27,13 +26,15 @@ pub(crate) const BATCH_SIZE: usize = 20;
 // ponytail: Gemini free tier allows ~5 requests/min — concurrent batches
 // hit 429s together, so batches run sequentially with backoff, no semaphore.
 
-/// Latest Flash alias, not a pinned version: pinned 3.5-flash extracted
-/// worse, so we track latest until a pinned version beats it.
+/// `gemini-flash-latest` is the only Gemini ID that answers `generateContent`
+/// with this key: the lite aliases and specific `gemini-3.x` IDs return empty
+/// 404s (they now point at the Interactions API), so a dead default just burns
+/// a call per batch before failing over. OpenRouter is the cross-provider
+/// fallback.
 pub const DEFAULT_GEMINI_MODEL: &str = "gemini-flash-latest";
+pub const GEMINI_FALLBACK_MODELS: &[&str] = &["gemini-flash-latest"];
 
-mod dedupe;
-mod gemini;
-mod openrouter;
+mod genai;
 mod quality;
 mod triage;
 
@@ -41,7 +42,7 @@ pub async fn extract(
     api_key: &str,
     model: &str,
     items: &[NewsItem],
-    delivery: bool,
+    scope: Scope,
 ) -> Result<(Vec<LlmAction>, usize)> {
     let mut jobs = Vec::new();
     for (orig, item) in items.iter().enumerate() {
@@ -62,7 +63,7 @@ pub async fn extract(
     // take it as params so retry/fallback paths stay pure of env reads.
     let openrouter_key = std::env::var("OPENROUTER_API_KEY").ok();
     let openrouter_model = std::env::var("OPENROUTER_MODEL")
-        .unwrap_or_else(|_| openrouter::DEFAULT_OPENROUTER_MODEL.to_string());
+        .unwrap_or_else(|_| genai::DEFAULT_OPENROUTER_MODEL.to_string());
     let openrouter_fallbacks: Vec<String> = std::env::var("OPENROUTER_FALLBACKS")
         .map(|s| {
             s.split(',')
@@ -72,7 +73,7 @@ pub async fn extract(
                 .collect()
         })
         .unwrap_or_else(|_| {
-            openrouter::OPENROUTER_FALLBACKS
+            genai::OPENROUTER_FALLBACKS
                 .iter()
                 .map(|m| m.to_string())
                 .collect()
@@ -82,19 +83,32 @@ pub async fn extract(
     let mut actions = Vec::new();
     let mut failed = 0;
     for (batch_no, chunk) in jobs.chunks(BATCH_SIZE).enumerate() {
-        match gemini::extract_batch(
+        match genai::extract_batch(
             api_key,
             model,
             chunk,
             &mut calls,
-            delivery,
+            scope,
             openrouter_key.as_deref(),
             &openrouter_model,
             &openrouter_fallbacks,
         )
         .await
         {
-            Ok(batch) => actions.extend(batch),
+            // Gate LLM output only. Rule-fallback rows are grounded in a real
+            // headline and have no LLM to name a city or tighten the name, so
+            // the calibration below would drop every one of them exactly when
+            // the fallback is needed.
+            Ok(batch) => actions.extend(batch.into_iter().filter(|a| match quality::check(a) {
+                Ok(()) => true,
+                Err(reason) => {
+                    eprintln!(
+                        "dropping low-quality LLM record ({reason}): {}",
+                        truncate(&a.establishment, 80)
+                    );
+                    false
+                }
+            })),
             Err(e) => actions.extend(salvaged(batch_no, &e, chunk, &mut failed)),
         }
     }
@@ -106,16 +120,6 @@ pub async fn extract(
     let mut seen = HashSet::new();
     actions = actions
         .into_iter()
-        .filter(|a| match quality::check(a) {
-            Ok(()) => true,
-            Err(reason) => {
-                eprintln!(
-                    "dropping low-quality LLM record ({reason}): {}",
-                    truncate(&a.establishment, 80)
-                );
-                false
-            }
-        })
         .filter(|a| {
             seen.insert((
                 a.source_index,
@@ -123,7 +127,7 @@ pub async fn extract(
                 a.action_type,
             ))
         })
-        .map(gemini::sanitize_action)
+        .map(genai::sanitize_action)
         .collect();
 
     eprintln!(
@@ -182,7 +186,7 @@ pub async fn collapse_dupes(
     recent: &[RecentEvent],
 ) -> (Vec<usize>, usize) {
     let mut calls = 0;
-    match dedupe::collapse_once(api_key, model, rows, recent, &mut calls).await {
+    match genai::collapse_once(api_key, model, rows, recent, &mut calls).await {
         Ok(drops) => (drops, calls),
         Err(e) => {
             eprintln!("dupe-collapse llm failed ({e:#}); using name heuristics only");
@@ -215,10 +219,11 @@ pub(crate) fn strip_code_fences(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::extract;
+    use crate::models::Scope;
 
     #[tokio::test]
     async fn empty_items_skip_llm() {
-        let (actions, calls) = extract("key", "model", &[], false).await.unwrap();
+        let (actions, calls) = extract("key", "model", &[], Scope::General).await.unwrap();
         assert!(actions.is_empty());
         assert_eq!(calls, 0);
     }

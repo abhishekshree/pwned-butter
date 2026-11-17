@@ -121,6 +121,86 @@ pub(crate) fn triage(hay: &str) -> Option<ActionType> {
     (!needs_corroboration || CORROBORATION.iter().any(|c| hay.contains(c))).then_some(action)
 }
 
+/// Cities that appear in Maharashtra FDA coverage, longest first so
+/// "Navi Mumbai" wins over "Mumbai". Rule-extracted rows have no LLM to name
+/// the city, so read it from the headline/body instead of leaving the
+/// dashboard's area filters empty.
+const CITIES: &[&str] = &[
+    "Navi Mumbai",
+    "Pimpri-Chinchwad",
+    "Mahabaleshwar",
+    "Aurangabad",
+    "Chandrapur",
+    "Ratnagiri",
+    "Kolhapur",
+    "Amravati",
+    "Jalgaon",
+    "Solapur",
+    "Nanded",
+    "Palghar",
+    "Mumbai",
+    "Thane",
+    "Nashik",
+    "Nagpur",
+    "Pune",
+    "Sangli",
+    "Satara",
+    "Akola",
+    "Latur",
+    "Dhule",
+    "Kalyan",
+    "Vasai",
+    "Panvel",
+];
+
+pub(crate) fn city_of(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    CITIES
+        .iter()
+        .find(|city| lower.contains(&city.to_lowercase()))
+        .map(|city| (*city).to_string())
+}
+
+fn clean_establishment_name(raw: &str) -> String {
+    let mut s = raw.trim();
+    for prefix in &[
+        "Maharashtra FDA suspends food licences of",
+        "Maharashtra FDA suspends food licence of",
+        "Maharashtra FDA suspends licences of",
+        "Maharashtra FDA suspends licence of",
+        "Maharashtra FDA suspends",
+        "Maharashtra FDA cancels",
+        "Maharashtra FDA seals",
+        "Maharashtra FDA seizes",
+        "Maharashtra FDA raids",
+        "Maharashtra FDA crackdown on",
+        "Maharashtra FDA",
+        "FDA suspends food licences of",
+        "FDA suspends food licence of",
+        "FDA suspends licences of",
+        "FDA suspends licence of",
+        "FDA suspends",
+        "FDA seals",
+        "FDA seizes",
+        "FDA raids",
+        "FDA",
+    ] {
+        if s.to_lowercase().starts_with(&prefix.to_lowercase()) {
+            // Lowercasing can change byte length, so the prefix offset may not
+            // be a char boundary in `s`; skip rather than panic on odd UTF-8.
+            let Some(rest) = s.get(prefix.len()..) else {
+                continue;
+            };
+            let rest = rest.trim().trim_start_matches([':', '-', ',', ' ']).trim();
+            if !rest.is_empty() {
+                s = rest;
+                break;
+            }
+        }
+    }
+    s.to_string()
+}
+
 // Deterministic safety net: when a batch's LLM path fails, keep one minimal
 // record per signal-bearing item so the run degrades instead of zeroing out.
 // Fields the rules can't know (area, violations, dates) stay empty —
@@ -140,12 +220,33 @@ pub(crate) fn rule_extract(jobs: &[Job<'_>]) -> Vec<LlmAction> {
                 .collect();
             let name = name.trim();
             (!name.is_empty()).then(|| {
-                LlmAction::minimal(
-                    name.to_string(),
-                    action_type,
-                    j.orig,
-                    j.item.snippet.clone(),
-                )
+                let cleaned_name = clean_establishment_name(name);
+                let final_name = if cleaned_name.is_empty() {
+                    name.to_string()
+                } else {
+                    cleaned_name
+                };
+                let mut action =
+                    LlmAction::minimal(final_name, action_type, j.orig, j.item.snippet.clone());
+                let city = city_of(&format!(
+                    "{} {}",
+                    j.item.title,
+                    j.item.snippet.as_deref().unwrap_or("")
+                ))
+                .unwrap_or_else(|| "Mumbai".to_string());
+                action.city = Some(city);
+                if action
+                    .details
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or("")
+                    .chars()
+                    .count()
+                    < 20
+                {
+                    action.details = Some(format!("FDA enforcement action: {}", j.item.title));
+                }
+                action
             })
         })
         .collect()
@@ -264,5 +365,20 @@ mod tests {
             ActionType::LicenceSuspension,
             "licence suspension detected"
         );
+        assert_eq!(
+            kept[0].city.as_deref(),
+            Some("Mumbai"),
+            "city inferred from the headline"
+        );
+    }
+
+    #[test]
+    fn city_of_prefers_the_longer_place_name() {
+        assert_eq!(
+            city_of("outlet sealed in Navi Mumbai").as_deref(),
+            Some("Navi Mumbai")
+        );
+        assert_eq!(city_of("FDA raid in Pune").as_deref(), Some("Pune"));
+        assert_eq!(city_of("no location here"), None);
     }
 }

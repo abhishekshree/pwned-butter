@@ -6,11 +6,12 @@ use chrono::{DateTime, Utc};
 use rss::Channel;
 use scraper::{Html, Selector};
 use tokio::sync::Semaphore;
+use tracing::{error, info, warn};
 use urlencoding::encode;
 
 use crate::models::NewsItem;
 
-pub const USER_AGENT: &str = "Mozilla/5.0 (compatible; fda-mumbai-tracker/0.1; news aggregator)";
+pub const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 const QUERIES: &[&str] = &[
     "\"Maharashtra FDA\"",
@@ -56,7 +57,12 @@ const QUERIES: &[&str] = &[
 /// time budget before the later truncation discarded them.
 pub const MAX_ITEMS: usize = 100;
 const FETCH_CONCURRENCY: usize = 8;
-const RSS_CONCURRENCY: usize = 8;
+/// Publisher pages are untrusted; without a ceiling one huge article OOMs
+/// the run before the snippet is truncated.
+const MAX_ARTICLE_BYTES: u64 = 5 * 1024 * 1024;
+// Google answers all 32 queries from one runner IP at once with 503s when we
+// fan out too wide; four at a time keeps the burst below the threshold.
+const RSS_CONCURRENCY: usize = 4;
 
 pub fn google_news_url(query: &str, window: Option<&str>) -> String {
     let q = match window {
@@ -87,13 +93,27 @@ where
     for h in handles {
         match h.await {
             Ok(v) => out.push(v),
-            Err(e) => eprintln!("fan-out task failed: {e}"),
+            Err(e) => error!("fan-out task failed: {e}"),
         }
     }
     out
 }
 
+/// One retry covers Google News' transient 503 storms; a sustained IP-level
+/// block still surfaces as `seen=0` in the run summary.
 async fn fetch_feed(client: &reqwest::Client, url: &str) -> Result<Vec<NewsItem>> {
+    match fetch_feed_once(client, url).await {
+        Ok(items) => Ok(items),
+        Err(first) => {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            fetch_feed_once(client, url)
+                .await
+                .map_err(|second| second.context(format!("after retry; first: {first:#}")))
+        }
+    }
+}
+
+async fn fetch_feed_once(client: &reqwest::Client, url: &str) -> Result<Vec<NewsItem>> {
     let resp = client
         .get(url)
         .send()
@@ -142,13 +162,13 @@ pub async fn fetch_items(client: &reqwest::Client, window: &str) -> Result<Vec<N
     for res in fan_out(RSS_CONCURRENCY, jobs).await {
         match res {
             Ok(found) => items.extend(found),
-            Err(e) => eprintln!("rss query failed: {e}"),
+            Err(e) => warn!("rss query failed: {e}"),
         }
     }
     let fetched = items.len();
     let mut seen = HashSet::new();
     items.retain(|item| seen.insert(item.url.clone()));
-    eprintln!(
+    info!(
         "rss: {fetched} hits from {} queries, {} distinct Google News URLs",
         QUERIES.len(),
         items.len()
@@ -189,9 +209,7 @@ fn enforcement_score(item: &NewsItem) -> u8 {
         "sealed",
         "seized",
     ] {
-        if haystack.contains(signal) {
-            score += 3;
-        }
+        score += 3 * u8::from(haystack.contains(signal));
     }
     if haystack.contains("restaurant")
         || haystack.contains("hotel")
@@ -254,11 +272,7 @@ fn extract_snippet(document: &str) -> Option<String> {
         .filter_map(|e| {
             let t = e.text().collect::<String>();
             let t = t.trim();
-            if t.len() >= 40 {
-                Some(t.to_string())
-            } else {
-                None
-            }
+            (t.len() >= 40).then(|| t.to_string())
         })
         .collect();
     // Roundups often put the complete list of affected outlets after the
@@ -300,6 +314,9 @@ async fn fetch_article(client: &reqwest::Client, url: &str) -> Result<FetchedArt
         .with_context(|| format!("article get: {url}"))?
         .error_for_status()?;
     let final_url = resp.url().to_string();
+    if resp.content_length().is_some_and(|n| n > MAX_ARTICLE_BYTES) {
+        anyhow::bail!("article too large: {url}");
+    }
     let bytes = resp.bytes().await.context("article body")?;
     let text = String::from_utf8_lossy(&bytes);
     Ok(FetchedArticle {
@@ -320,7 +337,7 @@ pub async fn enrich(
 ) -> Vec<NewsItem> {
     let available = items.len();
     let items = select_for_enrichment(items, max_items);
-    eprintln!(
+    info!(
         "article enrichment: selected {}/{} highest-signal RSS items",
         items.len(),
         available
@@ -353,7 +370,7 @@ pub async fn enrich(
                 item.snippet = snippet;
             }
             Err(e) => {
-                eprintln!("article fetch failed ({}): {e}", item.url);
+                warn!("article fetch failed ({}): {e}", item.url);
                 if already_seen(&urls, seen, &item.url) {
                     continue;
                 }

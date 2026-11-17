@@ -13,6 +13,14 @@ pub struct NewsItem {
     pub snippet: Option<String>,
 }
 
+/// Extraction profile. `Delivery` adds the delivery-only prompt and keeps only
+/// outlets with a platform listing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    General,
+    Delivery,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionType {
@@ -36,22 +44,18 @@ impl ActionType {
         (Self::Inspection, "inspection"),
         (Self::Reopened, "reopened"),
     ];
-    pub const ALL: [Self; 7] = [
-        Self::TABLE[0].0,
-        Self::TABLE[1].0,
-        Self::TABLE[2].0,
-        Self::TABLE[3].0,
-        Self::TABLE[4].0,
-        Self::TABLE[5].0,
-        Self::TABLE[6].0,
-    ];
-
     fn as_code(self) -> &'static str {
-        Self::TABLE
-            .iter()
-            .find(|(t, _)| *t == self)
-            .map(|(_, code)| *code)
-            .unwrap_or("unknown")
+        // Exhaustive so adding a variant is a compile error, not a silent
+        // "unknown" row in the DB.
+        match self {
+            Self::LicenceSuspension => "licence_suspension",
+            Self::StopBusiness => "stop_business",
+            Self::ImprovementNotice => "improvement_notice",
+            Self::Sealing => "sealing",
+            Self::Seizure => "seizure",
+            Self::Inspection => "inspection",
+            Self::Reopened => "reopened",
+        }
     }
 }
 
@@ -129,10 +133,6 @@ impl fmt::Display for OutletType {
     }
 }
 
-pub fn canonical_outlet_type(s: &str) -> String {
-    OutletType::from(s).to_string()
-}
-
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LlmAction {
@@ -161,7 +161,7 @@ pub struct LlmAction {
     pub details: Option<String>,
     #[serde(default, deserialize_with = "deserialize_string_vec")]
     pub platforms: Vec<String>,
-    #[serde(default, alias = "source_index")]
+    #[serde(alias = "source_index")]
     pub source_index: usize,
 }
 
@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn action_type_round_trips() {
-        for t in ActionType::ALL {
+        for t in ActionType::TABLE.iter().map(|(t, _)| *t) {
             let code = t.to_string();
             assert_eq!(code.parse::<ActionType>().unwrap(), t, "{code} round-trips");
         }
@@ -224,9 +224,9 @@ mod tests {
 
     #[test]
     fn outlet_type_unknown_maps_to_other() {
-        assert_eq!(canonical_outlet_type("restaurant"), "restaurant");
-        assert_eq!(canonical_outlet_type("stand"), "other");
-        assert_eq!(canonical_outlet_type(""), "other");
+        assert_eq!(OutletType::from("restaurant"), OutletType::Restaurant);
+        assert_eq!(OutletType::from("stand"), OutletType::Other);
+        assert_eq!(OutletType::from(""), OutletType::Other);
     }
 
     #[test]
