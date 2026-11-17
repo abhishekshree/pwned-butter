@@ -40,30 +40,28 @@ async fn chat_text(
     options: &ChatOptions,
     calls: &mut usize,
 ) -> Result<String> {
-    let mut last_error = None;
     for attempt in 0..MAX_ATTEMPTS {
         *calls += 1;
-        match client
+        let error = match client
             .exec_chat(model, request.clone(), Some(options))
             .await
         {
             Ok(response) => {
-                if let Some(text) = response.into_first_text() {
-                    if !text.trim().is_empty() {
-                        return Ok(text);
-                    }
-                    last_error = Some(anyhow::anyhow!("genai returned empty response"));
-                } else {
-                    last_error = Some(anyhow::anyhow!("genai response had no text"));
+                if let Some(text) = response.into_first_text()
+                    && !text.trim().is_empty()
+                {
+                    return Ok(text);
                 }
+                anyhow::anyhow!("genai response had no text")
             }
-            Err(error) => last_error = Some(anyhow::anyhow!("genai request failed: {error}")),
+            Err(error) => anyhow::anyhow!("genai request failed: {error}"),
+        };
+        if attempt + 1 == MAX_ATTEMPTS {
+            return Err(error);
         }
-        if attempt + 1 < MAX_ATTEMPTS {
-            tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
-        }
+        tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
     }
-    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("genai request failed")))
+    unreachable!("MAX_ATTEMPTS is nonzero")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -115,21 +113,24 @@ pub(crate) async fn extract_batch(
             .filter(|fallback| *fallback != openrouter_model)
             .cloned(),
     );
-    let mut last_error = None;
+    let last_candidate = candidates
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("no OpenRouter model configured"))?;
     for candidate in candidates {
         let model = format!("open_router::{candidate}");
         match chat_text(&client, &model, request.clone(), &options, calls).await {
             Ok(text) => match parse_llm_text(&text) {
                 Ok(actions) => return Ok(remap(actions, chunk)),
-                Err(error) => last_error = Some(error),
+                Err(error) => {
+                    eprintln!("openrouter model {candidate} returned invalid output: {error:#}")
+                }
             },
-            Err(error) => {
-                eprintln!("openrouter model {candidate} failed: {error:#}");
-                last_error = Some(error);
-            }
+            Err(error) => eprintln!("openrouter model {candidate} failed: {error:#}"),
         }
     }
-    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("all openrouter models failed")))
+    let model = format!("open_router::{last_candidate}");
+    let text = chat_text(&client, &model, request, &options, calls).await?;
+    Ok(remap(parse_llm_text(&text)?, chunk))
 }
 
 pub(crate) async fn collapse_once(
