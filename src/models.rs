@@ -1,8 +1,6 @@
-use std::fmt;
-use std::str::FromStr;
-
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
+use strum::{Display, EnumIter, EnumString};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewsItem {
@@ -13,16 +11,37 @@ pub struct NewsItem {
     pub snippet: Option<String>,
 }
 
-/// Extraction profile. `Delivery` adds the delivery-only prompt and keeps only
-/// outlets with a platform listing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Scope {
-    General,
-    Delivery,
+/// Lowercased title, snippet and publisher, for keyword scoring and triage.
+impl NewsItem {
+    pub fn haystack(&self) -> String {
+        format!(
+            "{} {} {}",
+            self.title,
+            self.snippet.as_deref().unwrap_or(""),
+            self.source.as_deref().unwrap_or("")
+        )
+        .to_lowercase()
+    }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Codes come from `strum`'s `snake_case` attribute, so the DB value, serde
+/// name and prompt name cannot drift apart.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    EnumString,
+    Display,
+    EnumIter,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum ActionType {
     LicenceSuspension,
     StopBusiness,
@@ -34,52 +53,11 @@ pub enum ActionType {
     Reopened,
 }
 
-impl ActionType {
-    const TABLE: [(Self, &'static str); 7] = [
-        (Self::LicenceSuspension, "licence_suspension"),
-        (Self::StopBusiness, "stop_business"),
-        (Self::ImprovementNotice, "improvement_notice"),
-        (Self::Sealing, "sealing"),
-        (Self::Seizure, "seizure"),
-        (Self::Inspection, "inspection"),
-        (Self::Reopened, "reopened"),
-    ];
-    fn as_code(self) -> &'static str {
-        // Exhaustive so adding a variant is a compile error, not a silent
-        // "unknown" row in the DB.
-        match self {
-            Self::LicenceSuspension => "licence_suspension",
-            Self::StopBusiness => "stop_business",
-            Self::ImprovementNotice => "improvement_notice",
-            Self::Sealing => "sealing",
-            Self::Seizure => "seizure",
-            Self::Inspection => "inspection",
-            Self::Reopened => "reopened",
-        }
-    }
-}
-
-impl FromStr for ActionType {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let s = s.trim();
-        Self::TABLE
-            .iter()
-            .find(|(_, code)| *code == s)
-            .map(|(t, _)| *t)
-            .ok_or_else(|| format!("unknown action type: {s}"))
-    }
-}
-
-impl fmt::Display for ActionType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_code())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display, EnumIter,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum OutletType {
     Restaurant,
     CloudKitchen,
@@ -95,41 +73,10 @@ pub enum OutletType {
     Other,
 }
 
-impl From<&str> for OutletType {
-    fn from(s: &str) -> Self {
-        match s.trim() {
-            "restaurant" => Self::Restaurant,
-            "cloud_kitchen" => Self::CloudKitchen,
-            "quick_commerce" => Self::QuickCommerce,
-            "warehouse" => Self::Warehouse,
-            "dhaba" => Self::Dhaba,
-            "hotel" => Self::Hotel,
-            "bakery" => Self::Bakery,
-            "club" => Self::Club,
-            "mess" => Self::Mess,
-            "dairy" => Self::Dairy,
-            "street_vendor" => Self::StreetVendor,
-            _ => Self::Other,
-        }
-    }
-}
-
-impl fmt::Display for OutletType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Restaurant => "restaurant",
-            Self::CloudKitchen => "cloud_kitchen",
-            Self::QuickCommerce => "quick_commerce",
-            Self::Warehouse => "warehouse",
-            Self::Dhaba => "dhaba",
-            Self::Hotel => "hotel",
-            Self::Bakery => "bakery",
-            Self::Club => "club",
-            Self::Mess => "mess",
-            Self::Dairy => "dairy",
-            Self::StreetVendor => "street_vendor",
-            Self::Other => "other",
-        })
+impl OutletType {
+    /// Unknown strings fall back to `Other` at the trust boundary.
+    pub fn from_code(s: &str) -> Self {
+        s.trim().parse().unwrap_or(Self::Other)
     }
 }
 
@@ -209,10 +156,11 @@ pub fn coerce_action_date(raw: Option<&str>, published: Option<DateTime<Utc>>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use strum::IntoEnumIterator;
 
     #[test]
     fn action_type_round_trips() {
-        for t in ActionType::TABLE.iter().map(|(t, _)| *t) {
+        for t in ActionType::iter() {
             let code = t.to_string();
             assert_eq!(code.parse::<ActionType>().unwrap(), t, "{code} round-trips");
         }
@@ -223,10 +171,13 @@ mod tests {
     }
 
     #[test]
-    fn outlet_type_unknown_maps_to_other() {
-        assert_eq!(OutletType::from("restaurant"), OutletType::Restaurant);
-        assert_eq!(OutletType::from("stand"), OutletType::Other);
-        assert_eq!(OutletType::from(""), OutletType::Other);
+    fn outlet_type_round_trips() {
+        for t in OutletType::iter() {
+            let code = t.to_string();
+            assert_eq!(OutletType::from_code(&code), t, "{code} round-trips");
+        }
+        assert_eq!(OutletType::from_code("stand"), OutletType::Other);
+        assert_eq!(OutletType::from_code(""), OutletType::Other);
     }
 
     #[test]

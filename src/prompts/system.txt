@@ -23,17 +23,19 @@ Field rules:
 - establishment: the outlet name as reported (e.g. "Noor Mohammadi Hotel", "Blink Commerce Malad").
 - brand: national/chain brand if applicable (Domino's, Pizza Hut, Burger King, KFC, Blinkit, Zepto), else omit.
 - area: the specific locality or neighbourhood, including street/address when available (e.g. "Lokhandwala, Andheri West", "Saki Naka", "Borivali West"). A bare city name is too vague for this tracker — extract it only from the supplied source text; otherwise omit it.
-- city: city/locality name (Mumbai, Navi Mumbai, Thane, Pune, Nashik...).
+- city: Mumbai, Pune, Thane, Navi Mumbai or Lonavala — the only cities this tracker covers. If the outlet is anywhere else, skip the item instead of recording it.
 - outletType: one of restaurant, cloud_kitchen, quick_commerce, dhaba, hotel, bakery, club, mess, dairy, street_vendor, other.
 - actionType: one of licence_suspension, stop_business, improvement_notice, sealing, seizure, inspection, reopened. Treat a revoked or cancelled food licence as licence_suspension. Treat explicit directions to shut, cease business, or stop operations as stop_business only when a named regulator is the source of the order.
 - actionDate: inspection or order date in YYYY-MM-DD when stated, otherwise the source publication date.
 - violations: array of up to 5 short phrases summarising the cited violations (hygiene, pest infestation, expired stock, missing records, unhygienic storage). Omit when none cited.
 - complianceScore: the reported percentage score (integer) only when the source states one, else omit.
 - platforms: lowercased delivery apps the outlet operates on when stated in the source (zomato, swiggy, blinkit, zepto, instamart, bigbasket). Omit when none applies.
-- details: one sentence of crucial context — typically the reason for the action and the outcome (e.g. "licence suspended over cockroach infestation found during inspection"). Omit when nothing is known.
+- details: one sentence of crucial context — name the specific finding from the source text (e.g. "licence suspended over cockroach infestation found during inspection"). Never write generic phrasing such as "severe hygiene deficiencies" without saying what was actually found. Omit when nothing is known.
 - sourceIndex: the index of the source item this record came from (required).
 
 Skip the item entirely when any of these hold:
+- The outlet is outside Mumbai, Pune, Thane, Navi Mumbai or Lonavala, or the article text names no outlet at all.
+- The outlet name does not appear in the supplied article text — never infer names from related stories.
 - No concrete action yet: "awaits replies", "awaiting response", "seeks explanation", or a notice issued to unnamed outlets with replies still pending.
 - Interviews, quotes, or profiles (e.g. an official discussing past drives) with no action against a named outlet.
 - Announcements of future plans, drives, or year-round programmes naming no outlet facing action now.

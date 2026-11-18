@@ -6,10 +6,12 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
 use serde_json::Value;
+use sqlx::FromRow;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 
 use crate::models::{ActionType, OutletType};
+use crate::scrape::ScrapeReport;
 
 static POOL: OnceLock<PgPool> = OnceLock::new();
 
@@ -27,7 +29,7 @@ pub async fn pool() -> Result<&'static PgPool> {
     Ok(POOL.get_or_init(|| pool))
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, FromRow)]
 pub struct RecentEvent {
     pub establishment: String,
     pub action_type: String,
@@ -36,42 +38,28 @@ pub struct RecentEvent {
     pub area: Option<String>,
 }
 
-/// Establishments acted against in the last `days` days, for the LLM
-/// duplicate-grouping pass. Capped to bound prompt size.
+/// Establishments acted against in the last `days` days, capped to bound
+/// prompt size for the LLM duplicate-grouping pass.
 pub async fn recent_events(pool: &PgPool, days: i32) -> Result<Vec<RecentEvent>> {
-    let rows = sqlx::query(
+    Ok(sqlx::query_as::<_, RecentEvent>(
         "SELECT establishment, action_type, action_date, city, area FROM actions \
          WHERE action_date >= CURRENT_DATE - ($1::int) \
          ORDER BY action_date DESC LIMIT 200",
     )
     .bind(days)
     .fetch_all(pool)
-    .await?;
-    Ok(rows
-        .iter()
-        .filter_map(|r| {
-            Some(RecentEvent {
-                establishment: r.try_get(0).ok()?,
-                action_type: r.try_get(1).ok()?,
-                action_date: r.try_get(2).ok()?,
-                city: r.try_get(3).ok(),
-                area: r.try_get(4).ok(),
-            })
-        })
-        .collect())
+    .await?)
 }
 
 pub async fn seen_urls(pool: &PgPool, cutoff: DateTime<Utc>) -> Result<HashSet<String>> {
-    let rows = sqlx::query(
+    Ok(sqlx::query_scalar::<_, String>(
         "SELECT source_url FROM actions WHERE published_at > $1 OR published_at IS NULL",
     )
     .bind(cutoff)
     .fetch_all(pool)
-    .await?;
-    Ok(rows
-        .iter()
-        .filter_map(|r| r.try_get::<String, _>("source_url").ok())
-        .collect())
+    .await?
+    .into_iter()
+    .collect())
 }
 
 #[derive(Debug, Clone)]
@@ -123,8 +111,7 @@ async fn execute_insert(
          ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) \
          ON CONFLICT (source_url, establishment, action_date) {conflict_tail}"
     );
-    // `conflict_tail` is a compile-time constant (ON CONFLICT DO NOTHING / UPDATE),
-    // not user input — audited for injection, safe to assert.
+    // `conflict_tail` is a compile-time constant, not user input.
     let res = sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(&r.establishment)
         .bind(&r.area)
@@ -152,11 +139,9 @@ pub async fn upsert_actions(pool: &PgPool, rows: &[ActionInsert]) -> Result<usiz
     transact(pool, |mut tx| async move {
         let mut affected: usize = 0;
         for r in rows {
-            // Same outlet within ±5 days = one event, re-reported by another
-            // outlet — regardless of action_type, since outlets report the same
-            // saga as "inspection", then "licence suspension". SQL narrows to
-            // the window; name matching tolerates acronym and qualifier variants
-            // ("MCA BKC Club" vs "Mumbai Cricket Association (BKC Facility)").
+            // Same outlet within ±5 days = one event, even when outlets call
+            // it "inspection" then "licence suspension". Name matching
+            // tolerates "MCA BKC Club" vs "Mumbai Cricket Association (BKC)".
             let candidates: Vec<String> = sqlx::query(
                 "SELECT establishment FROM actions
                  WHERE action_date BETWEEN $1 - 5 AND $1 + 5",
@@ -191,23 +176,9 @@ pub async fn upsert_actions(pool: &PgPool, rows: &[ActionInsert]) -> Result<usiz
     .await
 }
 
-/// Insert rows, skipping any that already exist on
-/// (source_url, establishment, action_date). Zero overwrite.
-pub async fn insert_actions(pool: &PgPool, rows: &[ActionInsert]) -> Result<usize> {
-    transact(pool, |mut tx| async move {
-        let mut inserted: usize = 0;
-        for r in rows {
-            inserted += usize::try_from(execute_insert(&mut tx, r, "DO NOTHING").await?)?;
-        }
-        Ok((tx, inserted))
-    })
-    .await
-}
-
 /// Replace a date window of rows with a fresh, deduped extraction. Rows are
 /// deleted by published_at/action_date (Google News URLs rotate between
-/// fetches, so source_url is not a stable key), then inserted with
-/// within-batch dedup on (city, ±5 days, same_event name match).
+/// fetches), then deduped within the batch on (city, ±5 days, `same_event`).
 /// Returns (deleted, inserted).
 pub async fn replace_actions(
     pool: &PgPool,
@@ -269,11 +240,9 @@ fn token_matches(t: &str, words: &[&str]) -> bool {
         || (0..=words.len().saturating_sub(t.len())).any(|i| is_acronym_of(t, &words[i..]))
 }
 
-/// True when two establishment names refer to the same outlet: exact
-/// (case/punctuation-insensitive), one name containing the other, or every
-/// token of one name appearing in the other — literally or as an acronym
-/// ("MCA" ~ "Mumbai Cricket Association") — with at least one literal word
-/// of 3+ chars in common so a bare acronym can't match on initials alone.
+/// Same outlet: exact (case/punctuation-insensitive), containment for names
+/// 6+ chars, or every token matching literally or as an initials acronym,
+/// with one 3+ char word in common so a bare acronym cannot match alone.
 fn same_event(a: &str, b: &str) -> bool {
     let norm = |s: &str| -> String {
         s.to_lowercase()
@@ -310,10 +279,7 @@ pub async fn begin_run(pool: &PgPool) -> Result<i64> {
 pub async fn finish_run(
     pool: &PgPool,
     run_id: i64,
-    articles_seen: usize,
-    articles_new: usize,
-    actions_upserted: usize,
-    llm_calls: usize,
+    report: &ScrapeReport,
     details: &Value,
 ) -> Result<()> {
     sqlx::query(
@@ -321,10 +287,10 @@ pub async fn finish_run(
          articles_seen = $1, articles_new = $2, actions_upserted = $3, llm_calls = $4, details = $5
          WHERE id = $6",
     )
-    .bind(i64::try_from(articles_seen)?)
-    .bind(i64::try_from(articles_new)?)
-    .bind(i64::try_from(actions_upserted)?)
-    .bind(i64::try_from(llm_calls)?)
+    .bind(i64::try_from(report.articles_seen)?)
+    .bind(i64::try_from(report.articles_new)?)
+    .bind(i64::try_from(report.actions_upserted)?)
+    .bind(i64::try_from(report.llm_calls)?)
     .bind(details)
     .bind(run_id)
     .execute(pool)

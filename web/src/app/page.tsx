@@ -29,11 +29,11 @@ export const dynamic = "force-dynamic";
 const PAGE_SIZE = 20;
 const MAX_PAGE = 10_000;
 
-const STATUS_CHIPS: { v: string | null; label: string; tone: string }[] = [
-  { v: null, label: "All Actions", tone: "border-primary/40 bg-primary/10 text-foreground" },
-  { v: "suspended", label: "Suspended", tone: "border-red-500/40 bg-red-500/10 text-red-600 dark:text-red-400" },
-  { v: "reopened", label: "Reopened", tone: "border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" },
-  { v: "active", label: "Active / Notices", tone: "border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400" },
+const STATUS_CHIPS: { v: string | null; label: string }[] = [
+  { v: null, label: "All Actions" },
+  { v: "suspended", label: "Suspended" },
+  { v: "reopened", label: "Reopened" },
+  { v: "active", label: "Active / Notices" },
 ];
 
 function single(v: string | string[] | undefined): string | undefined {
@@ -168,7 +168,9 @@ export default async function Home({
             {stats.lastRun?.finished_at ? (
               <p className="inline-flex items-center gap-1 border-t border-border/50 pt-3 font-mono text-xs text-muted-foreground">
                 <Clock className="size-3 text-muted-foreground/70" />
-                Updated {formatDateTime(stats.lastRun.finished_at)}
+                Updated {formatDateTime(stats.lastRun.finished_at)} ·{" "}
+                {stats.lastRun.actions_upserted} row
+                {stats.lastRun.actions_upserted === 1 ? "" : "s"}
               </p>
             ) : null}
           </div>

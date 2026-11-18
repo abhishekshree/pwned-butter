@@ -5,7 +5,7 @@ use tracing::{info, warn};
 
 use crate::db::{self, ActionInsert};
 use crate::llm;
-use crate::models::{LlmAction, NewsItem, OutletType, Scope, coerce_action_date, nonempty};
+use crate::models::{LlmAction, NewsItem, OutletType, coerce_action_date, nonempty};
 use crate::news;
 
 #[derive(Debug, Clone)]
@@ -17,18 +17,9 @@ pub struct ScrapeReport {
 }
 
 pub async fn run_scrape(gemini_key: &str, model: &str) -> Result<(i64, ScrapeReport)> {
-    // Google News indexes regional enforcement reports hours after publication
-    // surprisingly often. Search an overlapping window and rely on source and
-    // event deduplication rather than making each daily run a one-shot.
-    run_with_window(
-        gemini_key,
-        model,
-        "when:3d",
-        21,
-        news::MAX_ITEMS,
-        Scope::General,
-    )
-    .await
+    // Google News indexes regional reports hours late; an overlapping window
+    // with dedup beats a one-shot daily fetch.
+    run_with_window(gemini_key, model, "when:3d", 21, news::MAX_ITEMS).await
 }
 
 pub async fn run_with_window(
@@ -37,21 +28,17 @@ pub async fn run_with_window(
     window: &str,
     seen_days: i64,
     max_items: usize,
-    scope: Scope,
 ) -> Result<(i64, ScrapeReport)> {
     let pool = db::pool().await?;
     let run_id = db::begin_run(pool).await?;
 
-    match scrape_once(pool, gemini_key, model, window, seen_days, max_items, scope).await {
+    match scrape_once(pool, gemini_key, model, window, seen_days, max_items).await {
         Ok(report) => {
             db::finish_run(
                 pool,
                 run_id,
-                report.articles_seen,
-                report.articles_new,
-                report.actions_upserted,
-                report.llm_calls,
-                &json!({"model": model, "window": window, "delivery": scope == Scope::Delivery}),
+                &report,
+                &json!({"model": model, "window": window}),
             )
             .await?;
             Ok((run_id, report))
@@ -70,7 +57,6 @@ async fn scrape_once(
     window: &str,
     seen_days: i64,
     max_items: usize,
-    scope: Scope,
 ) -> Result<ScrapeReport> {
     let client = crate::http_client();
     let seen = Utc::now() - ChronoDuration::days(seen_days);
@@ -80,8 +66,8 @@ async fn scrape_once(
     let articles_seen = items.len();
     let fresh = news::enrich(client, items, &already_seen, max_items).await;
 
-    let (actions, mut llm_calls) = llm::extract(gemini_key, model, &fresh, scope).await?;
-    let rows = build_rows(&fresh, &actions, scope);
+    let (actions, mut llm_calls) = llm::extract(gemini_key, model, &fresh).await?;
+    let rows = build_rows(&fresh, &actions);
     let (rows, collapse_calls) = collapse_dupes(pool, gemini_key, model, rows).await;
     llm_calls += collapse_calls;
     let upserted = db::upsert_actions(pool, &rows).await?;
@@ -94,8 +80,8 @@ async fn scrape_once(
     })
 }
 
-/// LLM pass that collapses re-reported events before insert; falls back to
-/// the db.rs name heuristics alone when the DB lookup or the call fails.
+/// LLM pass that drops re-reported events before insert; falls back to the
+/// db.rs name heuristics when the lookup or the call fails.
 async fn collapse_dupes(
     pool: &sqlx::PgPool,
     gemini_key: &str,
@@ -130,22 +116,39 @@ async fn collapse_dupes(
     (kept, calls)
 }
 
-pub fn build_rows(items: &[NewsItem], actions: &[LlmAction], scope: Scope) -> Vec<ActionInsert> {
+/// Cities the tracker covers. The FDA brief is statewide, so roundups naming
+/// outlets elsewhere still parse — drop them at the insert boundary.
+pub(crate) const IN_SCOPE_CITIES: &[&str] = &["mumbai", "pune", "thane", "navi mumbai", "lonavala"];
+
+/// Case-insensitive: "Mumbai Suburban" is still Mumbai, "Navi Mumbai" needs
+/// its own entry because the prefix does not match.
+fn in_scope(city: Option<&str>) -> bool {
+    city.is_some_and(|city| {
+        let city = city.trim().to_lowercase();
+        IN_SCOPE_CITIES.iter().any(|keep| {
+            city.strip_prefix(keep)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+        })
+    })
+}
+
+pub fn build_rows(items: &[NewsItem], actions: &[LlmAction]) -> Vec<ActionInsert> {
     actions
         .iter()
         .filter_map(|a| {
-            if scope == Scope::Delivery && a.platforms.is_empty() {
-                return None;
-            }
             let item = items.get(a.source_index)?;
             let establishment = nonempty(Some(a.establishment.as_str()))?;
+            let city = nonempty(a.city.as_deref());
+            if !in_scope(city.as_deref()) {
+                return None;
+            }
             Some(ActionInsert {
                 establishment,
                 area: nonempty(a.area.as_deref()),
-                city: nonempty(a.city.as_deref()),
+                city,
                 brand: nonempty(a.brand.as_deref()),
                 operator: nonempty(a.operator.as_deref()),
-                outlet_type: a.outlet_type.as_deref().map(OutletType::from),
+                outlet_type: a.outlet_type.as_deref().map(OutletType::from_code),
                 action_type: a.action_type,
                 action_date: coerce_action_date(a.action_date.as_deref(), item.published),
                 violations: a.violations.clone(),
@@ -164,9 +167,11 @@ pub fn build_rows(items: &[NewsItem], actions: &[LlmAction], scope: Scope) -> Ve
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
+    use test_case::test_case;
+
     use super::*;
     use crate::models::ActionType;
-    use chrono::Utc;
 
     fn item(title: &str, url: &str) -> NewsItem {
         NewsItem {
@@ -198,7 +203,7 @@ mod tests {
             source_index: 0,
             ..Default::default()
         }];
-        let rows = build_rows(&items, &actions, Scope::General);
+        let rows = build_rows(&items, &actions);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].brand.as_deref(), Some("Domino's"));
         assert_eq!(rows[0].action_type, ActionType::LicenceSuspension);
@@ -211,67 +216,72 @@ mod tests {
         let items = vec![item("a", "b")];
         let action = LlmAction {
             establishment: "X".into(),
+            city: Some("Mumbai".into()),
             outlet_type: Some("pavement stand".into()),
             action_type: ActionType::Inspection,
             source_index: 0,
             ..Default::default()
         };
-        let rows = build_rows(&items, &[action], Scope::General);
+        let rows = build_rows(&items, &[action]);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].outlet_type, Some(OutletType::Other));
     }
 
-    #[test]
-    fn drops_orphan_source_index() {
-        let items = vec![item("a", "b")];
-        let action = LlmAction {
+    fn with_city(city: &str) -> LlmAction {
+        LlmAction {
             establishment: "X".into(),
-            action_type: ActionType::Inspection,
-            source_index: 5,
+            city: Some(city.into()),
+            action_type: ActionType::LicenceSuspension,
+            source_index: 0,
             ..Default::default()
-        };
-        assert!(build_rows(&items, &[action], Scope::General).is_empty());
+        }
     }
 
     #[test]
-    fn delivery_requires_platform_listing() {
+    fn keeps_only_the_covered_cities() {
+        let items = vec![item("a", "b")];
+        let kept = build_rows(
+            &items,
+            &[
+                with_city("Mumbai"),
+                with_city("pune"),
+                with_city("Pune City"),
+                with_city("Thane"),
+                with_city("Thane West"),
+                with_city("Navi Mumbai"),
+                with_city("Lonavala"),
+            ],
+        );
+        assert_eq!(kept.len(), 7, "all covered cities are kept");
+
+        let dropped = build_rows(
+            &items,
+            &[
+                with_city("Mahabaleshwar"),
+                with_city("Nashik"),
+                with_city("Panvel"),
+                with_city("Bhiwandi"),
+            ],
+        );
+        assert!(dropped.is_empty(), "uncovered cities are out of scope");
+    }
+
+    #[test]
+    fn drops_outlet_with_no_city() {
         let items = vec![item("a", "b")];
         let action = LlmAction {
             establishment: "X".into(),
-            city: Some("Mumbai".into()),
-            outlet_type: Some("restaurant".into()),
             action_type: ActionType::Inspection,
             source_index: 0,
             ..Default::default()
         };
-        assert!(
-            build_rows(&items, &[action], Scope::Delivery).is_empty(),
-            "delivery mode drops platform-less outlets"
-        );
-    }
-
-    #[test]
-    fn delivery_keeps_listed_outlets() {
-        let items = vec![item("a", "b")];
-        let action = LlmAction {
-            establishment: "X".into(),
-            city: Some("Mumbai".into()),
-            outlet_type: Some("restaurant".into()),
-            action_type: ActionType::Inspection,
-            platforms: vec!["zomato".into(), "swiggy".into()],
-            source_index: 0,
-            ..Default::default()
-        };
-        assert_eq!(
-            build_rows(&items, &[action], Scope::Delivery).len(),
-            1,
-            "listed outlet survives delivery filter"
-        );
+        assert!(build_rows(&items, &[action]).is_empty());
     }
 
     fn scored(score: Option<i32>) -> LlmAction {
         LlmAction {
             establishment: "X".into(),
+            city: Some("Mumbai".into()),
             action_type: ActionType::Inspection,
             compliance_score: score,
             source_index: 0,
@@ -279,24 +289,17 @@ mod tests {
         }
     }
 
-    #[test]
-    fn compliance_score_in_range_passes_through() {
+    #[test_case(Some(54), Some(54); "in range")]
+    #[test_case(Some(999), None; "too high")]
+    #[test_case(Some(-5), None; "negative")]
+    #[test_case(Some(101), None; "just out of range")]
+    #[test_case(None, None; "absent")]
+    fn compliance_score_keeps_only_0_to_100(score: Option<i32>, expected: Option<i32>) {
         let items = vec![item("a", "b")];
         assert_eq!(
-            build_rows(&items, &[scored(Some(54))], Scope::General)[0].compliance_score,
-            Some(54)
+            build_rows(&items, &[scored(score)])[0].compliance_score,
+            expected,
+            "{score:?}"
         );
-    }
-
-    #[test]
-    fn compliance_score_out_of_range_becomes_none() {
-        let items = vec![item("a", "b")];
-        for score in [Some(999), Some(-5), Some(101), None] {
-            assert_eq!(
-                build_rows(&items, &[scored(score)], Scope::General)[0].compliance_score,
-                None,
-                "{score:?} becomes None"
-            );
-        }
     }
 }

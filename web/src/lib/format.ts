@@ -101,35 +101,12 @@ export function formatNumber(n: number | undefined | null): string {
   return new Intl.NumberFormat("en-IN").format(n);
 }
 
-export function complianceTone(score: number | null): { text: string; badge: string; border: string; bg: string } {
-  if (score === null) {
-    return {
-      text: "text-muted-foreground",
-      badge: "border-border bg-muted/30 text-muted-foreground",
-      border: "border-border",
-      bg: "bg-muted",
-    };
-  }
+export function complianceTone(score: number): string {
   if (score >= 4) {
-    return {
-      text: "text-emerald-500",
-      badge: "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
-      border: "border-emerald-500/40",
-      bg: "bg-emerald-500",
-    };
+    return "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400";
   }
   if (score >= 3) {
-    return {
-      text: "text-amber-500",
-      badge: "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400",
-      border: "border-amber-500/40",
-      bg: "bg-amber-500",
-    };
+    return "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400";
   }
-  return {
-    text: "text-red-500",
-    badge: "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-400",
-    border: "border-red-500/40",
-    bg: "bg-red-500",
-  };
+  return "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-400";
 }

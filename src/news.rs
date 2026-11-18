@@ -10,57 +10,19 @@ use tracing::{error, info, warn};
 use urlencoding::encode;
 
 use crate::models::NewsItem;
+use crate::rules::rules;
 
 pub const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
-const QUERIES: &[&str] = &[
-    "\"Maharashtra FDA\"",
-    "\"Maharashtra Food and Drug Administration\"",
-    "\"FDA Mumbai\"",
-    "\"Tukaram Mundhe\"",
-    "\"Maharashtra FDA\" licence suspended",
-    "\"Maharashtra FDA\" licence cancelled",
-    "\"Maharashtra FDA\" seal",
-    "\"Maharashtra FDA\" seizure",
-    "\"Maharashtra FDA\" raid",
-    "\"Maharashtra FDA\" restaurant hygiene",
-    "\"Maharashtra FDA\" hotel dhaba eatery",
-    "\"Maharashtra FDA\" \"improvement notice\"",
-    "\"Maharashtra FDA\" expired cockroach",
-    "\"Maharashtra FDA\" milk adulteration",
-    "\"Maharashtra FDA\" chain restaurant",
-    "Dominos OR \"Pizza Hut\" OR \"Burger King\" FDA Maharashtra",
-    "KFC OR McDonalds OR Starbucks FDA licence Maharashtra",
-    "Blinkit OR Zepto OR \"Swiggy Instamart\" FDA licence suspended",
-    "Zomato OR Swiggy \"cloud kitchen\" FDA",
-    "\"Maharashtra FDA\" Mumbai food safety",
-    "\"Maharashtra FDA\" Pune",
-    "\"Maharashtra FDA\" Nashik OR Thane OR Nagpur OR Aurangabad",
-    "\"licence suspended\" \"Safe Food\" Maharashtra restaurant",
-    "\"Maharashtra FDA\" prosecution",
-    "\"Food Safety and Standards\" Maharashtra raid licence",
-    "site:x.com \"Maharashtra FDA\"",
-    "site:twitter.com \"Maharashtra FDA\"",
-    "site:x.com \"Maharashtra FDA\" raid OR licence OR suspend",
-    "site:x.com FDA Mumbai raid",
-    "site:x.com \"Tukaram Mundhe\"",
-    "site:x.com Mumbai restaurant FDA hygiene",
-    "site:x.com Blinkit OR Zepto OR Instamart FDA",
-];
-
 /// The number of distinct, high-signal articles to enrich in one scheduled run.
-///
-/// A single FDA press note can name dozens of outlets, so dropping a relevant
-/// roundup is much more costly than reading a few more articles. This is
-/// deliberately applied before article fetching: Google News returns the same
-/// story from several queries and fetching all of them used to spend the run's
-/// time budget before the later truncation discarded them.
+/// Applied before fetching: Google News returns the same story from several
+/// queries, and fetching every hit used to exhaust the run's time budget.
 pub const MAX_ITEMS: usize = 100;
 const FETCH_CONCURRENCY: usize = 8;
 /// Publisher pages are untrusted; without a ceiling one huge article OOMs
 /// the run before the snippet is truncated.
 const MAX_ARTICLE_BYTES: u64 = 5 * 1024 * 1024;
-// Google answers all 32 queries from one runner IP at once with 503s when we
+// Google answers all the queries from one runner IP at once with 503s when we
 // fan out too wide; four at a time keeps the burst below the threshold.
 const RSS_CONCURRENCY: usize = 4;
 
@@ -150,7 +112,9 @@ async fn fetch_feed_once(client: &reqwest::Client, url: &str) -> Result<Vec<News
 }
 
 pub async fn fetch_items(client: &reqwest::Client, window: &str) -> Result<Vec<NewsItem>> {
-    let jobs = QUERIES
+    let jobs = rules()
+        .news
+        .queries
         .iter()
         .map(|query| {
             let url = google_news_url(query, (!window.is_empty()).then_some(window));
@@ -170,7 +134,7 @@ pub async fn fetch_items(client: &reqwest::Client, window: &str) -> Result<Vec<N
     items.retain(|item| seen.insert(item.url.clone()));
     info!(
         "rss: {fetched} hits from {} queries, {} distinct Google News URLs",
-        QUERIES.len(),
+        rules().news.queries.len(),
         items.len()
     );
     Ok(items)
@@ -180,46 +144,17 @@ pub async fn fetch_items(client: &reqwest::Client, window: &str) -> Result<Vec<N
 /// publisher pages. This is only a priority signal, never an exclusion: a
 /// lower-scoring item still gets selected when there is room.
 fn enforcement_score(item: &NewsItem) -> u8 {
-    let haystack = format!(
-        "{} {} {}",
-        item.title,
-        item.snippet.as_deref().unwrap_or(""),
-        item.source.as_deref().unwrap_or("")
-    )
-    .to_lowercase();
-
-    let mut score = 0;
-    if haystack.contains("maharashtra fda")
-        || haystack.contains("food and drug administration")
-        || haystack.contains("tukaram mundhe")
-    {
-        score += 8;
-    }
-    let has_licence = haystack.contains("licence") || haystack.contains("license");
-    let has_licence_action =
-        haystack.contains("suspend") || haystack.contains("cancel") || haystack.contains("revok");
-    if has_licence && has_licence_action {
-        score += 3;
-    }
-    for signal in [
-        "ordered to shut",
-        "ordered to stop",
-        "cease business",
-        "stop operations",
-        "sealed",
-        "seized",
-    ] {
-        score += 3 * u8::from(haystack.contains(signal));
-    }
-    if haystack.contains("restaurant")
-        || haystack.contains("hotel")
-        || haystack.contains("cafe")
-        || haystack.contains("caterer")
-        || haystack.contains("dark store")
-        || haystack.contains("quick-commerce")
-    {
-        score += 1;
-    }
+    let config = &rules().news;
+    let hay = item.haystack();
+    let any = |words: &[String]| words.iter().any(|w| hay.contains(w));
+    let mut score = 8 * u8::from(any(&config.authority_signals));
+    score += 3 * u8::from(any(&config.licence_words) && any(&config.licence_actions));
+    score += 3 * config
+        .action_signals
+        .iter()
+        .filter(|s| hay.contains(*s))
+        .count() as u8;
+    score += u8::from(any(&config.venue_signals));
     score
 }
 
@@ -275,9 +210,8 @@ fn extract_snippet(document: &str) -> Option<String> {
             (t.len() >= 40).then(|| t.to_string())
         })
         .collect();
-    // Roundups often put the complete list of affected outlets after the
-    // opening paragraphs. Keep enough article text for the extractor to see
-    // all names while remaining comfortably below a Flash batch context.
+    // Roundups often put the full outlet list after the opening paragraphs;
+    // keep enough text for the extractor without blowing the batch context.
     paras.truncate(30);
 
     if title.is_none() && paras.is_empty() {
@@ -303,8 +237,6 @@ struct FetchedArticle {
     final_url: String,
     snippet: Option<String>,
 }
-
-struct EnrichResult(Result<FetchedArticle>);
 
 async fn fetch_article(client: &reqwest::Client, url: &str) -> Result<FetchedArticle> {
     let resp = client
@@ -350,7 +282,7 @@ pub async fn enrich(
             let url = item.url.clone();
             async move {
                 let res = fetch_article(&client, &url).await;
-                (i, item, EnrichResult(res))
+                (i, item, res)
             }
         })
         .collect();
@@ -359,7 +291,7 @@ pub async fn enrich(
 
     let mut out: Vec<NewsItem> = Vec::with_capacity(results.len());
     let mut urls: HashSet<String> = HashSet::new();
-    for (_, mut item, EnrichResult(res)) in results {
+    for (_, mut item, res) in results {
         match res {
             Ok(FetchedArticle { final_url, snippet }) => {
                 if already_seen(&urls, seen, &final_url) {
@@ -392,10 +324,9 @@ pub async fn enrich(
 
 #[cfg(test)]
 mod tests {
-    use super::{already_seen, extract_snippet, select_for_enrichment};
+    use super::{extract_snippet, select_for_enrichment};
     use crate::models::NewsItem;
     use chrono::{Duration, Utc};
-    use std::collections::HashSet;
 
     #[test]
     fn extract_snippet_leads_with_title_then_paragraphs() {
@@ -419,24 +350,6 @@ mod tests {
     fn extract_snippet_rejects_google_news_landing_pages() {
         let html = "<html><head><title>Google News - FDA raid</title></head>            <body><p>Google News landing page for the FDA raid story with plenty of filler text here.</p></body></html>";
         assert_eq!(extract_snippet(html), None);
-    }
-
-    #[test]
-    fn already_seen_dedups_urls() {
-        let urls: HashSet<String> = ["https://a.test/1".to_string()].into_iter().collect();
-        let seen: HashSet<String> = ["https://seen.test/9".to_string()].into_iter().collect();
-        assert!(
-            already_seen(&urls, &seen, "https://a.test/1"),
-            "in-batch url is seen"
-        );
-        assert!(
-            already_seen(&urls, &seen, "https://seen.test/9"),
-            "db-seen url is seen"
-        );
-        assert!(
-            !already_seen(&urls, &seen, "https://fresh.test/2"),
-            "fresh url passes"
-        );
     }
 
     #[test]

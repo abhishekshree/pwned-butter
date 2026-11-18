@@ -9,41 +9,8 @@ const DAILY = { revalidate: 21600, tags: ["actions"] };
 const toInt = (v: unknown): number =>
   typeof v === "string" ? parseInt(v, 10) : Number(v ?? 0);
 
-async function queryRows<T extends Record<string, unknown>>(
-  text: string,
-  params: unknown[] = [],
-): Promise<T[]> {
-  return (await sql(text, params)) as T[];
-}
-
-function normalizeAction(r: Record<string, unknown>): ActionRow {
-  return {
-    id: toInt(r.id),
-    establishment: String(r.establishment ?? ""),
-    area: r.area ? String(r.area) : null,
-    city: r.city ? String(r.city) : null,
-    state: String(r.state ?? ""),
-    brand: r.brand ? String(r.brand) : null,
-    operator: r.operator ? String(r.operator) : null,
-    outlet_type: r.outlet_type ? String(r.outlet_type) : null,
-    action_type: String(r.action_type ?? ""),
-    action_date: String(r.action_date ?? ""),
-    status: String(r.status ?? ""),
-    violations: Array.isArray(r.violations) ? r.violations.map(String) : [],
-    compliance_score:
-      r.compliance_score === null || r.compliance_score === undefined
-        ? null
-        : toInt(r.compliance_score),
-    fssai_number: r.fssai_number ? String(r.fssai_number) : null,
-    details: r.details ? String(r.details) : null,
-    platforms: Array.isArray(r.platforms) ? r.platforms.map(String) : [],
-    source_url: String(r.source_url ?? ""),
-    source_publisher: r.source_publisher ? String(r.source_publisher) : null,
-    source_headline: r.source_headline ? String(r.source_headline) : null,
-    published_at: r.published_at ? String(r.published_at) : null,
-    created_at: String(r.created_at ?? ""),
-    updated_at: String(r.updated_at ?? ""),
-  };
+async function queryRows<T extends Record<string, unknown>>(text: string): Promise<T[]> {
+  return (await sql(text)) as T[];
 }
 
 export const listActions = unstable_cache(
@@ -109,7 +76,7 @@ export const listActions = unstable_cache(
         : 0;
     return {
       total,
-      actions: rows.map(normalizeAction),
+      actions: rows as unknown as ActionRow[],
     };
   },
   ["list-actions", "v2"],
@@ -128,28 +95,6 @@ async function dims(col: string, limit?: number): Promise<DimCount[]> {
     n: toInt(r.n),
   }));
 }
-
-export const listBrands = unstable_cache(
-  async (): Promise<string[]> => {
-    const rows = (await sql(
-      "SELECT DISTINCT brand FROM actions WHERE brand IS NOT NULL AND brand <> '' ORDER BY brand",
-    )) as Array<Record<string, unknown>>;
-    return rows.map((r) => String(r.brand));
-  },
-  ["list-brands", "v2"],
-  DAILY,
-);
-
-export const listCities = unstable_cache(
-  async (): Promise<string[]> => {
-    const rows = (await sql(
-      "SELECT DISTINCT city FROM actions WHERE city IS NOT NULL AND city <> '' ORDER BY city",
-    )) as Array<Record<string, unknown>>;
-    return rows.map((r) => String(r.city));
-  },
-  ["list-cities", "v2"],
-  DAILY,
-);
 
 function normalizeRun(r: Record<string, unknown>): RunSummary {
   return {

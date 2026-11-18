@@ -2,6 +2,7 @@ pub mod db;
 pub mod llm;
 pub mod models;
 pub mod news;
+pub mod rules;
 pub mod scrape;
 
 use std::sync::OnceLock;
@@ -18,7 +19,6 @@ pub fn init_logging() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
-        .without_time()
         .with_target(false)
         .try_init();
 }

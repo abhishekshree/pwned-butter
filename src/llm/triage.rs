@@ -1,384 +1,220 @@
-use crate::models::{ActionType, LlmAction, NewsItem};
+use anyhow::{Result, anyhow};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use strum::IntoEnumIterator;
+use tracing::warn;
 
-/// A relevance-filtered batch item; `orig` indexes the caller's `items`
-/// slice so `source_index` still addresses it for `build_rows`.
+use crate::models::{ActionType, LlmAction, NewsItem};
+use crate::rules::rules;
+use crate::scrape;
+
+use super::strip_code_fences;
+
+pub(crate) const TRIAGE_PROMPT: &str = include_str!("../prompts/triage.txt");
+
+/// A relevance-filtered batch item; `orig` indexes the caller's `items` slice
+/// so verdicts still address the original input after chunking.
 pub(crate) struct Job<'a> {
     pub(crate) orig: usize,
     pub(crate) item: &'a NewsItem,
 }
 
-pub(crate) fn haystack(it: &NewsItem) -> String {
-    format!(
-        "{} {} {}",
-        it.title,
-        it.snippet.as_deref().unwrap_or(""),
-        it.source.as_deref().unwrap_or("")
-    )
-    .to_lowercase()
+/// One qualifying item as returned by the triage model.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Verdict {
+    pub(crate) source_index: usize,
+    pub(crate) action_type: ActionType,
+    #[serde(default)]
+    pub(crate) city: Option<String>,
+    #[serde(default)]
+    pub(crate) establishment: Option<String>,
+    #[serde(default)]
+    pub(crate) reason: Option<String>,
+    #[serde(default)]
+    pub(crate) evidence: Option<String>,
+    #[serde(default)]
+    pub(crate) confidence: Option<f32>,
 }
 
-/// Keyword rules as data, not branches: each entry is alternative
-/// conjunctions + the action they signal. First match in table order wins,
-/// so entries run most- to least-specific. Adding a keyword edits this
-/// table, never the control flow below it.
-struct Rule {
-    needs: &'static [&'static [&'static str]],
-    action: ActionType,
+/// Display casing for the city labels the model returns. The insert path
+/// still matches case-insensitively via `in_scope`.
+fn city_labels() -> Vec<String> {
+    scrape::IN_SCOPE_CITIES
+        .iter()
+        .map(|city| {
+            city.split_whitespace()
+                .map(|word| {
+                    let mut chars = word.chars();
+                    match chars.next() {
+                        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                        None => String::new(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect()
 }
 
-const RULES: &[Rule] = &[
-    Rule {
-        needs: &[&["improvement notice"]],
-        action: ActionType::ImprovementNotice,
-    },
-    Rule {
-        needs: &[
-            &["licence", "suspend"],
-            &["license", "suspend"],
-            &["licence", "suspension"],
-            &["license", "suspension"],
-            &["licence", "cancel"],
-            &["license", "cancel"],
-            &["licence", "revok"],
-            &["license", "revok"],
-        ],
-        action: ActionType::LicenceSuspension,
-    },
-    Rule {
-        needs: &[
-            &["stop business"],
-            &["cease business"],
-            &["stop operations"],
-            &["operations", "stopped"],
-            &["closure", "order"],
-            &["ordered", "shut"],
-            &["shut down", "fda"],
-        ],
-        action: ActionType::StopBusiness,
-    },
-    Rule {
-        needs: &[&["seal"]],
-        action: ActionType::Sealing,
-    },
-    Rule {
-        needs: &[&["seiz"]],
-        action: ActionType::Seizure,
-    },
-    Rule {
-        needs: &[&["reopen"]],
-        action: ActionType::Reopened,
-    },
-    Rule {
-        // Inspection needs an enforcement verb AND fda context: bare "fda"
-        // alone passes quality-test reports, plan announcements and
-        // awaiting-reply stories (6 Sept 2026 junk) that name no outlet
-        // facing action.
-        needs: &[
-            &["raid", "fda"],
-            &["raid", "food", "safety"],
-            &["raid", "licence"],
-            &["raid", "license"],
-            &["inspect", "fda"],
-            &["inspect", "food", "safety"],
-            &["inspect", "licence"],
-            &["inspect", "license"],
-        ],
-        action: ActionType::Inspection,
-    },
-];
-
-/// Validated keyword signal: prose in, typed action out. Single-use plain
-/// fn — the old Signal/TryFrom/From ceremony paid for reuse that never came.
-fn signal(hay: &str) -> Option<ActionType> {
-    RULES.iter().find_map(|rule| {
-        rule.needs
-            .iter()
-            .any(|needles| needles.iter().all(|n| hay.contains(n)))
-            .then_some(rule.action)
+/// Response format for the model. The schema is generated from the same enums
+/// and city list the insert path uses, so they cannot drift apart.
+pub(crate) fn triage_schema() -> Value {
+    let actions: Vec<String> = ActionType::iter().map(|t| t.to_string()).collect();
+    let mut cities: Vec<Value> = city_labels().into_iter().map(Value::String).collect();
+    cities.push(Value::Null);
+    json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "sourceIndex": {"type": "integer"},
+                "actionType": {"type": "string", "enum": actions},
+                "city": {"type": ["string", "null"], "enum": cities},
+                "establishment": {"type": ["string", "null"]},
+                "reason": {"type": "string"},
+                "evidence": {"type": "string"},
+                "confidence": {"type": "number"}
+            },
+            "required": ["sourceIndex", "actionType", "reason", "evidence", "confidence"]
+        }
     })
 }
 
-// Only these corroborate a generic-English trigger: "fda" and
-// licence/license are unambiguous enough. Deliberately excludes
-// seal/seiz/raid/inspect — those ARE the ambiguous words, so they
-// can't corroborate themselves.
-const CORROBORATION: &[&str] = &["fda", "food safety", "licence", "license"];
-
-/// Keyword signal plus a corroboration gate for ambiguous action types.
-/// `hay` must already be lowercase: needle matching and the `CORROBORATION`
-/// checks are case-sensitive `contains` calls. Callers build `hay` with
-/// [`haystack`], which lowercases title + snippet + source.
-pub(crate) fn triage(hay: &str) -> Option<ActionType> {
-    let hay = hay.to_lowercase();
-    let action = signal(&hay)?;
-    let needs_corroboration = matches!(
-        action,
-        ActionType::StopBusiness
-            | ActionType::Sealing
-            | ActionType::Seizure
-            | ActionType::Inspection
-    );
-    (!needs_corroboration || CORROBORATION.iter().any(|c| hay.contains(c))).then_some(action)
+/// All prose lives in `triage.txt`. This only fills the placeholders with
+/// values from the deterministic gate, so the two cannot drift apart.
+pub(crate) fn build_system_prompt() -> String {
+    let quality = &rules().quality;
+    TRIAGE_PROMPT
+        .replace(
+            "{{MAX_ESTABLISHMENT_WORDS}}",
+            &quality.max_establishment_words.to_string(),
+        )
+        .replace(
+            "{{MIN_DETAILS_CHARS}}",
+            &quality.min_details_chars.to_string(),
+        )
+        .replace("{{CITIES}}", &city_labels().join(", "))
+        .replace("{{NO_ACTION_YET}}", &quality.no_action_yet.join(", "))
 }
 
-/// Cities that appear in Maharashtra FDA coverage, longest first so
-/// "Navi Mumbai" wins over "Mumbai". Rule-extracted rows have no LLM to name
-/// the city, so read it from the headline/body instead of leaving the
-/// dashboard's area filters empty.
-const CITIES: &[&str] = &[
-    "Navi Mumbai",
-    "Pimpri-Chinchwad",
-    "Mahabaleshwar",
-    "Aurangabad",
-    "Chandrapur",
-    "Ratnagiri",
-    "Kolhapur",
-    "Amravati",
-    "Jalgaon",
-    "Solapur",
-    "Nanded",
-    "Palghar",
-    "Mumbai",
-    "Thane",
-    "Nashik",
-    "Nagpur",
-    "Pune",
-    "Sangli",
-    "Satara",
-    "Akola",
-    "Latur",
-    "Dhule",
-    "Kalyan",
-    "Vasai",
-    "Panvel",
-];
-
-pub(crate) fn city_of(text: &str) -> Option<String> {
-    let lower = text.to_lowercase();
-    CITIES
+pub(crate) fn parse_verdicts(text: &str) -> Result<Vec<Verdict>> {
+    let text = strip_code_fences(text);
+    let parsed: Value = serde_json::from_str(&text)
+        .map_err(|error| anyhow!("triage returned invalid JSON: {error}"))?;
+    let raw = parsed
+        .as_array()
+        .ok_or_else(|| anyhow!("triage response is not a JSON array"))?;
+    Ok(raw
         .iter()
-        .find(|city| lower.contains(&city.to_lowercase()))
-        .map(|city| (*city).to_string())
-}
-
-fn clean_establishment_name(raw: &str) -> String {
-    let mut s = raw.trim();
-    for prefix in &[
-        "Maharashtra FDA suspends food licences of",
-        "Maharashtra FDA suspends food licence of",
-        "Maharashtra FDA suspends licences of",
-        "Maharashtra FDA suspends licence of",
-        "Maharashtra FDA suspends",
-        "Maharashtra FDA cancels",
-        "Maharashtra FDA seals",
-        "Maharashtra FDA seizes",
-        "Maharashtra FDA raids",
-        "Maharashtra FDA crackdown on",
-        "Maharashtra FDA",
-        "FDA suspends food licences of",
-        "FDA suspends food licence of",
-        "FDA suspends licences of",
-        "FDA suspends licence of",
-        "FDA suspends",
-        "FDA seals",
-        "FDA seizes",
-        "FDA raids",
-        "FDA",
-    ] {
-        if s.to_lowercase().starts_with(&prefix.to_lowercase()) {
-            // Lowercasing can change byte length, so the prefix offset may not
-            // be a char boundary in `s`; skip rather than panic on odd UTF-8.
-            let Some(rest) = s.get(prefix.len()..) else {
-                continue;
-            };
-            let rest = rest.trim().trim_start_matches([':', '-', ',', ' ']).trim();
-            if !rest.is_empty() {
-                s = rest;
-                break;
+        .filter_map(|value| match serde_json::from_value(value.clone()) {
+            Ok(verdict) => Some(verdict),
+            Err(error) => {
+                warn!(error = %error, "dropping invalid triage verdict");
+                None
             }
-        }
-    }
-    s.to_string()
+        })
+        .collect())
 }
 
-// Deterministic safety net: when a batch's LLM path fails, keep one minimal
-// record per signal-bearing item so the run degrades instead of zeroing out.
-// Fields the rules can't know (area, violations, dates) stay empty —
-// build_rows + coerce_action_date fill date defaults downstream.
-pub(crate) fn rule_extract(jobs: &[Job<'_>]) -> Vec<LlmAction> {
-    jobs.iter()
-        .filter_map(|j| {
-            let action_type = triage(&haystack(j.item))?;
-            let name: String = j
-                .item
-                .title
-                .split(['|', '-', ':'])
-                .next()?
-                .trim()
-                .chars()
-                .take(120)
-                .collect();
-            let name = name.trim();
-            (!name.is_empty()).then(|| {
-                let cleaned_name = clean_establishment_name(name);
-                let final_name = if cleaned_name.is_empty() {
-                    name.to_string()
-                } else {
-                    cleaned_name
-                };
-                let mut action =
-                    LlmAction::minimal(final_name, action_type, j.orig, j.item.snippet.clone());
-                let city = city_of(&format!(
-                    "{} {}",
-                    j.item.title,
-                    j.item.snippet.as_deref().unwrap_or("")
-                ))
-                .unwrap_or_else(|| "Mumbai".to_string());
-                action.city = Some(city);
-                if action
-                    .details
-                    .as_deref()
-                    .map(str::trim)
-                    .unwrap_or("")
-                    .chars()
-                    .count()
-                    < 20
-                {
-                    action.details = Some(format!("FDA enforcement action: {}", j.item.title));
-                }
-                action
-            })
-        })
-        .collect()
+/// The model must quote the text it relied on; verify the quote is really
+/// present instead of trusting a confident-sounding invention.
+pub(crate) fn evidence_is_supplied(item: &NewsItem, evidence: Option<&str>) -> bool {
+    let Some(evidence) = evidence else {
+        return true;
+    };
+    let evidence = evidence.trim();
+    if evidence.chars().count() < 8 {
+        return false;
+    }
+    let hay = format!("{} {}", item.title, item.snippet.as_deref().unwrap_or("")).to_lowercase();
+    hay.contains(&evidence.to_lowercase())
+}
+
+/// Minimal record for the rule-free fallback: only what the triage model
+/// already told us. The quality gate and `build_rows` still own the final
+/// decision.
+pub(crate) fn minimal_from_verdict(v: &Verdict, item: &NewsItem) -> LlmAction {
+    LlmAction {
+        establishment: v.establishment.clone().unwrap_or_default(),
+        city: v.city.clone(),
+        action_type: v.action_type,
+        source_index: v.source_index,
+        details: item.snippet.clone(),
+        ..Default::default()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::ActionType;
+    use chrono::{TimeZone, Utc};
+
+    fn item(title: &str, snippet: &str) -> NewsItem {
+        NewsItem {
+            title: title.into(),
+            url: "https://example.test/1".into(),
+            source: Some("Test Press".into()),
+            published: Some(Utc.with_ymd_and_hms(2026, 11, 18, 9, 0, 0).unwrap()),
+            snippet: Some(snippet.into()),
+        }
+    }
 
     #[test]
-    fn triage_drops_ambiguous_signals_without_corroboration() {
-        assert_eq!(
-            triage("fda raid seals eatery"),
-            Some(ActionType::Sealing),
-            "sealing with fda context passes"
+    fn parses_only_valid_verdicts() {
+        let text = r#"[{"sourceIndex":3,"actionType":"licence_suspension",
+            "city":"Mumbai","establishment":"Domino's Vile Parle",
+            "reason":"licence suspended over pests",
+            "evidence":"licence suspended over pests","confidence":0.9},
+            {"sourceIndex":9,"actionType":"nonsense"}]"#;
+        let verdicts = parse_verdicts(text).unwrap();
+        assert_eq!(verdicts.len(), 1, "invalid action type is dropped");
+        assert_eq!(verdicts[0].source_index, 3);
+        assert_eq!(verdicts[0].action_type, ActionType::LicenceSuspension);
+        assert_eq!(verdicts[0].confidence, Some(0.9));
+    }
+
+    #[test]
+    fn rejects_evidence_absent_from_the_item() {
+        let story = item(
+            "FDA licence suspended in Pune",
+            "Chetana had its licence suspended.",
         );
-        assert_eq!(
-            triage("shop sealed after fire"),
-            None,
-            "sealing without corroboration is dropped"
+        assert!(evidence_is_supplied(&story, Some("licence suspended")));
+        assert!(!evidence_is_supplied(
+            &story,
+            Some("cockroaches everywhere")
+        ));
+        assert!(evidence_is_supplied(&story, None));
+    }
+
+    #[test]
+    fn prompt_carries_the_gate_and_examples() {
+        let prompt = build_system_prompt();
+        assert!(
+            prompt.contains("at most 9 words"),
+            "word cap is passed to the model"
+        );
+        assert!(!prompt.contains("{{"), "no placeholders left unfilled");
+        assert!(
+            TRIAGE_PROMPT.contains("Mumbra sweet shop"),
+            "negative example is included"
+        );
+        assert!(
+            TRIAGE_PROMPT.contains("Chetana"),
+            "positive roundup example is included"
         );
     }
 
     #[test]
-    fn triage_drops_fda_only_stories() {
-        // 6 Sept 2026 junk: bare FDA mentions with no raid/inspection action.
-        assert_eq!(
-            triage("popular re 1 ayurvedic digestive tablet fails maharashtra fda quality test"),
-            None,
+    fn schema_uses_the_live_vocabulary() {
+        let schema = triage_schema().to_string();
+        for code in ActionType::iter().map(|t| t.to_string()) {
+            assert!(schema.contains(&code), "schema missing {code}");
+        }
+        assert!(
+            schema.contains("Navi Mumbai"),
+            "schema missing covered city"
         );
-        assert_eq!(
-            triage("maharashtra fda rolls out year-round food safety plan for festivals"),
-            None,
-        );
-        assert_eq!(
-            triage("fda awaiting response from restaurants at mumbai cricket association premises"),
-            None,
-        );
-        assert_eq!(
-            triage(
-                "maharashtra fda awaits replies from five mca restaurants over licensing violations"
-            ),
-            None,
-        );
-        assert_eq!(
-            triage("fda raid at hotel cites hygiene violations"),
-            Some(ActionType::Inspection),
-        );
-        assert_eq!(
-            triage("food safety inspectors raid eatery"),
-            Some(ActionType::Inspection),
-        );
-    }
-
-    #[test]
-    fn triage_passes_unambiguous_signals_freely() {
-        assert_eq!(
-            triage("outlet served improvement notice"),
-            Some(ActionType::ImprovementNotice)
-        );
-        assert_eq!(triage("eatery reopened"), Some(ActionType::Reopened));
-        assert_eq!(
-            triage("licence suspended over pests"),
-            Some(ActionType::LicenceSuspension)
-        );
-        assert_eq!(
-            triage("maharashtra fda orders rajdhani biryani centre to cease business"),
-            Some(ActionType::StopBusiness)
-        );
-        assert_eq!(
-            triage("fda revoked the food licence after hygiene violations"),
-            Some(ActionType::LicenceSuspension)
-        );
-    }
-
-    #[test]
-    fn triage_does_not_treat_a_non_regulatory_closure_as_enforcement() {
-        assert_eq!(
-            triage("Restaurant ordered to shut after a landlord dispute"),
-            None
-        );
-    }
-
-    #[test]
-    fn rule_fallback_keeps_signal_items_only() {
-        let licenced = NewsItem {
-            title: "Domino's licence suspended in Mumbai over pests".into(),
-            url: "https://x.test/1".into(),
-            source: None,
-            published: None,
-            snippet: None,
-        };
-        let cricket = NewsItem {
-            title: "cricket highlights and match report".into(),
-            url: "https://x.test/1".into(),
-            source: None,
-            published: None,
-            snippet: None,
-        };
-        let jobs = vec![
-            Job {
-                orig: 4,
-                item: &licenced,
-            },
-            Job {
-                orig: 7,
-                item: &cricket,
-            },
-        ];
-        let kept = rule_extract(&jobs);
-        assert_eq!(kept.len(), 1, "only the signal item is kept");
-        assert_eq!(kept[0].source_index, 4, "orig index survives");
-        assert_eq!(
-            kept[0].action_type,
-            ActionType::LicenceSuspension,
-            "licence suspension detected"
-        );
-        assert_eq!(
-            kept[0].city.as_deref(),
-            Some("Mumbai"),
-            "city inferred from the headline"
-        );
-    }
-
-    #[test]
-    fn city_of_prefers_the_longer_place_name() {
-        assert_eq!(
-            city_of("outlet sealed in Navi Mumbai").as_deref(),
-            Some("Navi Mumbai")
-        );
-        assert_eq!(city_of("FDA raid in Pune").as_deref(), Some("Pune"));
-        assert_eq!(city_of("no location here"), None);
     }
 }

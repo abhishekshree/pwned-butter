@@ -34,11 +34,7 @@ export const MUMBAI_AREAS: Record<string, { lat: number; lng: number }> = {
 export function matchArea(area: string | null): string | null {
   if (!area) return null;
   const a = area.toLowerCase().trim();
-  const keys = Object.keys(MUMBAI_AREAS);
-  for (const key of keys) {
-    if (key.toLowerCase() === a) return key;
-  }
-  for (const key of keys) {
+  for (const key of Object.keys(MUMBAI_AREAS)) {
     const k = key.toLowerCase();
     if (a.includes(k) || k.includes(a)) return key;
   }
