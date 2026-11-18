@@ -8,20 +8,13 @@ use crate::models::{LlmAction, NewsItem};
 
 pub const SYSTEM_PROMPT: &str = include_str!("../prompts/system.txt");
 
-/// Batch size trades request count against per-request crowding. The
-/// extractor prompt now requires every separately named establishment and
-/// the output ceiling is 16k tokens, so crowding is handled downstream —
-/// keep batches large to respect the free-tier ~5 requests/min budget
-/// (halving the batch size doubles the sequential calls per run).
+/// Large batches respect the ~5 requests/min free tier; crowding is handled
+/// downstream by the prompt's 16k-token output ceiling.
 pub(crate) const BATCH_SIZE: usize = 20;
-// ponytail: Gemini free tier allows ~5 requests/min — concurrent batches
-// hit 429s together, so batches run sequentially with backoff, no semaphore.
+// ponytail: concurrent batches hit 429s together, so they run sequentially.
 
-/// `gemini-flash-latest` is the only Gemini ID that answers `generateContent`
-/// with this key: the lite aliases and specific `gemini-3.x` IDs return empty
-/// 404s (they now point at the Interactions API), so a dead default just burns
-/// a call per batch before failing over. OpenRouter is the cross-provider
-/// fallback.
+/// Other Gemini aliases return empty 404s with this key — they moved to the
+/// Interactions API — and would burn a call per batch before failing over.
 pub const DEFAULT_GEMINI_MODEL: &str = "gemini-flash-latest";
 
 mod genai;
@@ -44,8 +37,7 @@ pub async fn extract(
         return Ok((Vec::new(), 0));
     }
 
-    // ponytail: resolve OpenRouter config once at the boundary; deeper fns
-    // take it as params so retry/fallback paths stay pure of env reads.
+    // ponytail: resolve config once at the boundary; deeper fns stay pure of env reads.
     let openrouter_key = std::env::var("OPENROUTER_API_KEY").ok();
     let openrouter_model = std::env::var("OPENROUTER_MODEL")
         .unwrap_or_else(|_| genai::DEFAULT_OPENROUTER_MODEL.to_string());
@@ -80,10 +72,8 @@ pub async fn extract(
         .await;
         calls += used;
         match batch {
-            // Gate LLM output only. Rule-fallback rows are grounded in a real
-            // headline and have no LLM to name a city or tighten the name, so
-            // the calibration below would drop every one of them exactly when
-            // the fallback is needed.
+            // Gate LLM output only: rule-fallback rows are grounded in a real
+            // headline and have no LLM to name a city or tighten the name.
             Ok(batch) => actions.extend(batch.into_iter().filter(|a| match quality::check(a) {
                 Ok(()) => true,
                 Err(reason) => {
@@ -162,10 +152,9 @@ fn salvaged(
     kept
 }
 
-/// Ask Gemini which of today's records describe an event already covered by
-/// another record or a recent DB row. Returns indices into `rows` to drop and
-/// the number of API calls used. Best effort: on any failure returns no drops
-/// so the name-heuristic dedup in db::upsert_actions stays the safety net.
+/// Ask Gemini which rows describe an event already covered by another row or
+/// a recent DB row. Returns indices to drop; on failure returns none so the
+/// name heuristics in `upsert_actions` stay the safety net.
 pub async fn collapse_dupes(
     api_key: &str,
     model: &str,
@@ -209,7 +198,25 @@ pub(crate) fn strip_code_fences(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::extract;
+    use strum::IntoEnumIterator;
+
+    use super::{SYSTEM_PROMPT, extract};
+    use crate::models::{ActionType, OutletType};
+    use crate::scrape;
+
+    #[test]
+    fn prompt_names_every_code_and_covered_city() {
+        let prompt = SYSTEM_PROMPT.to_lowercase();
+        for code in ActionType::iter().map(|t| t.to_string()) {
+            assert!(prompt.contains(&code), "prompt missing action code {code}");
+        }
+        for code in OutletType::iter().map(|t| t.to_string()) {
+            assert!(prompt.contains(&code), "prompt missing outlet code {code}");
+        }
+        for city in scrape::IN_SCOPE_CITIES {
+            assert!(prompt.contains(city), "prompt missing covered city {city}");
+        }
+    }
 
     #[tokio::test]
     async fn empty_items_skip_llm() {

@@ -17,9 +17,8 @@ pub struct ScrapeReport {
 }
 
 pub async fn run_scrape(gemini_key: &str, model: &str) -> Result<(i64, ScrapeReport)> {
-    // Google News indexes regional enforcement reports hours after publication
-    // surprisingly often. Search an overlapping window and rely on source and
-    // event deduplication rather than making each daily run a one-shot.
+    // Google News indexes regional reports hours late; an overlapping window
+    // with dedup beats a one-shot daily fetch.
     run_with_window(gemini_key, model, "when:3d", 21, news::MAX_ITEMS).await
 }
 
@@ -81,8 +80,8 @@ async fn scrape_once(
     })
 }
 
-/// LLM pass that collapses re-reported events before insert; falls back to
-/// the db.rs name heuristics alone when the DB lookup or the call fails.
+/// LLM pass that drops re-reported events before insert; falls back to the
+/// db.rs name heuristics when the lookup or the call fails.
 async fn collapse_dupes(
     pool: &sqlx::PgPool,
     gemini_key: &str,
@@ -117,10 +116,9 @@ async fn collapse_dupes(
     (kept, calls)
 }
 
-/// Cities the tracker covers. The FDA brief is statewide, so a roundup that
-/// names outlets in Nashik or Mahabaleshwar still parses — drop them at the
-/// insert boundary instead of showing places the site has no section for.
-const IN_SCOPE_CITIES: &[&str] = &["mumbai", "pune", "thane", "navi mumbai", "lonavala"];
+/// Cities the tracker covers. The FDA brief is statewide, so roundups naming
+/// outlets elsewhere still parse — drop them at the insert boundary.
+pub(crate) const IN_SCOPE_CITIES: &[&str] = &["mumbai", "pune", "thane", "navi mumbai", "lonavala"];
 
 /// Case-insensitive: "Mumbai Suburban" is still Mumbai, "Navi Mumbai" needs
 /// its own entry because the prefix does not match.
@@ -150,7 +148,7 @@ pub fn build_rows(items: &[NewsItem], actions: &[LlmAction]) -> Vec<ActionInsert
                 city,
                 brand: nonempty(a.brand.as_deref()),
                 operator: nonempty(a.operator.as_deref()),
-                outlet_type: a.outlet_type.as_deref().map(OutletType::from),
+                outlet_type: a.outlet_type.as_deref().map(OutletType::from_code),
                 action_type: a.action_type,
                 action_date: coerce_action_date(a.action_date.as_deref(), item.published),
                 violations: a.violations.clone(),

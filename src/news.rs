@@ -48,13 +48,35 @@ const QUERIES: &[&str] = &[
     "site:x.com Blinkit OR Zepto OR Instamart FDA",
 ];
 
+// RSS headlines are ranked before fetching publisher pages; these are the
+// signals, not an exclusion list.
+const AUTHORITY_SIGNALS: &[&str] = &[
+    "maharashtra fda",
+    "food and drug administration",
+    "tukaram mundhe",
+];
+const ACTION_SIGNALS: &[&str] = &[
+    "ordered to shut",
+    "ordered to stop",
+    "cease business",
+    "stop operations",
+    "sealed",
+    "seized",
+];
+const VENUE_SIGNALS: &[&str] = &[
+    "restaurant",
+    "hotel",
+    "cafe",
+    "caterer",
+    "dark store",
+    "quick-commerce",
+];
+const LICENCE_WORDS: &[&str] = &["licence", "license"];
+const LICENCE_ACTIONS: &[&str] = &["suspend", "cancel", "revok"];
+
 /// The number of distinct, high-signal articles to enrich in one scheduled run.
-///
-/// A single FDA press note can name dozens of outlets, so dropping a relevant
-/// roundup is much more costly than reading a few more articles. This is
-/// deliberately applied before article fetching: Google News returns the same
-/// story from several queries and fetching all of them used to spend the run's
-/// time budget before the later truncation discarded them.
+/// Applied before fetching: Google News returns the same story from several
+/// queries, and fetching every hit used to exhaust the run's time budget.
 pub const MAX_ITEMS: usize = 100;
 const FETCH_CONCURRENCY: usize = 8;
 /// Publisher pages are untrusted; without a ceiling one huge article OOMs
@@ -180,40 +202,12 @@ pub async fn fetch_items(client: &reqwest::Client, window: &str) -> Result<Vec<N
 /// publisher pages. This is only a priority signal, never an exclusion: a
 /// lower-scoring item still gets selected when there is room.
 fn enforcement_score(item: &NewsItem) -> u8 {
-    let haystack = item.haystack();
-
-    let mut score = 0;
-    if haystack.contains("maharashtra fda")
-        || haystack.contains("food and drug administration")
-        || haystack.contains("tukaram mundhe")
-    {
-        score += 8;
-    }
-    let has_licence = haystack.contains("licence") || haystack.contains("license");
-    let has_licence_action =
-        haystack.contains("suspend") || haystack.contains("cancel") || haystack.contains("revok");
-    if has_licence && has_licence_action {
-        score += 3;
-    }
-    for signal in [
-        "ordered to shut",
-        "ordered to stop",
-        "cease business",
-        "stop operations",
-        "sealed",
-        "seized",
-    ] {
-        score += 3 * u8::from(haystack.contains(signal));
-    }
-    if haystack.contains("restaurant")
-        || haystack.contains("hotel")
-        || haystack.contains("cafe")
-        || haystack.contains("caterer")
-        || haystack.contains("dark store")
-        || haystack.contains("quick-commerce")
-    {
-        score += 1;
-    }
+    let hay = item.haystack();
+    let any = |words: &[&str]| words.iter().any(|w| hay.contains(w));
+    let mut score = 8 * u8::from(any(AUTHORITY_SIGNALS));
+    score += 3 * u8::from(any(LICENCE_WORDS) && any(LICENCE_ACTIONS));
+    score += 3 * ACTION_SIGNALS.iter().filter(|s| hay.contains(**s)).count() as u8;
+    score += u8::from(any(VENUE_SIGNALS));
     score
 }
 
@@ -269,9 +263,8 @@ fn extract_snippet(document: &str) -> Option<String> {
             (t.len() >= 40).then(|| t.to_string())
         })
         .collect();
-    // Roundups often put the complete list of affected outlets after the
-    // opening paragraphs. Keep enough article text for the extractor to see
-    // all names while remaining comfortably below a Flash batch context.
+    // Roundups often put the full outlet list after the opening paragraphs;
+    // keep enough text for the extractor without blowing the batch context.
     paras.truncate(30);
 
     if title.is_none() && paras.is_empty() {

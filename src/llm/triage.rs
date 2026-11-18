@@ -1,18 +1,14 @@
 use crate::models::{ActionType, LlmAction, NewsItem};
 
-use super::quality::MIN_DETAILS_CHARS;
-
-/// A relevance-filtered batch item; `orig` indexes the caller's `items`
-/// slice so `source_index` still addresses it for `build_rows`.
+/// A relevance-filtered batch item; `orig` still indexes the caller's `items`
+/// for `build_rows`.
 pub(crate) struct Job<'a> {
     pub(crate) orig: usize,
     pub(crate) item: &'a NewsItem,
 }
 
-/// Keyword rules as data, not branches: each entry is alternative
-/// conjunctions + the action they signal. First match in table order wins,
-/// so entries run most- to least-specific. Adding a keyword edits this
-/// table, never the control flow below it.
+/// Keyword rules as data. First match in table order wins, so entries run
+/// most- to least-specific.
 struct Rule {
     needs: &'static [&'static [&'static str]],
     action: ActionType,
@@ -61,10 +57,8 @@ const RULES: &[Rule] = &[
         action: ActionType::Reopened,
     },
     Rule {
-        // Inspection needs an enforcement verb AND fda context: bare "fda"
-        // alone passes quality-test reports, plan announcements and
-        // awaiting-reply stories (6 Sept 2026 junk) that name no outlet
-        // facing action.
+        // Needs an enforcement verb AND fda context: bare "fda" also passes
+        // plan announcements and awaiting-reply stories.
         needs: &[
             &["raid", "fda"],
             &["raid", "food", "safety"],
@@ -79,8 +73,7 @@ const RULES: &[Rule] = &[
     },
 ];
 
-/// Validated keyword signal: prose in, typed action out. Single-use plain
-/// fn — the old Signal/TryFrom/From ceremony paid for reuse that never came.
+/// Typed action from prose; `None` when no rule matches.
 fn signal(hay: &str) -> Option<ActionType> {
     RULES.iter().find_map(|rule| {
         rule.needs
@@ -90,16 +83,12 @@ fn signal(hay: &str) -> Option<ActionType> {
     })
 }
 
-// Only these corroborate a generic-English trigger: "fda" and
-// licence/license are unambiguous enough. Deliberately excludes
-// seal/seiz/raid/inspect — those ARE the ambiguous words, so they
-// can't corroborate themselves.
+// Only these corroborate a generic-English trigger. seal/seiz/raid/inspect are
+// the ambiguous words themselves, so they cannot corroborate themselves.
 const CORROBORATION: &[&str] = &["fda", "food safety", "licence", "license"];
 
 /// Keyword signal plus a corroboration gate for ambiguous action types.
-/// `hay` must already be lowercase: needle matching and the `CORROBORATION`
-/// checks are case-sensitive `contains` calls. Callers build `hay` with
-/// [`NewsItem::haystack`], which lowercases title + snippet + source.
+/// `hay` must already be lowercase — [`NewsItem::haystack`] guarantees it.
 pub(crate) fn triage(hay: &str) -> Option<ActionType> {
     let action = signal(hay)?;
     let needs_corroboration = matches!(
@@ -112,10 +101,8 @@ pub(crate) fn triage(hay: &str) -> Option<ActionType> {
     (!needs_corroboration || CORROBORATION.iter().any(|c| hay.contains(c))).then_some(action)
 }
 
-/// Cities that appear in Maharashtra FDA coverage, longest first so
-/// "Navi Mumbai" wins over "Mumbai". Rule-extracted rows have no LLM to name
-/// the city, so read it from the headline/body instead of leaving the
-/// dashboard's area filters empty.
+/// Cities that appear in FDA coverage, longest first so "Navi Mumbai" wins
+/// over "Mumbai".
 const CITIES: &[&str] = &[
     "Navi Mumbai",
     "Pimpri-Chinchwad",
@@ -152,93 +139,81 @@ pub(crate) fn city_of(text: &str) -> Option<String> {
         .map(|city| (*city).to_string())
 }
 
+/// Boilerplate that precedes the outlet name in enforcement headlines,
+/// longest first so the brand name survives.
+const ESTABLISHMENT_PREFIXES: &[&str] = &[
+    "Maharashtra FDA suspends food licences of",
+    "Maharashtra FDA suspends food licence of",
+    "Maharashtra FDA suspends licences of",
+    "Maharashtra FDA suspends licence of",
+    "Maharashtra FDA suspends",
+    "Maharashtra FDA cancels",
+    "Maharashtra FDA seals",
+    "Maharashtra FDA seizes",
+    "Maharashtra FDA raids",
+    "Maharashtra FDA crackdown on",
+    "Maharashtra FDA",
+    "FDA suspends food licences of",
+    "FDA suspends food licence of",
+    "FDA suspends licences of",
+    "FDA suspends licence of",
+    "FDA suspends",
+    "FDA seals",
+    "FDA seizes",
+    "FDA raids",
+    "FDA",
+];
+
 fn clean_establishment_name(raw: &str) -> String {
-    let mut s = raw.trim();
-    for prefix in &[
-        "Maharashtra FDA suspends food licences of",
-        "Maharashtra FDA suspends food licence of",
-        "Maharashtra FDA suspends licences of",
-        "Maharashtra FDA suspends licence of",
-        "Maharashtra FDA suspends",
-        "Maharashtra FDA cancels",
-        "Maharashtra FDA seals",
-        "Maharashtra FDA seizes",
-        "Maharashtra FDA raids",
-        "Maharashtra FDA crackdown on",
-        "Maharashtra FDA",
-        "FDA suspends food licences of",
-        "FDA suspends food licence of",
-        "FDA suspends licences of",
-        "FDA suspends licence of",
-        "FDA suspends",
-        "FDA seals",
-        "FDA seizes",
-        "FDA raids",
-        "FDA",
-    ] {
-        if s.to_lowercase().starts_with(&prefix.to_lowercase()) {
-            // Lowercasing can change byte length, so the prefix offset may not
-            // be a char boundary in `s`; skip rather than panic on odd UTF-8.
-            let Some(rest) = s.get(prefix.len()..) else {
-                continue;
-            };
-            let rest = rest.trim().trim_start_matches([':', '-', ',', ' ']).trim();
-            if !rest.is_empty() {
-                s = rest;
-                break;
-            }
+    let trimmed = raw.trim();
+    for prefix in ESTABLISHMENT_PREFIXES {
+        // `get` guards against a non-char-boundary slice on odd UTF-8.
+        let Some(head) = trimmed.get(..prefix.len()) else {
+            continue;
+        };
+        if !head.eq_ignore_ascii_case(prefix) {
+            continue;
+        }
+        let rest = trimmed[prefix.len()..]
+            .trim_start_matches([':', '-', ',', ' '])
+            .trim();
+        if !rest.is_empty() {
+            return rest.to_string();
         }
     }
-    s.to_string()
+    trimmed.to_string()
+}
+
+/// Headline before the "|", "-" or ":" separator, with the boilerplate
+/// enforcement prefix stripped.
+fn outlet_from_title(title: &str) -> Option<String> {
+    let name: String = title
+        .split(['|', '-', ':'])
+        .next()?
+        .trim()
+        .chars()
+        .take(120)
+        .collect();
+    let name = name.trim();
+    (!name.is_empty()).then(|| clean_establishment_name(name))
 }
 
 // Deterministic safety net: when a batch's LLM path fails, keep one minimal
 // record per signal-bearing item so the run degrades instead of zeroing out.
-// Fields the rules can't know (area, violations, dates) stay empty —
-// build_rows + coerce_action_date fill date defaults downstream.
+// Rows with no named city are dropped here, not assigned a guessed one.
 pub(crate) fn rule_extract(jobs: &[Job<'_>]) -> Vec<LlmAction> {
     jobs.iter()
         .filter_map(|j| {
             let action_type = triage(&j.item.haystack())?;
-            let name: String = j
-                .item
-                .title
-                .split(['|', '-', ':'])
-                .next()?
-                .trim()
-                .chars()
-                .take(120)
-                .collect();
-            let name = name.trim();
-            (!name.is_empty()).then(|| {
-                let cleaned_name = clean_establishment_name(name);
-                let final_name = if cleaned_name.is_empty() {
-                    name.to_string()
-                } else {
-                    cleaned_name
-                };
-                let mut action =
-                    LlmAction::minimal(final_name, action_type, j.orig, j.item.snippet.clone());
-                let city = city_of(&format!(
-                    "{} {}",
-                    j.item.title,
-                    j.item.snippet.as_deref().unwrap_or("")
-                ))
-                .unwrap_or_else(|| "Mumbai".to_string());
-                action.city = Some(city);
-                if action
-                    .details
-                    .as_deref()
-                    .map(str::trim)
-                    .unwrap_or("")
-                    .chars()
-                    .count()
-                    < MIN_DETAILS_CHARS
-                {
-                    action.details = Some(format!("FDA enforcement action: {}", j.item.title));
-                }
-                action
-            })
+            let name = outlet_from_title(&j.item.title)?;
+            let city = city_of(&format!(
+                "{} {}",
+                j.item.title,
+                j.item.snippet.as_deref().unwrap_or("")
+            ))?;
+            let mut action = LlmAction::minimal(name, action_type, j.orig, j.item.snippet.clone());
+            action.city = Some(city);
+            Some(action)
         })
         .collect()
 }
@@ -331,6 +306,13 @@ mod tests {
             published: None,
             snippet: None,
         };
+        let cityless = NewsItem {
+            title: "FDA seals eatery over pests".into(),
+            url: "https://x.test/2".into(),
+            source: None,
+            published: None,
+            snippet: None,
+        };
         let cricket = NewsItem {
             title: "cricket highlights and match report".into(),
             url: "https://x.test/1".into(),
@@ -344,12 +326,16 @@ mod tests {
                 item: &licenced,
             },
             Job {
+                orig: 5,
+                item: &cityless,
+            },
+            Job {
                 orig: 7,
                 item: &cricket,
             },
         ];
         let kept = rule_extract(&jobs);
-        assert_eq!(kept.len(), 1, "only the signal item is kept");
+        assert_eq!(kept.len(), 1, "only signal items with a city are kept");
         assert_eq!(kept[0].source_index, 4, "orig index survives");
         assert_eq!(
             kept[0].action_type,

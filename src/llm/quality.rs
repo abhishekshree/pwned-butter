@@ -1,11 +1,10 @@
 use crate::models::LlmAction;
 
-/// Words that mark an establishment as a pharma product, never a food outlet.
+/// Words marking an establishment as a pharma product, never a food outlet.
 const PRODUCT_WORDS: &[&str] = &["tablet", "syrup", "medicine", "drug"];
 
-/// Phrasing that marks a story as "action pending", never a concrete action.
-/// Deliberately specific: bare "await" would nuke genuine suspensions
-/// "awaiting reinspection".
+/// Phrasing that means "action pending". Bare "await" would nuke genuine
+/// suspensions that are "awaiting reinspection".
 const NO_ACTION_YET: &[&str] = &[
     "awaits repl",
     "awaiting respon",
@@ -17,15 +16,13 @@ const NO_ACTION_YET: &[&str] = &[
     "yet to respond",
 ];
 
-/// Longest genuine outlet name in history is 9 words
-/// ("IIT Bombay Hostel Canteen (Hostels 12, 13 & 14)").
+/// Longest genuine outlet name in history is 9 words.
 const MAX_ESTABLISHMENT_WORDS: usize = 9;
 /// Shortest genuine details in history is 43 chars; floor at 20.
-pub(crate) const MIN_DETAILS_CHARS: usize = 20;
+const MIN_DETAILS_CHARS: usize = 20;
 
 /// Post-LLM quality gate: better no record than a wrong one. Every rule is
-/// calibrated against the pre-Sept-2026 history (67/67 rows pass) and each
-/// rejects a shape the 6 Sept 2026 junk took.
+/// calibrated against the pre-Sept-2026 history (67/67 rows pass).
 pub(crate) fn check(a: &LlmAction) -> Result<(), &'static str> {
     let name = a.establishment.trim();
     if name.is_empty() {
