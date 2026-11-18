@@ -3,20 +3,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::warn;
 
-use crate::domain::Article;
-
 use super::strip_code_fences;
 
 pub(crate) const TRIAGE_PROMPT: &str = include_str!("../prompts/triage.txt");
 
-/// A relevance-filtered batch item. Provenance is the `&Article` itself, so
-/// no positional index has to survive chunking.
-pub(crate) struct Job<'a> {
-    pub(crate) item: &'a Article,
-}
-
-/// One qualifying item as returned by the triage model. Triage is a pure
-/// relevance filter: it carries only the source position and a short reason.
+/// One qualifying item from the triage relevance filter.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Verdict {
@@ -25,8 +16,6 @@ pub(crate) struct Verdict {
     pub(crate) reason: Option<String>,
 }
 
-/// Response format for the model. Triage emits only a source index and a
-/// short reason, so the schema has exactly those two fields.
 pub(crate) fn triage_schema() -> Value {
     json!({
         "type": "array",

@@ -11,7 +11,6 @@ pub struct NewsItem {
     pub snippet: Option<String>,
 }
 
-/// Lowercased title, snippet and publisher, for keyword scoring and triage.
 impl NewsItem {
     pub fn haystack(&self) -> String {
         format!(
@@ -24,8 +23,7 @@ impl NewsItem {
     }
 }
 
-/// Codes come from `strum`'s `snake_case` attribute, so the DB value, serde
-/// name and prompt name cannot drift apart.
+/// strum's snake_case keeps the DB value, serde name and prompt name in sync.
 #[derive(
     Debug,
     Clone,
@@ -110,10 +108,4 @@ where
     D: serde::Deserializer<'de>,
 {
     Ok(Option::<Vec<String>>::deserialize(de)?.unwrap_or_default())
-}
-
-pub fn nonempty(v: Option<&str>) -> Option<String> {
-    v.map(str::trim)
-        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("null"))
-        .map(str::to_string)
 }

@@ -34,7 +34,7 @@ pub async fn pool(config: &Config) -> AnyResult<&'static PgPool> {
     Ok(POOL.get_or_init(|| pool))
 }
 
-pub async fn seen_urls(pool: &PgPool, cutoff: DateTime<Utc>) -> AnyResult<HashSet<String>> {
+pub(crate) async fn seen_urls(pool: &PgPool, cutoff: DateTime<Utc>) -> AnyResult<HashSet<String>> {
     Ok(sqlx::query_scalar::<_, String>(
         "SELECT source_url FROM actions WHERE published_at > $1 OR published_at IS NULL",
     )
@@ -73,7 +73,7 @@ async fn execute_insert(
          ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) \
          ON CONFLICT (source_url, establishment, action_date) {conflict_tail}"
     );
-    // `conflict_tail` is a compile-time constant, not user input.
+    // conflict_tail is a compile-time constant, not user input.
     let res = sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(&r.establishment)
         .bind(&r.area)
@@ -97,19 +97,15 @@ async fn execute_insert(
     Ok(res.rows_affected())
 }
 
-/// The single Rust write path. `same_event` is the one Rust dedup authority;
-/// the SQL EXCLUDE constraint remains the final backstop.
-pub async fn upsert_actions(pool: &PgPool, rows: &[Candidate]) -> AnyResult<StoreOutcome> {
+/// `same_event` is the Rust dedup authority; the SQL EXCLUDE constraint is the backstop.
+pub(crate) async fn upsert_actions(pool: &PgPool, rows: &[Candidate]) -> AnyResult<StoreOutcome> {
     transact(pool, |mut tx| async move {
         let mut outcome = StoreOutcome::default();
         for r in rows {
-            // One event per outlet AND action type. Action type must match so a
-            // reopening is not swallowed by the suspension it followed.
-            // The window is ±10, not ±5: the SQL constraint uses
-            // daterange(action_date - 5, action_date + 5, '[]'), which
-            // canonicalises to [d-5, d+6) and therefore overlaps for dates up
-            // to 10 days apart. A narrower pre-check would miss a conflicting
-            // row and abort the whole transaction on INSERT.
+            // One event per outlet AND action type, so a reopening is not swallowed.
+            // The window is ±10, not ±5: the SQL daterange canonicalises to
+            // [d-5, d+6), so a narrower pre-check would miss a conflicting row
+            // and abort the transaction on INSERT.
             let candidates: Vec<String> = sqlx::query(
                 "SELECT establishment FROM actions
                  WHERE action_date BETWEEN $1 - 10 AND $1 + 10
@@ -176,9 +172,7 @@ fn token_matches(t: &str, words: &[&str]) -> bool {
         || (0..=words.len().saturating_sub(t.len())).any(|i| is_acronym_of(t, &words[i..]))
 }
 
-/// Same outlet: exact (case/punctuation-insensitive), containment for names
-/// 6+ chars, or every token matching literally or as an initials acronym,
-/// with one 3+ char word in common so a bare acronym cannot match alone.
+/// Exact, containment for 6+ char names, or token/acronym matching with a 3+ char word in common.
 fn same_event(a: &str, b: &str) -> bool {
     let norm = |s: &str| -> String {
         s.to_lowercase()
@@ -191,8 +185,7 @@ fn same_event(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }
-    // containment of a very short name is too loose ("KFC" everywhere);
-    // the token fallback below keeps that bar via total matched length
+    // Short-name containment is too loose ("KFC" everywhere).
     if a.len().min(b.len()) >= 6 && (a.contains(&b) || b.contains(&a)) {
         return true;
     }
@@ -205,21 +198,20 @@ fn same_event(a: &str, b: &str) -> bool {
     side_matches(&ta, &tb) || side_matches(&tb, &ta)
 }
 
-pub async fn begin_run(pool: &PgPool) -> AnyResult<i64> {
+pub(crate) async fn begin_run(pool: &PgPool) -> AnyResult<i64> {
     let row = sqlx::query("INSERT INTO fetch_runs (status) VALUES ('running') RETURNING id")
         .fetch_one(pool)
         .await?;
     row.try_get("id").map_err(Into::into)
 }
 
-pub async fn finish_run(
+pub(crate) async fn finish_run(
     pool: &PgPool,
     run_id: i64,
     report: &RunReport,
     details: &Value,
 ) -> AnyResult<()> {
-    // Caller-supplied keys are kept, then the typed metrics win on collision
-    // so the report always carries the true counts.
+    // Caller-supplied keys are kept, then the typed metrics win on collision.
     let mut merged = serde_json::Map::new();
     if let Some(extra) = details.as_object() {
         for (key, value) in extra {
@@ -258,7 +250,7 @@ pub async fn finish_run(
     Ok(())
 }
 
-pub async fn fail_run(pool: &PgPool, run_id: i64, error: &str) -> AnyResult<()> {
+pub(crate) async fn fail_run(pool: &PgPool, run_id: i64, error: &str) -> AnyResult<()> {
     sqlx::query(
         "UPDATE fetch_runs SET finished_at = now(), status = 'error', error = $1 WHERE id = $2",
     )

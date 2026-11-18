@@ -5,8 +5,10 @@ use serde_json::json;
 use crate::config::Config;
 use crate::db;
 use crate::llm;
+use crate::local::LocalWriter;
 use crate::news;
 use crate::report::{RunMetrics, RunReport, StoreOutcome};
+use crate::store::Store;
 
 pub async fn run_scrape(config: &Config) -> AnyResult<RunReport> {
     // Google News indexes regional reports hours late; an overlapping window
@@ -20,29 +22,44 @@ pub async fn run_with_window(
     seen_days: i64,
     max_items: usize,
 ) -> AnyResult<RunReport> {
-    let pool = db::pool(config).await?;
-    let run_id = db::begin_run(pool).await?;
+    if let Some(path) = &config.local_writer {
+        let writer = LocalWriter::new(path.clone());
+        run(config, &writer, window, seen_days, max_items).await
+    } else {
+        let pool = db::pool(config).await?;
+        run(config, pool, window, seen_days, max_items).await
+    }
+}
 
-    match scrape_once(pool, config, window, seen_days, max_items).await {
+async fn run(
+    config: &Config,
+    store: &dyn Store,
+    window: &str,
+    seen_days: i64,
+    max_items: usize,
+) -> AnyResult<RunReport> {
+    let run_id = store.begin_run().await?;
+
+    match scrape_once(store, config, window, seen_days, max_items).await {
         Ok(report) => {
-            db::finish_run(
-                pool,
-                run_id,
-                &report,
-                &json!({"model": config.gemini_model, "window": window}),
-            )
-            .await?;
+            store
+                .finish_run(
+                    run_id,
+                    &report,
+                    &json!({"model": config.gemini_model, "window": window}),
+                )
+                .await?;
             Ok(report)
         }
         Err(error) => {
-            db::fail_run(pool, run_id, &format!("{error:#}")).await?;
+            store.fail_run(run_id, &format!("{error:#}")).await?;
             Err(error)
         }
     }
 }
 
 async fn scrape_once(
-    pool: &sqlx::PgPool,
+    store: &dyn Store,
     config: &Config,
     window: &str,
     seen_days: i64,
@@ -52,14 +69,14 @@ async fn scrape_once(
     let seen = Utc::now() - ChronoDuration::days(seen_days);
 
     let items = news::fetch_items(client, window).await?;
-    let already_seen = db::seen_urls(pool, seen).await?;
+    let already_seen = store.seen_urls(seen).await?;
     let articles_seen = items.len();
     let articles = news::enrich(client, items, &already_seen, max_items).await;
     let articles_new = articles.len();
 
     let mut metrics = RunMetrics::default();
     let candidates = llm::extract(config, &articles, &mut metrics).await?;
-    let StoreOutcome { inserted, .. } = db::upsert_actions(pool, &candidates).await?;
+    let StoreOutcome { inserted, .. } = store.upsert_actions(&candidates).await?;
 
     Ok(RunReport {
         articles_seen,
@@ -94,6 +111,9 @@ mod tests {
             city: Some("Mumbai".into()),
             action_type: ActionType::LicenceSuspension,
             action_date: Some("2026-08-11".into()),
+            details: Some(
+                "licence suspended over cockroach infestation found during inspection".into(),
+            ),
             ..Default::default()
         }
     }

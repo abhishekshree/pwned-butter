@@ -1,15 +1,15 @@
-//! Validated domain types. Raw RSS items and untrusted LLM output do not pass
-//! beyond this module without becoming one of these.
+//! Validated domain types.
 
 use chrono::{DateTime, NaiveDate, Utc};
+use serde::Serialize;
 use strum::{EnumIter, IntoEnumIterator};
 
 use crate::error::Rejection;
-use crate::models::{ActionType, LlmAction, NewsItem, OutletType, nonempty};
+use crate::models::{ActionType, LlmAction, NewsItem, OutletType};
+use crate::rules::rules;
 
-/// Cities this tracker covers, and only these. Replaces the string-prefix
-/// `IN_SCOPE_CITIES` check that could drift from the prompts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter)]
+/// The only cities this tracker covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, Serialize)]
 pub enum CoveredCity {
     Mumbai,
     Pune,
@@ -19,9 +19,7 @@ pub enum CoveredCity {
 }
 
 impl CoveredCity {
-    /// Accepts a city with a locality qualifier ("Mumbai Suburban") but not a
-    /// different place that merely starts with the same characters. The names
-    /// come from `as_str`, so there is only one copy of each city string.
+    /// Accepts locality qualifiers ("Mumbai Suburban") but not prefix lookalikes ("Mumbaiwadi").
     pub fn parse(raw: &str) -> Option<Self> {
         let value = raw.trim().to_lowercase();
         Self::iter()
@@ -45,9 +43,7 @@ impl CoveredCity {
     }
 }
 
-/// An RSS item after enrichment. Its `url` is the canonical publisher URL
-/// when the fetch succeeded, otherwise the original Google News URL — but it
-/// is set exactly once, by `news::enrich`, and never mutated afterwards.
+/// An RSS item after enrichment, with its canonical URL resolved.
 #[derive(Debug, Clone)]
 pub struct Article {
     pub title: String,
@@ -79,9 +75,10 @@ impl Article {
     }
 }
 
-/// A validated record ready for persistence. This is also the insert DTO,
-/// replacing `db::ActionInsert` so the same shape cannot drift in two places.
-#[derive(Debug, Clone)]
+/// A validated record ready for persistence — also the insert DTO.
+// #[non_exhaustive] only seals against other crates; this field seals within the crate too.
+#[allow(clippy::manual_non_exhaustive)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Candidate {
     pub establishment: String,
     pub area: Option<String>,
@@ -100,13 +97,12 @@ pub struct Candidate {
     pub source_publisher: Option<String>,
     pub source_headline: Option<String>,
     pub published_at: Option<DateTime<Utc>>,
+    #[serde(skip)]
+    _sealed: (),
 }
 
 impl Candidate {
-    /// Structural validation only. Business-quality rules live in `quality`.
-    /// Unknown outlet codes become `None` (the DB column is nullable) instead
-    /// of the `Other` error sink; unrecognised action codes are already
-    /// rejected by serde when the LLM response is parsed.
+    /// Unknown outlet codes become `None` because the DB column is nullable.
     pub fn try_new(action: LlmAction, article: &Article) -> Result<Self, Rejection> {
         let establishment =
             nonempty(Some(action.establishment.as_str())).ok_or(Rejection::NoEstablishment)?;
@@ -118,6 +114,35 @@ impl Candidate {
             .and_then(|raw| NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d").ok())
             .or_else(|| article.published.map(|date| date.date_naive()))
             .ok_or(Rejection::NoActionDate)?;
+        let details = nonempty(action.details.as_deref());
+
+        let config = &rules().quality;
+        let lower = establishment.to_lowercase();
+        let hay = format!(
+            "{lower} {}",
+            details.as_deref().unwrap_or("").to_lowercase()
+        );
+        if lower.starts_with(['\'', '"', '‘', '“']) {
+            return Err(Rejection::QuoteLedEstablishment);
+        }
+        if config.no_action_yet.iter().any(|w| hay.contains(w)) {
+            return Err(Rejection::PendingAction);
+        }
+        if config.product_words.iter().any(|w| lower.contains(w)) {
+            return Err(Rejection::ProductNotOutlet);
+        }
+        if config.regulator_words.iter().any(|w| lower.contains(w)) {
+            return Err(Rejection::RegulatorNotOutlet);
+        }
+        if establishment.split_whitespace().count() > config.max_establishment_words {
+            return Err(Rejection::HeadlineFragment);
+        }
+        if details
+            .as_deref()
+            .is_none_or(|d| d.chars().count() < config.min_details_chars)
+        {
+            return Err(Rejection::NoSubstantiveDetails);
+        }
 
         Ok(Self {
             establishment,
@@ -136,12 +161,83 @@ impl Candidate {
                 .compliance_score
                 .filter(|score| (0..=100).contains(score)),
             fssai_number: nonempty(action.fssai_number.as_deref()),
-            details: nonempty(action.details.as_deref()),
+            details,
             platforms: action.platforms,
             source_url: article.url.clone(),
             source_publisher: nonempty(article.source.as_deref()),
             source_headline: Some(article.title.clone()),
             published_at: article.published,
+            _sealed: (),
         })
+    }
+}
+
+fn nonempty(v: Option<&str>) -> Option<String> {
+    v.map(str::trim)
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("null"))
+        .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use test_case::test_case;
+
+    use super::*;
+    use crate::models::{ActionType, LlmAction};
+
+    const FULL: &str = "licence suspended over cockroach infestation found during inspection";
+
+    fn article() -> Article {
+        Article {
+            title: "source headline".into(),
+            url: "https://example.test/1".into(),
+            source: None,
+            published: None,
+            snippet: None,
+        }
+    }
+
+    fn candidate(est: &str, details: Option<&str>) -> Result<Candidate, Rejection> {
+        let action = LlmAction {
+            establishment: est.into(),
+            city: Some("Mumbai".into()),
+            action_date: Some("2026-08-11".into()),
+            details: details.map(str::to_string),
+            ..Default::default()
+        };
+        Candidate::try_new(action, &article())
+    }
+
+    #[test_case("Domino's Vile Parle", Some(FULL), Ok(()); "complete record")]
+    #[test_case("IIT Bombay Hostel Canteen (Hostels 12, 13 & 14)", Some(FULL), Ok(()); "long genuine name")]
+    #[test_case("Domino's Vile Parle", Some("12345678901234567890"), Ok(()); "details at floor")]
+    #[test_case("'Popularity was never my goal'", Some(FULL), Err(Rejection::QuoteLedEstablishment); "quote-led name")]
+    #[test_case("Popular Re 1 Ayurvedic Digestive Tablet Fails Maharashtra FDA Quality Test", Some(FULL), Err(Rejection::ProductNotOutlet); "product name")]
+    #[test_case("Maharashtra FDA rolls out year", Some(FULL), Err(Rejection::RegulatorNotOutlet); "regulator name")]
+    #[test_case("FDA awaiting response from restaurants at Mumbai Cricket Association premises", Some(FULL), Err(Rejection::PendingAction); "awaiting response")]
+    #[test_case("FDA awaits replies from restaurants at MCA premises", Some(FULL), Err(Rejection::PendingAction); "awaits replies")]
+    #[test_case("Maharashtra FDA awaits replies from five MCA restaurants over licensing violations", Some(FULL), Err(Rejection::PendingAction); "awaits replies long")]
+    #[test_case("Popular Re 1 Digestive Item Fails Maharashtra Quality Test Today Here", Some(FULL), Err(Rejection::HeadlineFragment); "headline fragment")]
+    #[test_case("Domino's Vile Parle", None, Err(Rejection::NoSubstantiveDetails); "no details")]
+    #[test_case("Domino's Vile Parle", Some("1234567890123456789"), Err(Rejection::NoSubstantiveDetails); "short details")]
+    #[test_case("MCA BKC Club", Some("FDA has issued a notice and seeks explanation from the club within seven days"), Err(Rejection::PendingAction); "seeks explanation")]
+    #[test_case("   ", Some(FULL), Err(Rejection::NoEstablishment); "blank name")]
+    fn gates_junk_shapes(est: &str, details: Option<&str>, expected: Result<(), Rejection>) {
+        assert_eq!(candidate(est, details).map(|_| ()), expected, "{est}");
+    }
+
+    #[test]
+    fn keeps_inspection_without_violations_when_detailed() {
+        let action = LlmAction {
+            establishment: "Bombay High Court Canteen".into(),
+            city: Some("Mumbai".into()),
+            action_date: Some("2026-08-11".into()),
+            action_type: ActionType::Inspection,
+            details: Some(
+                "FDA team inspected canteens inside the Bombay High Court premises following queries from the court.".into(),
+            ),
+            ..Default::default()
+        };
+        assert!(Candidate::try_new(action, &article()).is_ok());
     }
 }

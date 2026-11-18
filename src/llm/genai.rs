@@ -12,7 +12,7 @@ use crate::domain::Article;
 use crate::models::LlmAction;
 use crate::report::RunMetrics;
 
-use super::triage::{Job, TRIAGE_PROMPT, Verdict, parse_verdicts, triage_schema};
+use super::triage::{TRIAGE_PROMPT, Verdict, parse_verdicts, triage_schema};
 use super::{SYSTEM_PROMPT, strip_code_fences, truncate};
 
 const MAX_ATTEMPTS: usize = 3;
@@ -34,8 +34,7 @@ fn json_options(max_tokens: u32, schema: Value) -> ChatOptions {
         .with_response_format(JsonSpec::new("response", schema))
 }
 
-/// Sends one request, retrying transient failures. `calls` counts every
-/// attempt so a fully failed batch is still visible in the run metrics.
+/// Every attempt is counted so a fully failed batch stays visible in the metrics.
 async fn chat_text(
     client: &Client,
     model: &str,
@@ -67,7 +66,6 @@ async fn chat_text(
     unreachable!("MAX_ATTEMPTS is nonzero")
 }
 
-/// Strict relevance pass over one chunk of articles.
 pub(crate) async fn triage_batch(
     client: &Client,
     model: &str,
@@ -95,14 +93,12 @@ pub(crate) async fn triage_batch(
     parse_verdicts(&text)
 }
 
-/// Extract actions for one chunk, pairing each result with its source article.
-/// The model returns chunk-local indices; `absolute` resolves them through
-/// `chunk` and drops out-of-range values.
+/// The model returns chunk-local indices; `absolute` resolves them and drops out-of-range values.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn extract_batch<'a>(
     client: &Client,
     model: &str,
-    chunk: &[Job<'a>],
+    chunk: &[&'a Article],
     openrouter_key: Option<&str>,
     openrouter_model: &str,
     openrouter_fallbacks: &[String],
@@ -110,8 +106,7 @@ pub(crate) async fn extract_batch<'a>(
 ) -> AnyResult<Vec<(&'a Article, LlmAction)>> {
     let items: Vec<Value> = chunk
         .iter()
-        .map(|job| {
-            let item = job.item;
+        .map(|item| {
             json!({
                 "title": item.title,
                 "url": item.url,
@@ -183,20 +178,18 @@ pub(crate) async fn extract_batch<'a>(
     Err(last_error)
 }
 
-/// Attach each action's source article, resolved from its chunk-local
-/// `sourceIndex`. Values outside the chunk are dropped with a warning.
-fn absolute<'a>(actions: Vec<LlmAction>, chunk: &[Job<'a>]) -> Vec<(&'a Article, LlmAction)> {
+fn absolute<'a>(actions: Vec<LlmAction>, chunk: &[&'a Article]) -> Vec<(&'a Article, LlmAction)> {
     actions
         .into_iter()
         .filter_map(|action| {
-            let Some(job) = chunk.get(action.source_index) else {
+            let Some(article) = chunk.get(action.source_index) else {
                 warn!(
                     index = action.source_index,
                     "extraction result index out of range"
                 );
                 return None;
             };
-            Some((job.item, action))
+            Some((*article, action))
         })
         .collect()
 }
@@ -234,7 +227,6 @@ pub(crate) fn parse_llm_text(text: &str) -> AnyResult<Vec<LlmAction>> {
     Ok(actions)
 }
 
-/// Bound untrusted LLM strings before they reach validation or the DB.
 pub(crate) fn sanitize_action(mut action: LlmAction) -> LlmAction {
     action.establishment = clamp(action.establishment, 200);
     clamp_opt(&mut action.area, 120);
@@ -260,7 +252,6 @@ pub(crate) fn sanitize_action(mut action: LlmAction) -> LlmAction {
     action
 }
 
-#[allow(dead_code)]
 fn clamp(value: String, max: usize) -> String {
     let value = value.trim().to_string();
     if value.chars().count() > max {
@@ -324,7 +315,7 @@ mod tests {
     fn attaches_source_articles_and_drops_out_of_range() {
         let first = article("first");
         let second = article("second");
-        let chunk = [Job { item: &first }, Job { item: &second }];
+        let chunk: Vec<&Article> = vec![&first, &second];
         let actions = vec![
             LlmAction {
                 source_index: 1,

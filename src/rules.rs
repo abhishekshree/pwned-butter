@@ -31,9 +31,7 @@ pub(crate) struct News {
 
 static BUNDLED: OnceLock<Rules> = OnceLock::new();
 
-/// Parsed once from the file embedded in the binary. `rules.toml` is shipped
-/// with the crate and the test below validates it, so a bad parse is a build
-/// bug, not runtime input.
+/// A bad bundled rules.toml is a build bug, hence the expect.
 pub(crate) fn rules() -> &'static Rules {
     BUNDLED.get_or_init(|| toml::from_str(TEXT).expect("bundled rules.toml is valid"))
 }

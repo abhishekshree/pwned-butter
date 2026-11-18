@@ -13,21 +13,17 @@ use crate::domain::Article;
 use crate::models::NewsItem;
 use crate::rules::rules;
 
-pub const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+pub(crate) const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
-/// The number of distinct, high-signal articles to enrich in one scheduled run.
-/// Applied before fetching: Google News returns the same story from several
-/// queries, and fetching every hit used to exhaust the run's time budget.
-pub const MAX_ITEMS: usize = 100;
+/// Capped before fetching: fetching every hit exhausted the run's time budget.
+pub(crate) const MAX_ITEMS: usize = 100;
 const FETCH_CONCURRENCY: usize = 8;
-/// Publisher pages are untrusted; without a ceiling one huge article OOMs
-/// the run before the snippet is truncated.
+/// One huge publisher page can OOM the run before the snippet is truncated.
 const MAX_ARTICLE_BYTES: u64 = 5 * 1024 * 1024;
-// Google answers all the queries from one runner IP at once with 503s when we
-// fan out too wide; four at a time keeps the burst below the threshold.
+// Google 503s when all queries hit from one IP at once.
 const RSS_CONCURRENCY: usize = 4;
 
-pub fn google_news_url(query: &str, window: Option<&str>) -> String {
+fn google_news_url(query: &str, window: Option<&str>) -> String {
     let q = match window {
         Some(w) if !w.is_empty() => format!("{query} {w}"),
         _ => query.to_string(),
@@ -62,8 +58,7 @@ where
     out
 }
 
-/// One retry covers Google News' transient 503 storms; a sustained IP-level
-/// block still surfaces as `seen=0` in the run summary.
+/// One retry covers transient 503 storms; a sustained block shows up as seen=0.
 async fn fetch_feed(client: &reqwest::Client, url: &str) -> AnyResult<Vec<NewsItem>> {
     match fetch_feed_once(client, url).await {
         Ok(items) => Ok(items),
@@ -112,7 +107,10 @@ async fn fetch_feed_once(client: &reqwest::Client, url: &str) -> AnyResult<Vec<N
     Ok(items)
 }
 
-pub async fn fetch_items(client: &reqwest::Client, window: &str) -> AnyResult<Vec<NewsItem>> {
+pub(crate) async fn fetch_items(
+    client: &reqwest::Client,
+    window: &str,
+) -> AnyResult<Vec<NewsItem>> {
     let jobs = rules()
         .news
         .queries
@@ -141,27 +139,25 @@ pub async fn fetch_items(client: &reqwest::Client, window: &str) -> AnyResult<Ve
     Ok(items)
 }
 
-/// Rank likely enforcement stories from their RSS metadata before downloading
-/// publisher pages. This is only a priority signal, never an exclusion: a
-/// lower-scoring item still gets selected when there is room.
+/// Priority signal only: a lower-scoring item still gets selected when there is room.
 fn enforcement_score(item: &NewsItem) -> u8 {
     let config = &rules().news;
     let hay = item.haystack();
     let any = |words: &[String]| words.iter().any(|w| hay.contains(w));
     let mut score = 8 * u8::from(any(&config.authority_signals));
     score += 3 * u8::from(any(&config.licence_words) && any(&config.licence_actions));
-    score += 3 * config
+    let action_hits = config
         .action_signals
         .iter()
         .filter(|s| hay.contains(*s))
-        .count() as u8;
+        .count();
+    score += 3 * u8::try_from(action_hits).unwrap_or(u8::MAX);
     score += u8::from(any(&config.venue_signals));
     score
 }
 
 fn select_for_enrichment(mut items: Vec<NewsItem>, max_items: usize) -> Vec<NewsItem> {
-    // enforcement_score lowercases the whole haystack, so compute it once per
-    // item via sort_by_cached_key instead of on every comparison.
+    // Cached because enforcement_score lowercases the whole haystack.
     items.sort_by_cached_key(|item| {
         (
             std::cmp::Reverse(enforcement_score(item)),
@@ -211,8 +207,7 @@ fn extract_snippet(document: &str) -> Option<String> {
             (t.len() >= 40).then(|| t.to_string())
         })
         .collect();
-    // Roundups often put the full outlet list after the opening paragraphs;
-    // keep enough text for the extractor without blowing the batch context.
+    // Roundups put the full outlet list after the opening paragraphs.
     paras.truncate(30);
 
     if title.is_none() && paras.is_empty() {
@@ -251,6 +246,10 @@ async fn fetch_article(client: &reqwest::Client, url: &str) -> AnyResult<Fetched
         anyhow::bail!("article too large: {url}");
     }
     let bytes = resp.bytes().await.context("article body")?;
+    // Content-Length is advisory; reject an oversized body after the read too.
+    if u64::try_from(bytes.len()).is_ok_and(|len| len > MAX_ARTICLE_BYTES) {
+        anyhow::bail!("article too large: {url}");
+    }
     let text = String::from_utf8_lossy(&bytes);
     Ok(FetchedArticle {
         final_url,
@@ -262,19 +261,18 @@ fn already_seen(urls: &HashSet<String>, seen: &HashSet<String>, url: &str) -> bo
     urls.contains(url) || seen.contains(url)
 }
 
-/// Pick the canonical URL and snippet exactly once, from the fetch outcome.
 fn canonical(item: &NewsItem, fetched: Option<FetchedArticle>) -> (String, Option<String>) {
     match fetched {
         Some(FetchedArticle { final_url, snippet }) => (final_url, snippet),
         None => {
-            // Deliberate degradation: a failed fetch keeps the Google URL and uses the headline as snippet.
+            // A failed fetch keeps the Google URL and uses the headline as snippet.
             let snippet = item.snippet.clone().or_else(|| Some(item.title.clone()));
             (item.url.clone(), snippet)
         }
     }
 }
 
-pub async fn enrich(
+pub(crate) async fn enrich(
     client: &reqwest::Client,
     items: Vec<NewsItem>,
     seen: &HashSet<String>,

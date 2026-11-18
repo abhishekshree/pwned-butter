@@ -9,30 +9,22 @@ use crate::report::RunMetrics;
 
 pub const SYSTEM_PROMPT: &str = include_str!("../prompts/system.txt");
 
-/// Large batches respect the ~5 requests/min free tier; crowding is handled
-/// downstream by the prompt's 16k-token output ceiling.
-pub(crate) const BATCH_SIZE: usize = 20;
+/// Large batches respect the ~5 requests/min free tier.
+const BATCH_SIZE: usize = 20;
 // ponytail: concurrent batches hit 429s together, so they run sequentially.
 
-/// Kept as a compatibility alias; the canonical default now lives in `config`.
-pub const DEFAULT_GEMINI_MODEL: &str = crate::config::DEFAULT_GEMINI_MODEL;
-
 mod genai;
-mod quality;
 mod triage;
 
 use triage::Verdict;
 
-/// Resolve a chunk-local `sourceIndex` to its article. Each chunk addresses
-/// only itself, so there is no absolute offset to carry between batches.
+/// Each chunk addresses only itself, so no absolute index survives batching.
 fn verdict_article<'a>(chunk: &'a [Article], verdict: &Verdict) -> Option<&'a Article> {
     chunk.get(verdict.source_index)
 }
 
-/// Strict relevance pass. Returns the articles the extraction stage should
-/// process. A failed batch passes its items through and is counted, so a
-/// degraded run never silently drops the whole chunk.
-pub(crate) async fn triage<'a>(
+/// A failed batch passes its items through and is counted.
+async fn triage<'a>(
     api_key: &str,
     model: &str,
     items: &'a [Article],
@@ -80,9 +72,7 @@ pub(crate) async fn triage<'a>(
     Ok(kept)
 }
 
-/// Extract and validate articles into candidates ready for persistence. All
-/// configuration comes from `config`; no environment reads happen here.
-pub async fn extract(
+pub(crate) async fn extract(
     config: &Config,
     items: &[Article],
     metrics: &mut RunMetrics,
@@ -104,14 +94,9 @@ pub async fn extract(
     };
     let client = genai::client(&config.gemini_key, openrouter_key)?;
 
-    let jobs: Vec<triage::Job<'_>> = articles
-        .into_iter()
-        .map(|item| triage::Job { item })
-        .collect();
-
     let mut candidates = Vec::new();
     let mut failed = 0;
-    for (batch_no, chunk) in jobs.chunks(BATCH_SIZE).enumerate() {
+    for (batch_no, chunk) in articles.chunks(BATCH_SIZE).enumerate() {
         match genai::extract_batch(
             &client,
             &config.gemini_model,
@@ -125,12 +110,8 @@ pub async fn extract(
         {
             Ok(batch) => {
                 for (article, action) in batch {
-                    // Bound untrusted LLM strings before they reach the DB or
-                    // the dedup prompt: no new logic, reuse the existing clamps.
                     let action = genai::sanitize_action(action);
-                    match Candidate::try_new(action, article)
-                        .and_then(|candidate| quality::check(&candidate).map(|()| candidate))
-                    {
+                    match Candidate::try_new(action, article) {
                         Ok(candidate) => candidates.push(candidate),
                         Err(rejection) => {
                             metrics.rejected += 1;
@@ -150,7 +131,7 @@ pub async fn extract(
             }
         }
     }
-    if failed > 0 && failed == jobs.len().div_ceil(BATCH_SIZE) {
+    if failed > 0 && failed == articles.len().div_ceil(BATCH_SIZE) {
         return Err(anyhow!("all llm batches failed"));
     }
 
@@ -171,7 +152,7 @@ pub async fn extract(
     Ok(candidates)
 }
 
-pub(crate) fn truncate(s: &str, max: usize) -> String {
+fn truncate(s: &str, max: usize) -> String {
     let out: String = s.chars().take(max).collect();
     if s.chars().count() > max {
         format!("{out}…")
@@ -180,7 +161,7 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-pub(crate) fn strip_code_fences(s: &str) -> String {
+fn strip_code_fences(s: &str) -> String {
     let s = s.trim();
     let Some(body) = s.strip_prefix("```") else {
         return s.to_string();
@@ -206,6 +187,7 @@ mod tests {
             gemini_key: "key".into(),
             gemini_model: "model".into(),
             openrouter: None,
+            local_writer: None,
         }
     }
 

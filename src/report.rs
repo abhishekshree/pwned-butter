@@ -1,4 +1,3 @@
-/// Counters that used to be returned as unlabelled tuple elements.
 #[derive(Debug, Default, Clone)]
 pub struct RunMetrics {
     pub triage_calls: usize,
@@ -14,8 +13,6 @@ impl RunMetrics {
     }
 }
 
-/// One typed result for a scrape run, replacing `ScrapeReport` and its
-/// `(run_id, report)` / `usize` companions.
 #[derive(Debug, Default, Clone)]
 pub struct RunReport {
     pub articles_seen: usize,

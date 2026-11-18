@@ -1,8 +1,10 @@
+use std::path::PathBuf;
+
 use anyhow::{Context, Result as AnyResult};
 
-pub const DEFAULT_GEMINI_MODEL: &str = "gemini-flash-latest";
-pub const DEFAULT_OPENROUTER_MODEL: &str = "openrouter/free";
-pub const DEFAULT_OPENROUTER_FALLBACKS: &[&str] = &["inclusionai/ling-3.2-flash:free"];
+pub(crate) const DEFAULT_GEMINI_MODEL: &str = "gemini-flash-latest";
+pub(crate) const DEFAULT_OPENROUTER_MODEL: &str = "openrouter/free";
+pub(crate) const DEFAULT_OPENROUTER_FALLBACKS: &[&str] = &["inclusionai/ling-3.2-flash:free"];
 
 #[derive(Debug, Clone)]
 pub struct OpenRouterConfig {
@@ -11,18 +13,23 @@ pub struct OpenRouterConfig {
     pub fallbacks: Vec<String>,
 }
 
-/// Every environment read in the crate happens here, once, at startup.
+/// Every environment read in the crate happens here.
 #[derive(Debug, Clone)]
 pub struct Config {
     pub database_url: String,
     pub gemini_key: String,
     pub gemini_model: String,
     pub openrouter: Option<OpenRouterConfig>,
+    pub local_writer: Option<PathBuf>,
 }
 
 impl Config {
     pub fn from_env() -> AnyResult<Self> {
-        let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL is not set")?;
+        let local_writer = std::env::var("LOCAL_WRITER_PATH").ok().map(PathBuf::from);
+        let database_url = match &local_writer {
+            Some(_) => String::new(),
+            None => std::env::var("DATABASE_URL").context("DATABASE_URL is not set")?,
+        };
         let gemini_key = std::env::var("GEMINI_API_KEY").context("GEMINI_API_KEY is not set")?;
         let gemini_model =
             std::env::var("GEMINI_MODEL").unwrap_or_else(|_| DEFAULT_GEMINI_MODEL.to_string());
@@ -52,6 +59,7 @@ impl Config {
             gemini_key,
             gemini_model,
             openrouter,
+            local_writer,
         })
     }
 }
