@@ -1,19 +1,30 @@
+pub mod config;
 pub mod db;
+pub mod domain;
+pub mod error;
 pub mod llm;
+mod local;
 pub mod models;
 pub mod news;
+pub mod report;
 pub mod rules;
 pub mod scrape;
+mod store;
 
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
 use reqwest::Client;
 
 static HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
 
-pub fn init_logging() {
+/// The single startup boundary for binaries.
+pub fn init() {
+    dotenvy::dotenv().ok();
+    init_logging();
+}
+
+fn init_logging() {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let _ = tracing_subscriber::fmt()
@@ -23,7 +34,7 @@ pub fn init_logging() {
         .try_init();
 }
 
-pub fn http_client() -> &'static Client {
+pub(crate) fn http_client() -> &'static Client {
     HTTP_CLIENT.get_or_init(|| {
         Client::builder()
             .user_agent(news::USER_AGENT)
@@ -31,11 +42,4 @@ pub fn http_client() -> &'static Client {
             .build()
             .expect("build shared reqwest client")
     })
-}
-
-pub fn load_config() -> Result<(String, String)> {
-    let key = std::env::var("GEMINI_API_KEY").context("GEMINI_API_KEY is not set")?;
-    let model =
-        std::env::var("GEMINI_MODEL").unwrap_or_else(|_| llm::DEFAULT_GEMINI_MODEL.to_string());
-    Ok((key, model))
 }

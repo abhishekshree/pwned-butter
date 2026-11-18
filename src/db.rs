@@ -2,56 +2,39 @@ use std::collections::HashSet;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
-use chrono::{DateTime, NaiveDate, Utc};
-use serde::Serialize;
-use serde_json::Value;
-use sqlx::FromRow;
+use anyhow::{Context, Result as AnyResult};
+use chrono::{DateTime, Utc};
+use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
+use tokio::sync::Mutex;
 
-use crate::models::{ActionType, OutletType};
-use crate::scrape::ScrapeReport;
+use crate::config::Config;
+use crate::domain::Candidate;
+use crate::report::{RunReport, StoreOutcome};
 
 static POOL: OnceLock<PgPool> = OnceLock::new();
+static POOL_LOCK: Mutex<()> = Mutex::const_new(());
 
-pub async fn pool() -> Result<&'static PgPool> {
+pub async fn pool(config: &Config) -> AnyResult<&'static PgPool> {
     if let Some(pool) = POOL.get() {
         return Ok(pool);
     }
-    let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL is not set")?;
+    // Serialize the first connect so concurrent callers cannot each build one.
+    let _guard = POOL_LOCK.lock().await;
+    if let Some(pool) = POOL.get() {
+        return Ok(pool);
+    }
     let pool = PgPoolOptions::new()
         .max_connections(5)
         .acquire_timeout(Duration::from_secs(15))
-        .connect(&database_url)
+        .connect(&config.database_url)
         .await
         .context("connect to neon")?;
     Ok(POOL.get_or_init(|| pool))
 }
 
-#[derive(Debug, Serialize, FromRow)]
-pub struct RecentEvent {
-    pub establishment: String,
-    pub action_type: String,
-    pub action_date: NaiveDate,
-    pub city: Option<String>,
-    pub area: Option<String>,
-}
-
-/// Establishments acted against in the last `days` days, capped to bound
-/// prompt size for the LLM duplicate-grouping pass.
-pub async fn recent_events(pool: &PgPool, days: i32) -> Result<Vec<RecentEvent>> {
-    Ok(sqlx::query_as::<_, RecentEvent>(
-        "SELECT establishment, action_type, action_date, city, area FROM actions \
-         WHERE action_date >= CURRENT_DATE - ($1::int) \
-         ORDER BY action_date DESC LIMIT 200",
-    )
-    .bind(days)
-    .fetch_all(pool)
-    .await?)
-}
-
-pub async fn seen_urls(pool: &PgPool, cutoff: DateTime<Utc>) -> Result<HashSet<String>> {
+pub(crate) async fn seen_urls(pool: &PgPool, cutoff: DateTime<Utc>) -> AnyResult<HashSet<String>> {
     Ok(sqlx::query_scalar::<_, String>(
         "SELECT source_url FROM actions WHERE published_at > $1 OR published_at IS NULL",
     )
@@ -62,27 +45,6 @@ pub async fn seen_urls(pool: &PgPool, cutoff: DateTime<Utc>) -> Result<HashSet<S
     .collect())
 }
 
-#[derive(Debug, Clone)]
-pub struct ActionInsert {
-    pub establishment: String,
-    pub area: Option<String>,
-    pub city: Option<String>,
-    pub brand: Option<String>,
-    pub operator: Option<String>,
-    pub outlet_type: Option<OutletType>,
-    pub action_type: ActionType,
-    pub action_date: NaiveDate,
-    pub violations: Vec<String>,
-    pub compliance_score: Option<i32>,
-    pub fssai_number: Option<String>,
-    pub details: Option<String>,
-    pub platforms: Vec<String>,
-    pub source_url: String,
-    pub source_publisher: Option<String>,
-    pub source_headline: Option<String>,
-    pub published_at: Option<DateTime<Utc>>,
-}
-
 const INSERT_TAIL: &str = "establishment, area, city, brand, operator, outlet_type, action_type,
                 action_date, violations, compliance_score, fssai_number, details,
                 platforms, source_url, source_publisher, source_headline, published_at";
@@ -90,10 +52,10 @@ const INSERT_TAIL: &str = "establishment, area, city, brand, operator, outlet_ty
 type Tx = sqlx::Transaction<'static, sqlx::Postgres>;
 
 /// Tx goes in by value and comes back out so callers compile on stable.
-async fn transact<T, F, Fut>(pool: &PgPool, f: F) -> Result<T>
+async fn transact<T, F, Fut>(pool: &PgPool, f: F) -> AnyResult<T>
 where
     F: FnOnce(Tx) -> Fut,
-    Fut: std::future::Future<Output = Result<(Tx, T)>>,
+    Fut: std::future::Future<Output = AnyResult<(Tx, T)>>,
 {
     let tx = pool.begin().await?;
     let (tx, out) = f(tx).await?;
@@ -103,19 +65,19 @@ where
 
 async fn execute_insert(
     conn: &mut sqlx::PgConnection,
-    r: &ActionInsert,
+    r: &Candidate,
     conflict_tail: &str,
-) -> Result<u64> {
+) -> AnyResult<u64> {
     let sql = format!(
         "INSERT INTO actions ({INSERT_TAIL}) VALUES \
          ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) \
          ON CONFLICT (source_url, establishment, action_date) {conflict_tail}"
     );
-    // `conflict_tail` is a compile-time constant, not user input.
+    // conflict_tail is a compile-time constant, not user input.
     let res = sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(&r.establishment)
         .bind(&r.area)
-        .bind(&r.city)
+        .bind(r.city.as_str())
         .bind(&r.brand)
         .bind(&r.operator)
         .bind(r.outlet_type.map(|t| t.to_string()))
@@ -135,18 +97,22 @@ async fn execute_insert(
     Ok(res.rows_affected())
 }
 
-pub async fn upsert_actions(pool: &PgPool, rows: &[ActionInsert]) -> Result<usize> {
+/// `same_event` is the Rust dedup authority; the SQL EXCLUDE constraint is the backstop.
+pub(crate) async fn upsert_actions(pool: &PgPool, rows: &[Candidate]) -> AnyResult<StoreOutcome> {
     transact(pool, |mut tx| async move {
-        let mut affected: usize = 0;
+        let mut outcome = StoreOutcome::default();
         for r in rows {
-            // Same outlet within ±5 days = one event, even when outlets call
-            // it "inspection" then "licence suspension". Name matching
-            // tolerates "MCA BKC Club" vs "Mumbai Cricket Association (BKC)".
+            // One event per outlet AND action type, so a reopening is not swallowed.
+            // The window is ±10, not ±5: the SQL daterange canonicalises to
+            // [d-5, d+6), so a narrower pre-check would miss a conflicting row
+            // and abort the transaction on INSERT.
             let candidates: Vec<String> = sqlx::query(
                 "SELECT establishment FROM actions
-                 WHERE action_date BETWEEN $1 - 5 AND $1 + 5",
+                 WHERE action_date BETWEEN $1 - 10 AND $1 + 10
+                   AND action_type = $2",
             )
             .bind(r.action_date)
+            .bind(r.action_type.to_string())
             .fetch_all(&mut *tx)
             .await?
             .into_iter()
@@ -156,9 +122,10 @@ pub async fn upsert_actions(pool: &PgPool, rows: &[ActionInsert]) -> Result<usiz
                 .iter()
                 .any(|name| same_event(name, &r.establishment))
             {
+                outcome.skipped += 1;
                 continue;
             }
-            affected += usize::try_from(
+            outcome.inserted += usize::try_from(
                 execute_insert(
                     &mut tx,
                     r,
@@ -171,42 +138,7 @@ pub async fn upsert_actions(pool: &PgPool, rows: &[ActionInsert]) -> Result<usiz
                 .await?,
             )?;
         }
-        Ok((tx, affected))
-    })
-    .await
-}
-
-/// Replace a date window of rows with a fresh, deduped extraction. Rows are
-/// deleted by published_at/action_date (Google News URLs rotate between
-/// fetches), then deduped within the batch on (city, ±5 days, `same_event`).
-/// Returns (deleted, inserted).
-pub async fn replace_actions(
-    pool: &PgPool,
-    since: DateTime<Utc>,
-    rows: &[ActionInsert],
-) -> Result<(usize, usize)> {
-    transact(pool, |mut tx| async move {
-        let deleted =
-            sqlx::query("DELETE FROM actions WHERE published_at >= $1 OR action_date >= $1::date")
-                .bind(since)
-                .execute(&mut *tx)
-                .await?;
-
-        let mut inserted = 0usize;
-        let mut kept: Vec<&ActionInsert> = Vec::new();
-        for r in rows {
-            if kept.iter().any(|k| {
-                k.city == r.city
-                    && (k.action_date - r.action_date).num_days().abs() <= 5
-                    && same_event(&k.establishment, &r.establishment)
-            }) {
-                continue;
-            }
-            inserted += usize::try_from(execute_insert(&mut tx, r, "DO NOTHING").await?)?;
-            kept.push(r);
-        }
-
-        Ok((tx, (usize::try_from(deleted.rows_affected())?, inserted)))
+        Ok((tx, outcome))
     })
     .await
 }
@@ -240,9 +172,7 @@ fn token_matches(t: &str, words: &[&str]) -> bool {
         || (0..=words.len().saturating_sub(t.len())).any(|i| is_acronym_of(t, &words[i..]))
 }
 
-/// Same outlet: exact (case/punctuation-insensitive), containment for names
-/// 6+ chars, or every token matching literally or as an initials acronym,
-/// with one 3+ char word in common so a bare acronym cannot match alone.
+/// Exact, containment for 6+ char names, or token/acronym matching with a 3+ char word in common.
 fn same_event(a: &str, b: &str) -> bool {
     let norm = |s: &str| -> String {
         s.to_lowercase()
@@ -255,8 +185,7 @@ fn same_event(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }
-    // containment of a very short name is too loose ("KFC" everywhere);
-    // the token fallback below keeps that bar via total matched length
+    // Short-name containment is too loose ("KFC" everywhere).
     if a.len().min(b.len()) >= 6 && (a.contains(&b) || b.contains(&a)) {
         return true;
     }
@@ -269,19 +198,42 @@ fn same_event(a: &str, b: &str) -> bool {
     side_matches(&ta, &tb) || side_matches(&tb, &ta)
 }
 
-pub async fn begin_run(pool: &PgPool) -> Result<i64> {
+pub(crate) async fn begin_run(pool: &PgPool) -> AnyResult<i64> {
     let row = sqlx::query("INSERT INTO fetch_runs (status) VALUES ('running') RETURNING id")
         .fetch_one(pool)
         .await?;
     row.try_get("id").map_err(Into::into)
 }
 
-pub async fn finish_run(
+pub(crate) async fn finish_run(
     pool: &PgPool,
     run_id: i64,
-    report: &ScrapeReport,
+    report: &RunReport,
     details: &Value,
-) -> Result<()> {
+) -> AnyResult<()> {
+    // Caller-supplied keys are kept, then the typed metrics win on collision.
+    let mut merged = serde_json::Map::new();
+    if let Some(extra) = details.as_object() {
+        for (key, value) in extra {
+            merged.insert(key.clone(), value.clone());
+        }
+    }
+    merged.insert("triage_calls".into(), json!(report.metrics.triage_calls));
+    merged.insert(
+        "extraction_calls".into(),
+        json!(report.metrics.extraction_calls),
+    );
+    merged.insert(
+        "triage_failures".into(),
+        json!(report.metrics.triage_failures),
+    );
+    merged.insert(
+        "extraction_failures".into(),
+        json!(report.metrics.extraction_failures),
+    );
+    merged.insert("rejected".into(), json!(report.metrics.rejected));
+    let details_json = Value::Object(merged);
+
     sqlx::query(
         "UPDATE fetch_runs SET finished_at = now(), status = 'ok',
          articles_seen = $1, articles_new = $2, actions_upserted = $3, llm_calls = $4, details = $5
@@ -290,15 +242,15 @@ pub async fn finish_run(
     .bind(i64::try_from(report.articles_seen)?)
     .bind(i64::try_from(report.articles_new)?)
     .bind(i64::try_from(report.actions_upserted)?)
-    .bind(i64::try_from(report.llm_calls)?)
-    .bind(details)
+    .bind(i64::try_from(report.metrics.total_calls())?)
+    .bind(&details_json)
     .bind(run_id)
     .execute(pool)
     .await?;
     Ok(())
 }
 
-pub async fn fail_run(pool: &PgPool, run_id: i64, error: &str) -> Result<()> {
+pub(crate) async fn fail_run(pool: &PgPool, run_id: i64, error: &str) -> AnyResult<()> {
     sqlx::query(
         "UPDATE fetch_runs SET finished_at = now(), status = 'error', error = $1 WHERE id = $2",
     )

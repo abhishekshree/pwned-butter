@@ -23,12 +23,14 @@ export const OUTLET_TYPE_LABELS: Record<string, string> = {
   other: "Food Establishment",
 };
 
+// Mirrors domain::Status and the status CASE in migrations/0001_init.sql.
 export const STATUS_CONFIG: Record<
   string,
-  { label: string; tone: string; dot: string; edge: string; glow: string }
+  { label: string; chipLabel: string; tone: string; dot: string; edge: string; glow: string }
 > = {
   suspended: {
     label: "SUSPENDED",
+    chipLabel: "Suspended",
     tone: "text-red-600 dark:text-red-400 border-red-500/30 bg-red-500/10",
     dot: "bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.6)]",
     edge: "border-l-red-500 hover:border-l-red-400",
@@ -36,6 +38,7 @@ export const STATUS_CONFIG: Record<
   },
   reopened: {
     label: "REOPENED",
+    chipLabel: "Reopened",
     tone: "text-emerald-600 dark:text-emerald-400 border-emerald-500/30 bg-emerald-500/10",
     dot: "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]",
     edge: "border-l-emerald-500 hover:border-l-emerald-400",
@@ -43,6 +46,7 @@ export const STATUS_CONFIG: Record<
   },
   active: {
     label: "NOTICE / RAID",
+    chipLabel: "Active / Notices",
     tone: "text-amber-600 dark:text-amber-400 border-amber-500/30 bg-amber-500/10",
     dot: "bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,0.6)]",
     edge: "border-l-amber-500 hover:border-l-amber-400",

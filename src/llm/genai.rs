@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result as AnyResult};
 use genai::Client;
 use genai::adapter::AdapterKind;
 use genai::chat::{ChatMessage, ChatOptions, ChatRequest, JsonSpec};
@@ -8,16 +8,16 @@ use genai::resolver::AuthData;
 use serde_json::{Value, json};
 use tracing::warn;
 
-use crate::models::{LlmAction, NewsItem};
+use crate::domain::Article;
+use crate::models::LlmAction;
+use crate::report::RunMetrics;
 
-use super::triage::{Job, Verdict, parse_verdicts, triage_schema};
+use super::triage::{TRIAGE_PROMPT, Verdict, parse_verdicts, triage_schema};
 use super::{SYSTEM_PROMPT, strip_code_fences, truncate};
 
-pub(crate) const DEFAULT_OPENROUTER_MODEL: &str = "openrouter/free";
-pub(crate) const OPENROUTER_FALLBACKS: &[&str] = &["inclusionai/ling-3.2-flash:free"];
 const MAX_ATTEMPTS: usize = 3;
 
-pub(crate) fn client(api_key: &str, openrouter_key: Option<&str>) -> Result<Client> {
+pub(crate) fn client(api_key: &str, openrouter_key: Option<&str>) -> AnyResult<Client> {
     let mut builder = Client::builder()
         .append_provider_config(AdapterKind::Gemini, AuthData::from_single(api_key));
     if let Some(key) = openrouter_key {
@@ -34,17 +34,16 @@ fn json_options(max_tokens: u32, schema: Value) -> ChatOptions {
         .with_response_format(JsonSpec::new("response", schema))
 }
 
-/// Returns the text plus the number of attempts spent, so the caller can
-/// count calls even when every retry failed.
+/// Every attempt is counted so a fully failed batch stays visible in the metrics.
 async fn chat_text(
     client: &Client,
     model: &str,
     request: ChatRequest,
     options: &ChatOptions,
-) -> (Result<String>, usize) {
-    let mut calls = 0;
+    calls: &mut usize,
+) -> AnyResult<String> {
     for attempt in 0..MAX_ATTEMPTS {
-        calls += 1;
+        *calls += 1;
         let error = match client
             .exec_chat(model, request.clone(), Some(options))
             .await
@@ -53,29 +52,26 @@ async fn chat_text(
                 if let Some(text) = response.into_first_text()
                     && !text.trim().is_empty()
                 {
-                    return (Ok(text), calls);
+                    return Ok(text);
                 }
                 anyhow::anyhow!("genai response had no text")
             }
             Err(error) => anyhow::anyhow!("genai request failed: {error}"),
         };
         if attempt + 1 == MAX_ATTEMPTS {
-            return (Err(error), calls);
+            return Err(error);
         }
         tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
     }
     unreachable!("MAX_ATTEMPTS is nonzero")
 }
 
-/// Strict relevance pass over one chunk. Chunking already bounds the prompt —
-/// extraction sends the same full snippets in batches of 20 — so the model
-/// gets the article text, publication date and final URL, not a prefix.
 pub(crate) async fn triage_batch(
     client: &Client,
     model: &str,
-    chunk: &[NewsItem],
-    system: &str,
-) -> (Result<Vec<Verdict>>, usize) {
+    chunk: &[Article],
+    metrics: &mut RunMetrics,
+) -> AnyResult<Vec<Verdict>> {
     let items: Vec<Value> = chunk
         .iter()
         .enumerate()
@@ -90,43 +86,52 @@ pub(crate) async fn triage_batch(
             })
         })
         .collect();
-    let user = match serde_json::to_string(&json!({"items": items})) {
-        Ok(user) => user,
-        Err(error) => return (Err(error.into()), 0),
-    };
-    let request = ChatRequest::from_system(system).append_message(ChatMessage::user(user));
+    let user = serde_json::to_string(&json!({"items": items}))?;
+    let request = ChatRequest::from_system(TRIAGE_PROMPT).append_message(ChatMessage::user(user));
     let options = json_options(4096, triage_schema());
-    let (text, calls) = chat_text(client, model, request, &options).await;
-    (text.and_then(|text| parse_verdicts(&text)), calls)
+    let text = chat_text(client, model, request, &options, &mut metrics.triage_calls).await?;
+    parse_verdicts(&text)
 }
 
-pub(crate) async fn extract_batch(
+/// The model returns chunk-local indices; `absolute` resolves them and drops out-of-range values.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn extract_batch<'a>(
     client: &Client,
     model: &str,
-    chunk: &[Job<'_>],
+    chunk: &[&'a Article],
     openrouter_key: Option<&str>,
     openrouter_model: &str,
     openrouter_fallbacks: &[String],
-) -> (Result<Vec<LlmAction>>, usize) {
-    let user = match serde_json::to_string(&json!({
-        "items": chunk.iter().map(|job| job.item).collect::<Vec<_>>()
-    }))
-    .context("serialize news batch")
-    {
-        Ok(user) => user,
-        Err(error) => return (Err(error), 0),
-    };
+    metrics: &mut RunMetrics,
+) -> AnyResult<Vec<(&'a Article, LlmAction)>> {
+    let items: Vec<Value> = chunk
+        .iter()
+        .map(|item| {
+            json!({
+                "title": item.title,
+                "url": item.url,
+                "source": item.source,
+                "published": item.published,
+                "snippet": item.snippet,
+            })
+        })
+        .collect();
+    let user = serde_json::to_string(&json!({"items": items})).context("serialize news batch")?;
     let request = ChatRequest::from_system(SYSTEM_PROMPT).append_message(ChatMessage::user(user));
     let options = json_options(16_384, json!({"type": "array"}));
 
-    let mut calls = 0;
-    let (text, used) = chat_text(client, model, request.clone(), &options).await;
-    calls += used;
-    let gemini = text
-        .and_then(|text| parse_llm_text(&text))
-        .map(|actions| remap(actions, chunk));
+    let gemini = chat_text(
+        client,
+        model,
+        request.clone(),
+        &options,
+        &mut metrics.extraction_calls,
+    )
+    .await
+    .and_then(|text| parse_llm_text(&text))
+    .map(|actions| absolute(actions, chunk));
     match gemini {
-        Ok(actions) => return (Ok(actions), calls),
+        Ok(actions) => return Ok(actions),
         Err(error) => warn!(
             model,
             error = %format!("{error:#}"),
@@ -136,12 +141,7 @@ pub(crate) async fn extract_batch(
 
     warn!("all gemini models failed; falling back to openrouter");
     if openrouter_key.is_none() {
-        return (
-            Err(anyhow::anyhow!(
-                "gemini API failed and no OPENROUTER_API_KEY fallback configured"
-            )),
-            calls,
-        );
+        anyhow::bail!("gemini API failed and no OPENROUTER_API_KEY fallback configured");
     }
     let mut candidates = vec![openrouter_model.to_string()];
     candidates.extend(
@@ -153,20 +153,18 @@ pub(crate) async fn extract_batch(
     let mut last_error = anyhow::anyhow!("no OpenRouter model configured");
     for candidate in &candidates {
         let model = format!("open_router::{candidate}");
-        let (text, used) = chat_text(client, &model, request.clone(), &options).await;
-        calls += used;
-        match text {
-            Ok(text) => match parse_llm_text(&text) {
-                Ok(actions) => return (Ok(remap(actions, chunk)), calls),
-                Err(error) => {
-                    warn!(
-                        model = %candidate,
-                        error = %format!("{error:#}"),
-                        "openrouter model returned invalid output"
-                    );
-                    last_error = error;
-                }
-            },
+        let outcome = chat_text(
+            client,
+            &model,
+            request.clone(),
+            &options,
+            &mut metrics.extraction_calls,
+        )
+        .await
+        .and_then(|text| parse_llm_text(&text))
+        .map(|actions| absolute(actions, chunk));
+        match outcome {
+            Ok(actions) => return Ok(actions),
             Err(error) => {
                 warn!(
                     model = %candidate,
@@ -177,80 +175,26 @@ pub(crate) async fn extract_batch(
             }
         }
     }
-    (Err(last_error), calls)
+    Err(last_error)
 }
 
-pub(crate) async fn collapse_once(
-    client: &Client,
-    model: &str,
-    rows: &[crate::db::ActionInsert],
-    recent: &[crate::db::RecentEvent],
-) -> (Result<Vec<usize>>, usize) {
-    let record = |id: String,
-                  establishment: &str,
-                  action_type: &str,
-                  action_date: chrono::NaiveDate,
-                  city: &Option<String>,
-                  area: &Option<String>| {
-        json!({"id": id, "establishment": establishment, "actionType": action_type,
-            "actionDate": action_date.to_string(), "city": city, "area": area})
-    };
-    let new_items: Vec<Value> = rows
-        .iter()
-        .enumerate()
-        .map(|(i, row)| {
-            record(
-                format!("N{i}"),
-                &row.establishment,
-                &row.action_type.to_string(),
-                row.action_date,
-                &row.city,
-                &row.area,
-            )
-        })
-        .collect();
-    let known_items: Vec<Value> = recent
-        .iter()
-        .enumerate()
-        .map(|(i, event)| {
-            record(
-                format!("K{i}"),
-                &event.establishment,
-                &event.action_type,
-                event.action_date,
-                &event.city,
-                &event.area,
-            )
-        })
-        .collect();
-    let user = match serde_json::to_string(&json!({"new": new_items, "known": known_items})) {
-        Ok(user) => user,
-        Err(error) => return (Err(error.into()), 0),
-    };
-    let request = ChatRequest::from_system(include_str!("../prompts/dedupe.txt"))
-        .append_message(ChatMessage::user(user));
-    let options = json_options(
-        2048,
-        json!({"type": "object", "properties": {"groups": {"type": "array"}}}),
-    );
-    let (text, calls) = chat_text(client, model, request, &options).await;
-    let outcome = text
-        .and_then(|text| parse_groups(&text).map(|groups| drops_from_groups(&groups, rows.len())));
-    (outcome, calls)
-}
-
-fn remap(actions: Vec<LlmAction>, chunk: &[Job<'_>]) -> Vec<LlmAction> {
+fn absolute<'a>(actions: Vec<LlmAction>, chunk: &[&'a Article]) -> Vec<(&'a Article, LlmAction)> {
     actions
         .into_iter()
-        .filter_map(|mut action| {
-            let job = chunk.get(action.source_index)?;
-            action.source_index = job.orig;
-            Some(action)
+        .filter_map(|action| {
+            let Some(article) = chunk.get(action.source_index) else {
+                warn!(
+                    index = action.source_index,
+                    "extraction result index out of range"
+                );
+                return None;
+            };
+            Some((*article, action))
         })
         .collect()
 }
 
-pub(crate) fn parse_llm_text(text: &str) -> Result<Vec<LlmAction>> {
+pub(crate) fn parse_llm_text(text: &str) -> AnyResult<Vec<LlmAction>> {
     let text = strip_code_fences(text);
     let parsed: Value = serde_json::from_str(&text).map_err(|error| {
         anyhow::anyhow!(
@@ -323,54 +267,20 @@ fn clamp_opt(field: &mut Option<String>, max: usize) {
     }
 }
 
-pub(crate) fn parse_groups(text: &str) -> Result<Vec<Vec<String>>> {
-    let parsed: Value = serde_json::from_str(&strip_code_fences(text.trim())).map_err(|error| {
-        anyhow::anyhow!(
-            "dupe response invalid JSON: {error}; body: {}",
-            truncate(text, 300)
-        )
-    })?;
-    let groups = parsed
-        .get("groups")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow::anyhow!("dupe response missing \"groups\" array"))?;
-    Ok(groups
-        .iter()
-        .filter_map(Value::as_array)
-        .map(|ids| {
-            ids.iter()
-                .filter_map(|value| value.as_str().map(str::to_string))
-                .collect::<Vec<_>>()
-        })
-        .filter(|group| !group.is_empty())
-        .collect())
-}
-
-pub(crate) fn drops_from_groups(groups: &[Vec<String>], n_new: usize) -> Vec<usize> {
-    let mut drops = std::collections::BTreeSet::new();
-    for group in groups {
-        let mut news: Vec<usize> = group
-            .iter()
-            .filter_map(|id| id.strip_prefix('N').and_then(|n| n.parse().ok()))
-            .filter(|index| *index < n_new)
-            .collect();
-        news.sort_unstable();
-        news.dedup();
-        if news.is_empty() {
-            continue;
-        }
-        let touches_known = group.iter().any(|id| id.starts_with('K'));
-        for index in news.iter().skip(if touches_known { 0 } else { 1 }) {
-            drops.insert(*index);
-        }
-    }
-    drops.into_iter().collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::ActionType;
+
+    fn article(title: &str) -> Article {
+        Article {
+            title: title.into(),
+            url: "https://example.test/1".into(),
+            source: None,
+            published: None,
+            snippet: None,
+        }
+    }
 
     #[test]
     fn parses_fenced_actions_and_object_wrappers() {
@@ -402,16 +312,42 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_groups_drop_re_reports_and_keep_lowest_new_index() {
-        assert_eq!(
-            drops_from_groups(
-                &[
-                    vec!["N3".into(), "N1".into(), "N7".into()],
-                    vec!["K4".into(), "N2".into()]
-                ],
-                10
-            ),
-            vec![2, 3, 7]
+    fn attaches_source_articles_and_drops_out_of_range() {
+        let first = article("first");
+        let second = article("second");
+        let chunk: Vec<&Article> = vec![&first, &second];
+        let actions = vec![
+            LlmAction {
+                source_index: 1,
+                establishment: "B".into(),
+                ..Default::default()
+            },
+            LlmAction {
+                source_index: 0,
+                establishment: "A".into(),
+                ..Default::default()
+            },
+            LlmAction {
+                source_index: 7,
+                establishment: "out of range".into(),
+                ..Default::default()
+            },
+        ];
+
+        let result = absolute(actions, &chunk);
+
+        assert_eq!(result.len(), 2, "out-of-range index is dropped");
+        assert!(
+            std::ptr::eq(result[0].0, &second),
+            "chunk-local index 1 resolves to the second article"
         );
+        assert_eq!(result[0].1.establishment, "B");
+        assert_eq!(result[0].1.source_index, 1, "wire index is left untouched");
+        assert!(
+            std::ptr::eq(result[1].0, &first),
+            "chunk-local index 0 resolves to the first article"
+        );
+        assert_eq!(result[1].1.establishment, "A");
+        assert_eq!(result[1].1.source_index, 0, "wire index is left untouched");
     }
 }

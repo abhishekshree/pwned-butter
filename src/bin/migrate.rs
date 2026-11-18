@@ -1,11 +1,14 @@
+use anyhow::Result as AnyResult;
+use fda_mumbai_tracker::config::Config;
 use fda_mumbai_tracker::db;
+use tracing::info;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    dotenvy::dotenv().ok();
-    fda_mumbai_tracker::init_logging();
-    let pool = db::pool().await?;
+async fn main() -> AnyResult<()> {
+    fda_mumbai_tracker::init();
+    let config = Config::from_env()?;
+    let pool = db::pool(&config).await?;
     sqlx::migrate!("./migrations").run(pool).await?;
-    println!("migrations applied");
+    info!("migrations applied");
     Ok(())
 }

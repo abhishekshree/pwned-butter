@@ -20,8 +20,10 @@ SELECT COUNT(*), MAX(action_date), MAX(created_at) FROM actions;
 
 Runs with `articles_seen > 0 AND actions_upserted = 0` day after day =
 outage gap. The per-run Job Summary on the Actions page shows the same
-`run N ok: seen=X new=Y upserted=Z` line. Full stderr is downloadable
-without admin rights:
+`run ok: seen=X new=Y upserted=Z llm_calls=C triage_failures=T extraction_failures=E rejected=R`
+line; the three failure counters (`triage_failures`, `extraction_failures`,
+`rejected`) distinguish a clean empty run from a degraded one. Full stderr
+is downloadable without admin rights:
 
 ```bash
 J=$(gh api repos/abhishekshree/pwned-butter/actions/runs/<RUN_ID>/jobs --jq '.jobs[0].id')
@@ -179,9 +181,11 @@ Then open the dashboard and confirm the new cards render.
 
 ## Gotchas learned the hard way
 
-- Green runs mean nothing: always read `actions_upserted`, never the
-  checkmark. The pipeline still has no zero-streak alert — a degraded
-  run that salvages keyword records reports "0 failed batches".
+- Green runs mean nothing: always read `actions_upserted` and the failure
+  counters (`triage_failures`, `extraction_failures`, `rejected`) in the
+  run-summary line, never the checkmark. The pipeline still has no
+  zero-streak alert — an empty run with a low failure count can still be
+  degraded, so check all three counters.
 - The OpenRouter fallback 404s entirely when the account requires
   zero data retention (free endpoints offer none). Fix is at
   `openrouter.ai/settings/privacy`, not in code.

@@ -37,6 +37,11 @@ cargo run --release --bin local_scrape
 cd web && pnpm install && pnpm dev
 ```
 
+To run the full pipeline without touching Postgres, set `LOCAL_WRITER_PATH` to
+a JSONL file (e.g. `/tmp/fda-actions.jsonl`). RSS and Gemini still run; records
+and run summaries are appended to that file and its `.runs.jsonl` sibling
+instead of Neon.
+
 Tests (what CI runs) via [cargo-nextest](https://nexte.st):
 
 ```bash
