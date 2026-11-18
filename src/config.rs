@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result as AnyResult};
 
 pub const DEFAULT_GEMINI_MODEL: &str = "gemini-flash-latest";
 pub const DEFAULT_OPENROUTER_MODEL: &str = "openrouter/free";
@@ -21,7 +21,7 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn from_env() -> Result<Self> {
+    pub fn from_env() -> AnyResult<Self> {
         let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL is not set")?;
         let gemini_key = std::env::var("GEMINI_API_KEY").context("GEMINI_API_KEY is not set")?;
         let gemini_model =

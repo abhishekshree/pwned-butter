@@ -16,7 +16,15 @@ use reqwest::Client;
 
 static HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
 
-pub fn init_logging() {
+/// The single startup boundary for binaries: load `.env` into the process
+/// environment, then configure logging. `std::env::var` is the only reader,
+/// used by `Config::from_env` and by the cache-bust tool's own variables.
+pub fn init() {
+    dotenvy::dotenv().ok();
+    init_logging();
+}
+
+fn init_logging() {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let _ = tracing_subscriber::fmt()

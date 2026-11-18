@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Result as AnyResult, anyhow};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::warn;
@@ -41,7 +41,7 @@ pub(crate) fn triage_schema() -> Value {
     })
 }
 
-pub(crate) fn parse_verdicts(text: &str) -> Result<Vec<Verdict>> {
+pub(crate) fn parse_verdicts(text: &str) -> AnyResult<Vec<Verdict>> {
     let text = strip_code_fences(text);
     let parsed: Value = serde_json::from_str(&text)
         .map_err(|error| anyhow!("triage returned invalid JSON: {error}"))?;

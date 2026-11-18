@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result as AnyResult};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
@@ -16,7 +16,7 @@ use crate::report::{RunReport, StoreOutcome};
 static POOL: OnceLock<PgPool> = OnceLock::new();
 static POOL_LOCK: Mutex<()> = Mutex::const_new(());
 
-pub async fn pool(config: &Config) -> Result<&'static PgPool> {
+pub async fn pool(config: &Config) -> AnyResult<&'static PgPool> {
     if let Some(pool) = POOL.get() {
         return Ok(pool);
     }
@@ -34,7 +34,7 @@ pub async fn pool(config: &Config) -> Result<&'static PgPool> {
     Ok(POOL.get_or_init(|| pool))
 }
 
-pub async fn seen_urls(pool: &PgPool, cutoff: DateTime<Utc>) -> Result<HashSet<String>> {
+pub async fn seen_urls(pool: &PgPool, cutoff: DateTime<Utc>) -> AnyResult<HashSet<String>> {
     Ok(sqlx::query_scalar::<_, String>(
         "SELECT source_url FROM actions WHERE published_at > $1 OR published_at IS NULL",
     )
@@ -52,10 +52,10 @@ const INSERT_TAIL: &str = "establishment, area, city, brand, operator, outlet_ty
 type Tx = sqlx::Transaction<'static, sqlx::Postgres>;
 
 /// Tx goes in by value and comes back out so callers compile on stable.
-async fn transact<T, F, Fut>(pool: &PgPool, f: F) -> Result<T>
+async fn transact<T, F, Fut>(pool: &PgPool, f: F) -> AnyResult<T>
 where
     F: FnOnce(Tx) -> Fut,
-    Fut: std::future::Future<Output = Result<(Tx, T)>>,
+    Fut: std::future::Future<Output = AnyResult<(Tx, T)>>,
 {
     let tx = pool.begin().await?;
     let (tx, out) = f(tx).await?;
@@ -67,7 +67,7 @@ async fn execute_insert(
     conn: &mut sqlx::PgConnection,
     r: &Candidate,
     conflict_tail: &str,
-) -> Result<u64> {
+) -> AnyResult<u64> {
     let sql = format!(
         "INSERT INTO actions ({INSERT_TAIL}) VALUES \
          ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) \
@@ -99,7 +99,7 @@ async fn execute_insert(
 
 /// The single Rust write path. `same_event` is the one Rust dedup authority;
 /// the SQL EXCLUDE constraint remains the final backstop.
-pub async fn upsert_actions(pool: &PgPool, rows: &[Candidate]) -> Result<StoreOutcome> {
+pub async fn upsert_actions(pool: &PgPool, rows: &[Candidate]) -> AnyResult<StoreOutcome> {
     transact(pool, |mut tx| async move {
         let mut outcome = StoreOutcome::default();
         for r in rows {
@@ -205,7 +205,7 @@ fn same_event(a: &str, b: &str) -> bool {
     side_matches(&ta, &tb) || side_matches(&tb, &ta)
 }
 
-pub async fn begin_run(pool: &PgPool) -> Result<i64> {
+pub async fn begin_run(pool: &PgPool) -> AnyResult<i64> {
     let row = sqlx::query("INSERT INTO fetch_runs (status) VALUES ('running') RETURNING id")
         .fetch_one(pool)
         .await?;
@@ -217,7 +217,7 @@ pub async fn finish_run(
     run_id: i64,
     report: &RunReport,
     details: &Value,
-) -> Result<()> {
+) -> AnyResult<()> {
     // Caller-supplied keys are kept, then the typed metrics win on collision
     // so the report always carries the true counts.
     let mut merged = serde_json::Map::new();
@@ -258,7 +258,7 @@ pub async fn finish_run(
     Ok(())
 }
 
-pub async fn fail_run(pool: &PgPool, run_id: i64, error: &str) -> Result<()> {
+pub async fn fail_run(pool: &PgPool, run_id: i64, error: &str) -> AnyResult<()> {
     sqlx::query(
         "UPDATE fetch_runs SET finished_at = now(), status = 'error', error = $1 WHERE id = $2",
     )

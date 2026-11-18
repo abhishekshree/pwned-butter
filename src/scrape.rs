@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::Result as AnyResult;
 use chrono::{Duration as ChronoDuration, Utc};
 use serde_json::json;
 
@@ -8,7 +8,7 @@ use crate::llm;
 use crate::news;
 use crate::report::{RunMetrics, RunReport, StoreOutcome};
 
-pub async fn run_scrape(config: &Config) -> Result<RunReport> {
+pub async fn run_scrape(config: &Config) -> AnyResult<RunReport> {
     // Google News indexes regional reports hours late; an overlapping window
     // with dedup beats a one-shot daily fetch.
     run_with_window(config, "when:3d", 21, news::MAX_ITEMS).await
@@ -19,7 +19,7 @@ pub async fn run_with_window(
     window: &str,
     seen_days: i64,
     max_items: usize,
-) -> Result<RunReport> {
+) -> AnyResult<RunReport> {
     let pool = db::pool(config).await?;
     let run_id = db::begin_run(pool).await?;
 
@@ -47,7 +47,7 @@ async fn scrape_once(
     window: &str,
     seen_days: i64,
     max_items: usize,
-) -> Result<RunReport> {
+) -> AnyResult<RunReport> {
     let client = crate::http_client();
     let seen = Utc::now() - ChronoDuration::days(seen_days);
 

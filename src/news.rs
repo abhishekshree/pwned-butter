@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result as AnyResult};
 use chrono::{DateTime, Utc};
 use rss::Channel;
 use scraper::{Html, Selector};
@@ -64,7 +64,7 @@ where
 
 /// One retry covers Google News' transient 503 storms; a sustained IP-level
 /// block still surfaces as `seen=0` in the run summary.
-async fn fetch_feed(client: &reqwest::Client, url: &str) -> Result<Vec<NewsItem>> {
+async fn fetch_feed(client: &reqwest::Client, url: &str) -> AnyResult<Vec<NewsItem>> {
     match fetch_feed_once(client, url).await {
         Ok(items) => Ok(items),
         Err(first) => {
@@ -76,7 +76,7 @@ async fn fetch_feed(client: &reqwest::Client, url: &str) -> Result<Vec<NewsItem>
     }
 }
 
-async fn fetch_feed_once(client: &reqwest::Client, url: &str) -> Result<Vec<NewsItem>> {
+async fn fetch_feed_once(client: &reqwest::Client, url: &str) -> AnyResult<Vec<NewsItem>> {
     let resp = client
         .get(url)
         .send()
@@ -112,7 +112,7 @@ async fn fetch_feed_once(client: &reqwest::Client, url: &str) -> Result<Vec<News
     Ok(items)
 }
 
-pub async fn fetch_items(client: &reqwest::Client, window: &str) -> Result<Vec<NewsItem>> {
+pub async fn fetch_items(client: &reqwest::Client, window: &str) -> AnyResult<Vec<NewsItem>> {
     let jobs = rules()
         .news
         .queries
@@ -239,7 +239,7 @@ struct FetchedArticle {
     snippet: Option<String>,
 }
 
-async fn fetch_article(client: &reqwest::Client, url: &str) -> Result<FetchedArticle> {
+async fn fetch_article(client: &reqwest::Client, url: &str) -> AnyResult<FetchedArticle> {
     let resp = client
         .get(url)
         .send()

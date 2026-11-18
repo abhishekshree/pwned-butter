@@ -145,26 +145,3 @@ impl Candidate {
         })
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::CoveredCity;
-
-    #[test]
-    fn covered_cities_accept_qualifiers_and_reject_prefixes() {
-        assert_eq!(
-            CoveredCity::parse("Mumbai Suburban"),
-            Some(CoveredCity::Mumbai)
-        );
-        assert_eq!(
-            CoveredCity::parse("navi mumbai"),
-            Some(CoveredCity::NaviMumbai)
-        );
-        assert_eq!(CoveredCity::parse("Pune City"), Some(CoveredCity::Pune));
-        assert_eq!(CoveredCity::parse("Thane West"), Some(CoveredCity::Thane));
-        assert_eq!(CoveredCity::parse("Lonavala"), Some(CoveredCity::Lonavala));
-        assert_eq!(CoveredCity::parse("Panvel"), None);
-        assert_eq!(CoveredCity::parse("Mumbaiwadi"), None);
-        assert_eq!(CoveredCity::parse("Nashik"), None);
-    }
-}

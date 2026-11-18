@@ -695,6 +695,7 @@ dependencies = [
  "sqlx",
  "strum",
  "test-case",
+ "thiserror",
  "tokio",
  "toml",
  "tracing",

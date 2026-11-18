@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result as AnyResult, anyhow};
 use tracing::{debug, info, warn};
 
 use crate::config::Config;
@@ -37,7 +37,7 @@ pub(crate) async fn triage<'a>(
     model: &str,
     items: &'a [Article],
     metrics: &mut RunMetrics,
-) -> Result<Vec<&'a Article>> {
+) -> AnyResult<Vec<&'a Article>> {
     if items.is_empty() {
         return Ok(Vec::new());
     }
@@ -86,7 +86,7 @@ pub async fn extract(
     config: &Config,
     items: &[Article],
     metrics: &mut RunMetrics,
-) -> Result<Vec<Candidate>> {
+) -> AnyResult<Vec<Candidate>> {
     let articles = triage(&config.gemini_key, &config.gemini_model, items, metrics).await?;
     info!(relevant = articles.len(), total = items.len(), "llm triage");
     if articles.is_empty() {

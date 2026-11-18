@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result as AnyResult};
 use genai::Client;
 use genai::adapter::AdapterKind;
 use genai::chat::{ChatMessage, ChatOptions, ChatRequest, JsonSpec};
@@ -17,7 +17,7 @@ use super::{SYSTEM_PROMPT, strip_code_fences, truncate};
 
 const MAX_ATTEMPTS: usize = 3;
 
-pub(crate) fn client(api_key: &str, openrouter_key: Option<&str>) -> Result<Client> {
+pub(crate) fn client(api_key: &str, openrouter_key: Option<&str>) -> AnyResult<Client> {
     let mut builder = Client::builder()
         .append_provider_config(AdapterKind::Gemini, AuthData::from_single(api_key));
     if let Some(key) = openrouter_key {
@@ -42,7 +42,7 @@ async fn chat_text(
     request: ChatRequest,
     options: &ChatOptions,
     calls: &mut usize,
-) -> Result<String> {
+) -> AnyResult<String> {
     for attempt in 0..MAX_ATTEMPTS {
         *calls += 1;
         let error = match client
@@ -73,7 +73,7 @@ pub(crate) async fn triage_batch(
     model: &str,
     chunk: &[Article],
     metrics: &mut RunMetrics,
-) -> Result<Vec<Verdict>> {
+) -> AnyResult<Vec<Verdict>> {
     let items: Vec<Value> = chunk
         .iter()
         .enumerate()
@@ -107,7 +107,7 @@ pub(crate) async fn extract_batch<'a>(
     openrouter_model: &str,
     openrouter_fallbacks: &[String],
     metrics: &mut RunMetrics,
-) -> Result<Vec<(&'a Article, LlmAction)>> {
+) -> AnyResult<Vec<(&'a Article, LlmAction)>> {
     let items: Vec<Value> = chunk
         .iter()
         .map(|job| {
@@ -201,7 +201,7 @@ fn absolute<'a>(actions: Vec<LlmAction>, chunk: &[Job<'a>]) -> Vec<(&'a Article,
         .collect()
 }
 
-pub(crate) fn parse_llm_text(text: &str) -> Result<Vec<LlmAction>> {
+pub(crate) fn parse_llm_text(text: &str) -> AnyResult<Vec<LlmAction>> {
     let text = strip_code_fences(text);
     let parsed: Value = serde_json::from_str(&text).map_err(|error| {
         anyhow::anyhow!(

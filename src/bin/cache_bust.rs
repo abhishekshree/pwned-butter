@@ -1,23 +1,25 @@
 use std::env;
 
+use anyhow::{Context, Result as AnyResult, bail};
+use tracing::info;
+
 // POSTs to the dashboard's /api/revalidate route to clear the cached
 // queries after a backfill or fix. Usage:
 //   REVALIDATE_URL=https://<domain>/api/revalidate REVALIDATE_SECRET=... cargo run --bin cache_bust [tag...]
 // URL can also be passed as the first arg when it ends with /api/revalidate.
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    dotenvy::dotenv().ok();
-    fda_mumbai_tracker::init_logging();
+async fn main() -> AnyResult<()> {
+    fda_mumbai_tracker::init();
     let mut args = env::args().skip(1).collect::<Vec<_>>();
     let mut url = env::var("REVALIDATE_URL").unwrap_or_default();
     if args.first().is_some_and(|a| a.contains("/api/revalidate")) {
         url = args.remove(0);
     }
     if url.is_empty() {
-        return Err("set REVALIDATE_URL env or pass the /api/revalidate URL as first arg".into());
+        bail!("set REVALIDATE_URL env or pass the /api/revalidate URL as first arg");
     }
     let secret = env::var("REVALIDATE_SECRET")
-        .map_err(|_| "set REVALIDATE_SECRET env (must match Vercel project env)")?;
+        .context("set REVALIDATE_SECRET env (must match Vercel project env)")?;
     let tags = if args.is_empty() {
         vec!["actions".to_string()]
     } else {
@@ -31,9 +33,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     let status = res.status();
     let body = res.text().await?;
-    println!("{status}: {body}");
+    info!("{status}: {body}");
     if !status.is_success() {
-        return Err(format!("revalidate failed: {status}").into());
+        bail!("revalidate failed: {status}");
     }
     Ok(())
 }
