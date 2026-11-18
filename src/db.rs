@@ -10,6 +10,7 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 
 use crate::models::{ActionType, OutletType};
+use crate::scrape::ScrapeReport;
 
 static POOL: OnceLock<PgPool> = OnceLock::new();
 
@@ -191,19 +192,6 @@ pub async fn upsert_actions(pool: &PgPool, rows: &[ActionInsert]) -> Result<usiz
     .await
 }
 
-/// Insert rows, skipping any that already exist on
-/// (source_url, establishment, action_date). Zero overwrite.
-pub async fn insert_actions(pool: &PgPool, rows: &[ActionInsert]) -> Result<usize> {
-    transact(pool, |mut tx| async move {
-        let mut inserted: usize = 0;
-        for r in rows {
-            inserted += usize::try_from(execute_insert(&mut tx, r, "DO NOTHING").await?)?;
-        }
-        Ok((tx, inserted))
-    })
-    .await
-}
-
 /// Replace a date window of rows with a fresh, deduped extraction. Rows are
 /// deleted by published_at/action_date (Google News URLs rotate between
 /// fetches, so source_url is not a stable key), then inserted with
@@ -310,10 +298,7 @@ pub async fn begin_run(pool: &PgPool) -> Result<i64> {
 pub async fn finish_run(
     pool: &PgPool,
     run_id: i64,
-    articles_seen: usize,
-    articles_new: usize,
-    actions_upserted: usize,
-    llm_calls: usize,
+    report: &ScrapeReport,
     details: &Value,
 ) -> Result<()> {
     sqlx::query(
@@ -321,10 +306,10 @@ pub async fn finish_run(
          articles_seen = $1, articles_new = $2, actions_upserted = $3, llm_calls = $4, details = $5
          WHERE id = $6",
     )
-    .bind(i64::try_from(articles_seen)?)
-    .bind(i64::try_from(articles_new)?)
-    .bind(i64::try_from(actions_upserted)?)
-    .bind(i64::try_from(llm_calls)?)
+    .bind(i64::try_from(report.articles_seen)?)
+    .bind(i64::try_from(report.articles_new)?)
+    .bind(i64::try_from(report.actions_upserted)?)
+    .bind(i64::try_from(report.llm_calls)?)
     .bind(details)
     .bind(run_id)
     .execute(pool)

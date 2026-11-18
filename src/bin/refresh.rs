@@ -9,6 +9,7 @@ use fda_mumbai_tracker::{db, llm, news, scrape};
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
+    fda_mumbai_tracker::init_logging();
     let (gemini_key, model) = fda_mumbai_tracker::load_config()?;
     let window = std::env::args().nth(1).unwrap_or_else(|| "when:3d".into());
     let days = std::env::args()

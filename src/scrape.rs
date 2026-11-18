@@ -47,10 +47,7 @@ pub async fn run_with_window(
             db::finish_run(
                 pool,
                 run_id,
-                report.articles_seen,
-                report.articles_new,
-                report.actions_upserted,
-                report.llm_calls,
+                &report,
                 &json!({"model": model, "window": window, "delivery": scope == Scope::Delivery}),
             )
             .await?;

@@ -21,7 +21,7 @@ const NO_ACTION_YET: &[&str] = &[
 /// ("IIT Bombay Hostel Canteen (Hostels 12, 13 & 14)").
 const MAX_ESTABLISHMENT_WORDS: usize = 9;
 /// Shortest genuine details in history is 43 chars; floor at 20.
-const MIN_DETAILS_CHARS: usize = 20;
+pub(crate) const MIN_DETAILS_CHARS: usize = 20;
 
 /// Post-LLM quality gate: better no record than a wrong one. Every rule is
 /// calibrated against the pre-Sept-2026 history (67/67 rows pass) and each

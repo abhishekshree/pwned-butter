@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 
 use anyhow::{Result, anyhow};
+use tracing::{debug, info, warn};
 
 use crate::db::{ActionInsert, RecentEvent};
 use crate::models::{LlmAction, NewsItem, Scope};
@@ -46,15 +47,11 @@ pub async fn extract(
 ) -> Result<(Vec<LlmAction>, usize)> {
     let mut jobs = Vec::new();
     for (orig, item) in items.iter().enumerate() {
-        if triage::triage(&triage::haystack(item)).is_some() {
+        if triage::triage(&item.haystack()).is_some() {
             jobs.push(triage::Job { orig, item });
         }
     }
-    eprintln!(
-        "llm pre-filter: {}/{} items relevant",
-        jobs.len(),
-        items.len()
-    );
+    info!(relevant = jobs.len(), total = items.len(), "llm pre-filter");
     if jobs.is_empty() {
         return Ok((Vec::new(), 0));
     }
@@ -79,22 +76,23 @@ pub async fn extract(
                 .collect()
         });
 
+    let client = genai::client(api_key, openrouter_key.as_deref())?;
     let mut calls = 0;
     let mut actions = Vec::new();
     let mut failed = 0;
     for (batch_no, chunk) in jobs.chunks(BATCH_SIZE).enumerate() {
-        match genai::extract_batch(
-            api_key,
+        let (batch, used) = genai::extract_batch(
+            &client,
             model,
             chunk,
-            &mut calls,
             scope,
             openrouter_key.as_deref(),
             &openrouter_model,
             &openrouter_fallbacks,
         )
-        .await
-        {
+        .await;
+        calls += used;
+        match batch {
             // Gate LLM output only. Rule-fallback rows are grounded in a real
             // headline and have no LLM to name a city or tighten the name, so
             // the calibration below would drop every one of them exactly when
@@ -102,9 +100,10 @@ pub async fn extract(
             Ok(batch) => actions.extend(batch.into_iter().filter(|a| match quality::check(a) {
                 Ok(()) => true,
                 Err(reason) => {
-                    eprintln!(
-                        "dropping low-quality LLM record ({reason}): {}",
-                        truncate(&a.establishment, 80)
+                    warn!(
+                        reason,
+                        establishment = %truncate(&a.establishment, 80),
+                        "dropping low-quality LLM record"
                     );
                     false
                 }
@@ -130,23 +129,21 @@ pub async fn extract(
         .map(genai::sanitize_action)
         .collect();
 
-    eprintln!(
-        "llm: {calls} calls, {failed} failed batches, {} extracted actions",
-        actions.len()
+    info!(
+        calls,
+        failed_batches = failed,
+        actions = actions.len(),
+        "llm extraction done"
     );
     for a in &actions {
-        eprintln!(
-            "  record: {} | {} | {} | {} | violations={} | details={}",
-            a.establishment,
-            a.city.as_deref().unwrap_or("-"),
-            a.action_type,
-            a.action_date.as_deref().unwrap_or("-"),
-            if a.violations.is_empty() {
-                "-".to_string()
-            } else {
-                a.violations.join("; ")
-            },
-            a.details.as_deref().unwrap_or("-"),
+        debug!(
+            establishment = %a.establishment,
+            city = a.city.as_deref().unwrap_or("-"),
+            action_type = %a.action_type,
+            action_date = a.action_date.as_deref().unwrap_or("-"),
+            violations = %a.violations.join("; "),
+            details = a.details.as_deref().unwrap_or("-"),
+            "record"
         );
     }
 
@@ -165,11 +162,14 @@ fn salvaged(
     let n = chunk.len();
     if kept.is_empty() {
         *failed += 1;
-        eprintln!("llm batch {batch_no} ({n} items) failed: {err:#}");
+        warn!(batch = batch_no, items = n, error = %format!("{err:#}"), "llm batch failed");
     } else {
-        eprintln!(
-            "llm batch {batch_no} ({n} items) failed ({err:#}); rule fallback kept {}",
-            kept.len()
+        warn!(
+            batch = batch_no,
+            items = n,
+            kept = kept.len(),
+            error = %format!("{err:#}"),
+            "llm batch failed; rule fallback kept records"
         );
     }
     kept
@@ -185,11 +185,15 @@ pub async fn collapse_dupes(
     rows: &[ActionInsert],
     recent: &[RecentEvent],
 ) -> (Vec<usize>, usize) {
-    let mut calls = 0;
-    match genai::collapse_once(api_key, model, rows, recent, &mut calls).await {
+    // ponytail: collapse has no OpenRouter fallback, so its own client is fine.
+    let (outcome, calls) = match genai::client(api_key, None) {
+        Ok(client) => genai::collapse_once(&client, model, rows, recent).await,
+        Err(error) => (Err(error), 0),
+    };
+    match outcome {
         Ok(drops) => (drops, calls),
         Err(e) => {
-            eprintln!("dupe-collapse llm failed ({e:#}); using name heuristics only");
+            warn!(error = %format!("{e:#}"), "dupe-collapse llm failed; using name heuristics only");
             (Vec::new(), calls)
         }
     }

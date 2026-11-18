@@ -1,20 +1,12 @@
 use crate::models::{ActionType, LlmAction, NewsItem};
 
+use super::quality::MIN_DETAILS_CHARS;
+
 /// A relevance-filtered batch item; `orig` indexes the caller's `items`
 /// slice so `source_index` still addresses it for `build_rows`.
 pub(crate) struct Job<'a> {
     pub(crate) orig: usize,
     pub(crate) item: &'a NewsItem,
-}
-
-pub(crate) fn haystack(it: &NewsItem) -> String {
-    format!(
-        "{} {} {}",
-        it.title,
-        it.snippet.as_deref().unwrap_or(""),
-        it.source.as_deref().unwrap_or("")
-    )
-    .to_lowercase()
 }
 
 /// Keyword rules as data, not branches: each entry is alternative
@@ -107,7 +99,7 @@ const CORROBORATION: &[&str] = &["fda", "food safety", "licence", "license"];
 /// Keyword signal plus a corroboration gate for ambiguous action types.
 /// `hay` must already be lowercase: needle matching and the `CORROBORATION`
 /// checks are case-sensitive `contains` calls. Callers build `hay` with
-/// [`haystack`], which lowercases title + snippet + source.
+/// [`NewsItem::haystack`], which lowercases title + snippet + source.
 pub(crate) fn triage(hay: &str) -> Option<ActionType> {
     let hay = hay.to_lowercase();
     let action = signal(&hay)?;
@@ -208,7 +200,7 @@ fn clean_establishment_name(raw: &str) -> String {
 pub(crate) fn rule_extract(jobs: &[Job<'_>]) -> Vec<LlmAction> {
     jobs.iter()
         .filter_map(|j| {
-            let action_type = triage(&haystack(j.item))?;
+            let action_type = triage(&j.item.haystack())?;
             let name: String = j
                 .item
                 .title
@@ -242,7 +234,7 @@ pub(crate) fn rule_extract(jobs: &[Job<'_>]) -> Vec<LlmAction> {
                     .unwrap_or("")
                     .chars()
                     .count()
-                    < 20
+                    < MIN_DETAILS_CHARS
                 {
                     action.details = Some(format!("FDA enforcement action: {}", j.item.title));
                 }

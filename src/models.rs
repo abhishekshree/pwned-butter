@@ -13,6 +13,19 @@ pub struct NewsItem {
     pub snippet: Option<String>,
 }
 
+/// Lowercased title, snippet and publisher, for keyword scoring and triage.
+impl NewsItem {
+    pub fn haystack(&self) -> String {
+        format!(
+            "{} {} {}",
+            self.title,
+            self.snippet.as_deref().unwrap_or(""),
+            self.source.as_deref().unwrap_or("")
+        )
+        .to_lowercase()
+    }
+}
+
 /// Extraction profile. `Delivery` adds the delivery-only prompt and keeps only
 /// outlets with a platform listing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

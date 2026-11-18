@@ -7,6 +7,7 @@ use std::env;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
+    fda_mumbai_tracker::init_logging();
     let mut args = env::args().skip(1).collect::<Vec<_>>();
     let mut url = env::var("REVALIDATE_URL").unwrap_or_default();
     if args.first().is_some_and(|a| a.contains("/api/revalidate")) {

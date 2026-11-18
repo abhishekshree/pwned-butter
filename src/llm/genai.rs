@@ -6,6 +6,7 @@ use genai::adapter::AdapterKind;
 use genai::chat::{ChatMessage, ChatOptions, ChatRequest, JsonSpec};
 use genai::resolver::AuthData;
 use serde_json::{Value, json};
+use tracing::warn;
 
 use crate::models::{LlmAction, Scope};
 
@@ -33,15 +34,17 @@ fn json_options(max_tokens: u32, schema: Value) -> ChatOptions {
         .with_response_format(JsonSpec::new("response", schema))
 }
 
+/// Returns the text plus the number of attempts spent, so the caller can
+/// count calls even when every retry failed.
 async fn chat_text(
     client: &Client,
     model: &str,
     request: ChatRequest,
     options: &ChatOptions,
-    calls: &mut usize,
-) -> Result<String> {
+) -> (Result<String>, usize) {
+    let mut calls = 0;
     for attempt in 0..MAX_ATTEMPTS {
-        *calls += 1;
+        calls += 1;
         let error = match client
             .exec_chat(model, request.clone(), Some(options))
             .await
@@ -50,40 +53,42 @@ async fn chat_text(
                 if let Some(text) = response.into_first_text()
                     && !text.trim().is_empty()
                 {
-                    return Ok(text);
+                    return (Ok(text), calls);
                 }
                 anyhow::anyhow!("genai response had no text")
             }
             Err(error) => anyhow::anyhow!("genai request failed: {error}"),
         };
         if attempt + 1 == MAX_ATTEMPTS {
-            return Err(error);
+            return (Err(error), calls);
         }
         tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
     }
     unreachable!("MAX_ATTEMPTS is nonzero")
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn extract_batch(
-    api_key: &str,
+    client: &Client,
     model: &str,
     chunk: &[Job<'_>],
-    calls: &mut usize,
     scope: Scope,
     openrouter_key: Option<&str>,
     openrouter_model: &str,
     openrouter_fallbacks: &[String],
-) -> Result<Vec<LlmAction>> {
-    let client = client(api_key, openrouter_key)?;
-    let user = serde_json::to_string(&json!({
+) -> (Result<Vec<LlmAction>>, usize) {
+    let user = match serde_json::to_string(&json!({
         "items": chunk.iter().map(|job| job.item).collect::<Vec<_>>()
     }))
-    .context("serialize news batch")?;
+    .context("serialize news batch")
+    {
+        Ok(user) => user,
+        Err(error) => return (Err(error), 0),
+    };
     let request =
         ChatRequest::from_system(system_prompt(scope)).append_message(ChatMessage::user(user));
     let options = json_options(16_384, json!({"type": "array"}));
 
+    let mut calls = 0;
     let mut gemini_models = vec![model];
     for fallback in crate::llm::GEMINI_FALLBACK_MODELS {
         if *fallback != model {
@@ -91,20 +96,33 @@ pub(crate) async fn extract_batch(
         }
     }
     for candidate in gemini_models {
-        match chat_text(&client, candidate, request.clone(), &options, calls).await {
+        let (text, used) = chat_text(client, candidate, request.clone(), &options).await;
+        calls += used;
+        match text {
             Ok(text) => match parse_llm_text(&text) {
-                Ok(actions) => return Ok(remap(actions, chunk)),
-                Err(error) => {
-                    eprintln!("gemini model {candidate} returned invalid output: {error:#}")
-                }
+                Ok(actions) => return (Ok(remap(actions, chunk)), calls),
+                Err(error) => warn!(
+                    model = candidate,
+                    error = %format!("{error:#}"),
+                    "gemini model returned invalid output"
+                ),
             },
-            Err(error) => eprintln!("gemini model {candidate} failed: {error:#}"),
+            Err(error) => warn!(
+                model = candidate,
+                error = %format!("{error:#}"),
+                "gemini model failed"
+            ),
         }
     }
 
-    eprintln!("all gemini models failed; falling back to openrouter");
+    warn!("all gemini models failed; falling back to openrouter");
     if openrouter_key.is_none() {
-        anyhow::bail!("gemini API failed and no OPENROUTER_API_KEY fallback configured");
+        return (
+            Err(anyhow::anyhow!(
+                "gemini API failed and no OPENROUTER_API_KEY fallback configured"
+            )),
+            calls,
+        );
     }
     let mut candidates = vec![openrouter_model.to_string()];
     candidates.extend(
@@ -113,33 +131,48 @@ pub(crate) async fn extract_batch(
             .filter(|fallback| *fallback != openrouter_model)
             .cloned(),
     );
-    let last_candidate = candidates
-        .pop()
-        .ok_or_else(|| anyhow::anyhow!("no OpenRouter model configured"))?;
+    let last_candidate = match candidates.pop() {
+        Some(candidate) => candidate,
+        None => {
+            return (
+                Err(anyhow::anyhow!("no OpenRouter model configured")),
+                calls,
+            );
+        }
+    };
     for candidate in candidates {
         let model = format!("open_router::{candidate}");
-        match chat_text(&client, &model, request.clone(), &options, calls).await {
+        let (text, used) = chat_text(client, &model, request.clone(), &options).await;
+        calls += used;
+        match text {
             Ok(text) => match parse_llm_text(&text) {
-                Ok(actions) => return Ok(remap(actions, chunk)),
-                Err(error) => {
-                    eprintln!("openrouter model {candidate} returned invalid output: {error:#}")
-                }
+                Ok(actions) => return (Ok(remap(actions, chunk)), calls),
+                Err(error) => warn!(
+                    model = %candidate,
+                    error = %format!("{error:#}"),
+                    "openrouter model returned invalid output"
+                ),
             },
-            Err(error) => eprintln!("openrouter model {candidate} failed: {error:#}"),
+            Err(error) => warn!(
+                model = %candidate,
+                error = %format!("{error:#}"),
+                "openrouter model failed"
+            ),
         }
     }
     let model = format!("open_router::{last_candidate}");
-    let text = chat_text(&client, &model, request, &options, calls).await?;
-    Ok(remap(parse_llm_text(&text)?, chunk))
+    let (text, used) = chat_text(client, &model, request, &options).await;
+    calls += used;
+    let outcome = text.and_then(|text| parse_llm_text(&text).map(|actions| remap(actions, chunk)));
+    (outcome, calls)
 }
 
 pub(crate) async fn collapse_once(
-    api_key: &str,
+    client: &Client,
     model: &str,
     rows: &[crate::db::ActionInsert],
     recent: &[crate::db::RecentEvent],
-    calls: &mut usize,
-) -> Result<Vec<usize>> {
+) -> (Result<Vec<usize>>, usize) {
     let record = |id: String,
                   establishment: &str,
                   action_type: &str,
@@ -177,18 +210,20 @@ pub(crate) async fn collapse_once(
             )
         })
         .collect();
-    let request = ChatRequest::from_system(include_str!("../prompts/dedupe.txt")).append_message(
-        ChatMessage::user(serde_json::to_string(
-            &json!({"new": new_items, "known": known_items}),
-        )?),
-    );
+    let user = match serde_json::to_string(&json!({"new": new_items, "known": known_items})) {
+        Ok(user) => user,
+        Err(error) => return (Err(error.into()), 0),
+    };
+    let request = ChatRequest::from_system(include_str!("../prompts/dedupe.txt"))
+        .append_message(ChatMessage::user(user));
     let options = json_options(
         2048,
         json!({"type": "object", "properties": {"groups": {"type": "array"}}}),
     );
-    let client = client(api_key, None)?;
-    let text = chat_text(&client, model, request, &options, calls).await?;
-    Ok(drops_from_groups(&parse_groups(&text)?, rows.len()))
+    let (text, calls) = chat_text(client, model, request, &options).await;
+    let outcome = text
+        .and_then(|text| parse_groups(&text).map(|groups| drops_from_groups(&groups, rows.len())));
+    (outcome, calls)
 }
 
 fn remap(actions: Vec<LlmAction>, chunk: &[Job<'_>]) -> Vec<LlmAction> {
@@ -225,9 +260,10 @@ pub(crate) fn parse_llm_text(text: &str) -> Result<Vec<LlmAction>> {
     for value in raw {
         match serde_json::from_value(value.clone()) {
             Ok(action) => actions.push(action),
-            Err(error) => eprintln!(
-                "dropping invalid LLM record: {error}: {}",
-                truncate(&value.to_string(), 200)
+            Err(error) => warn!(
+                error = %format!("{error:#}"),
+                record = %truncate(&value.to_string(), 200),
+                "dropping invalid LLM record"
             ),
         }
     }

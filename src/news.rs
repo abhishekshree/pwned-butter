@@ -180,13 +180,7 @@ pub async fn fetch_items(client: &reqwest::Client, window: &str) -> Result<Vec<N
 /// publisher pages. This is only a priority signal, never an exclusion: a
 /// lower-scoring item still gets selected when there is room.
 fn enforcement_score(item: &NewsItem) -> u8 {
-    let haystack = format!(
-        "{} {} {}",
-        item.title,
-        item.snippet.as_deref().unwrap_or(""),
-        item.source.as_deref().unwrap_or("")
-    )
-    .to_lowercase();
+    let haystack = item.haystack();
 
     let mut score = 0;
     if haystack.contains("maharashtra fda")

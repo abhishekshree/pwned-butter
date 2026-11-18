@@ -18,7 +18,6 @@ pub fn init_logging() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
-        .without_time()
         .with_target(false)
         .try_init();
 }

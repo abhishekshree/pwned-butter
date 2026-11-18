@@ -3,6 +3,7 @@ use fda_mumbai_tracker::scrape::run_scrape;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
+    fda_mumbai_tracker::init_logging();
     let (gemini_key, model) = fda_mumbai_tracker::load_config()?;
 
     let (run_id, report) = run_scrape(&gemini_key, &model).await?;
