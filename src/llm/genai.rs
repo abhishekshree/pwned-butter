@@ -89,30 +89,18 @@ pub(crate) async fn extract_batch(
     let options = json_options(16_384, json!({"type": "array"}));
 
     let mut calls = 0;
-    let mut gemini_models = vec![model];
-    for fallback in crate::llm::GEMINI_FALLBACK_MODELS {
-        if *fallback != model {
-            gemini_models.push(*fallback);
-        }
-    }
-    for candidate in gemini_models {
-        let (text, used) = chat_text(client, candidate, request.clone(), &options).await;
-        calls += used;
-        match text {
-            Ok(text) => match parse_llm_text(&text) {
-                Ok(actions) => return (Ok(remap(actions, chunk)), calls),
-                Err(error) => warn!(
-                    model = candidate,
-                    error = %format!("{error:#}"),
-                    "gemini model returned invalid output"
-                ),
-            },
-            Err(error) => warn!(
-                model = candidate,
-                error = %format!("{error:#}"),
-                "gemini model failed"
-            ),
-        }
+    let (text, used) = chat_text(client, model, request.clone(), &options).await;
+    calls += used;
+    let gemini = text
+        .and_then(|text| parse_llm_text(&text))
+        .map(|actions| remap(actions, chunk));
+    match gemini {
+        Ok(actions) => return (Ok(actions), calls),
+        Err(error) => warn!(
+            model,
+            error = %format!("{error:#}"),
+            "gemini model failed"
+        ),
     }
 
     warn!("all gemini models failed; falling back to openrouter");

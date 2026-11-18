@@ -33,7 +33,6 @@ pub(crate) const BATCH_SIZE: usize = 20;
 /// a call per batch before failing over. OpenRouter is the cross-provider
 /// fallback.
 pub const DEFAULT_GEMINI_MODEL: &str = "gemini-flash-latest";
-pub const GEMINI_FALLBACK_MODELS: &[&str] = &["gemini-flash-latest"];
 
 mod genai;
 mod quality;
