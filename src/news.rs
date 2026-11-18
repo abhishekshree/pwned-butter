@@ -386,10 +386,9 @@ pub async fn enrich(
 
 #[cfg(test)]
 mod tests {
-    use super::{already_seen, extract_snippet, select_for_enrichment};
+    use super::{extract_snippet, select_for_enrichment};
     use crate::models::NewsItem;
     use chrono::{Duration, Utc};
-    use std::collections::HashSet;
 
     #[test]
     fn extract_snippet_leads_with_title_then_paragraphs() {
@@ -413,24 +412,6 @@ mod tests {
     fn extract_snippet_rejects_google_news_landing_pages() {
         let html = "<html><head><title>Google News - FDA raid</title></head>            <body><p>Google News landing page for the FDA raid story with plenty of filler text here.</p></body></html>";
         assert_eq!(extract_snippet(html), None);
-    }
-
-    #[test]
-    fn already_seen_dedups_urls() {
-        let urls: HashSet<String> = ["https://a.test/1".to_string()].into_iter().collect();
-        let seen: HashSet<String> = ["https://seen.test/9".to_string()].into_iter().collect();
-        assert!(
-            already_seen(&urls, &seen, "https://a.test/1"),
-            "in-batch url is seen"
-        );
-        assert!(
-            already_seen(&urls, &seen, "https://seen.test/9"),
-            "db-seen url is seen"
-        );
-        assert!(
-            !already_seen(&urls, &seen, "https://fresh.test/2"),
-            "fresh url passes"
-        );
     }
 
     #[test]

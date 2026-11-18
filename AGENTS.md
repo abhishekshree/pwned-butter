@@ -28,7 +28,7 @@ Applies to all Rust in this repo. Before committing: `cargo fmt --check`,
 
 - Newtype or enum anything carrying an invariant or a unit; do not let a
   domain value decay into a raw `String`/`i32` at a boundary (`ActionType`,
-  `OutletType`, `Scope`).
+  `OutletType`).
 - Fields stay public on serde and DB DTOs; private fields only when a
   constructor has to enforce something.
 - Prefer `Option<T>` over sentinel values. Validate at the trust boundary,

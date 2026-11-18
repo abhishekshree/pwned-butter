@@ -26,14 +26,6 @@ impl NewsItem {
     }
 }
 
-/// Extraction profile. `Delivery` adds the delivery-only prompt and keeps only
-/// outlets with a platform listing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Scope {
-    General,
-    Delivery,
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionType {

@@ -101,8 +101,7 @@ const CORROBORATION: &[&str] = &["fda", "food safety", "licence", "license"];
 /// checks are case-sensitive `contains` calls. Callers build `hay` with
 /// [`NewsItem::haystack`], which lowercases title + snippet + source.
 pub(crate) fn triage(hay: &str) -> Option<ActionType> {
-    let hay = hay.to_lowercase();
-    let action = signal(&hay)?;
+    let action = signal(hay)?;
     let needs_corroboration = matches!(
         action,
         ActionType::StopBusiness

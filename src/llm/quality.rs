@@ -63,6 +63,15 @@ mod tests {
     use super::*;
     use crate::models::ActionType;
 
+    const FULL: &str = "licence suspended over cockroach infestation found during inspection";
+
+    type Case<'a> = (
+        &'a str,
+        Option<&'a str>,
+        Option<&'a str>,
+        Result<(), &'static str>,
+    );
+
     fn action(est: &str, details: Option<&str>, city: Option<&str>) -> LlmAction {
         LlmAction {
             establishment: est.into(),
@@ -75,124 +84,96 @@ mod tests {
         }
     }
 
-    fn good(est: &str) -> LlmAction {
-        action(
-            est,
-            Some("licence suspended over cockroach infestation found during inspection"),
-            Some("Mumbai"),
-        )
+    fn ok(est: &str) -> Case<'_> {
+        (est, Some(FULL), Some("Mumbai"), Ok(()))
+    }
+
+    fn rejected<'a>(est: &'a str, reason: &'static str) -> Case<'a> {
+        (est, Some(FULL), Some("Mumbai"), Err(reason))
     }
 
     #[test]
-    fn keeps_full_good_record() {
-        assert!(check(&good("Domino's Vile Parle")).is_ok());
+    fn gates_every_junk_shape_from_sept_2026() {
+        let no_action = "no concrete action yet";
+        let cases: [Case; 15] = [
+            ok("Domino's Vile Parle"),
+            ok("IIT Bombay Hostel Canteen (Hostels 12, 13 & 14)"),
+            (
+                "Domino's Vile Parle",
+                Some("12345678901234567890"),
+                Some("Mumbai"),
+                Ok(()),
+            ),
+            rejected("'Popularity was never my goal'", "quote-led establishment"),
+            rejected(
+                "Popular Re 1 Ayurvedic Digestive Tablet Fails Maharashtra FDA Quality Test",
+                "establishment is a product, not an outlet",
+            ),
+            rejected(
+                "Maharashtra FDA rolls out year",
+                "establishment is the regulator, not an outlet",
+            ),
+            rejected(
+                "FDA awaiting response from restaurants at Mumbai Cricket Association premises",
+                no_action,
+            ),
+            rejected(
+                "FDA awaits replies from restaurants at MCA premises",
+                no_action,
+            ),
+            rejected(
+                "Maharashtra FDA awaits replies from five MCA restaurants over licensing violations",
+                no_action,
+            ),
+            rejected(
+                "Popular Re 1 Digestive Item Fails Maharashtra Quality Test Today Here",
+                "establishment reads like a headline fragment",
+            ),
+            (
+                "Domino's Vile Parle",
+                None,
+                Some("Mumbai"),
+                Err("no substantive details"),
+            ),
+            (
+                "Domino's Vile Parle",
+                Some("1234567890123456789"),
+                Some("Mumbai"),
+                Err("no substantive details"),
+            ),
+            ("Domino's Vile Parle", Some(FULL), None, Err("no city")),
+            (
+                "MCA BKC Club",
+                Some(
+                    "FDA has issued a notice and seeks explanation from the club within seven days",
+                ),
+                Some("Mumbai"),
+                Err(no_action),
+            ),
+            (
+                "   ",
+                Some(FULL),
+                Some("Mumbai"),
+                Err("empty establishment"),
+            ),
+        ];
+        for (est, details, city, expected) in cases {
+            assert_eq!(check(&action(est, details, city)), expected, "{est}");
+        }
     }
 
     #[test]
     fn keeps_inspection_without_violations_when_detailed() {
         // History rows 14/32: inspections with no cited violations but real details.
-        let mut a = good("Bombay High Court Canteen");
+        let mut a = action(
+            "Bombay High Court Canteen",
+            Some(
+                "FDA team inspected canteens inside the Bombay High Court premises following queries from the court.",
+            ),
+            Some("Mumbai"),
+        );
         a.action_type = ActionType::Inspection;
         a.violations.clear();
-        a.details = Some(
-            "FDA team inspected canteens inside the Bombay High Court premises following queries from the court."
-                .into(),
-        );
         assert!(check(&a).is_ok());
-    }
-
-    #[test]
-    fn keeps_longest_genuine_outlet_name() {
-        assert!(check(&good("IIT Bombay Hostel Canteen (Hostels 12, 13 & 14)")).is_ok());
-    }
-
-    #[test]
-    fn keeps_details_at_exact_floor() {
-        let mut a = good("Domino's Vile Parle");
-        a.details = Some("12345678901234567890".into());
-        assert!(check(&a).is_ok());
-    }
-
-    #[test]
-    fn drops_quote_establishment() {
-        assert_eq!(
-            check(&good("'Popularity was never my goal'")),
-            Err("quote-led establishment")
-        );
-    }
-
-    #[test]
-    fn drops_product_establishment() {
-        assert_eq!(
-            check(&good(
-                "Popular Re 1 Ayurvedic Digestive Tablet Fails Maharashtra FDA Quality Test"
-            )),
-            Err("establishment is a product, not an outlet")
-        );
-    }
-
-    #[test]
-    fn drops_regulator_as_establishment() {
-        assert_eq!(
-            check(&good("Maharashtra FDA rolls out year")),
-            Err("establishment is the regulator, not an outlet")
-        );
-    }
-
-    #[test]
-    fn drops_awaiting_reply_establishments() {
-        for est in [
-            "FDA awaiting response from restaurants at Mumbai Cricket Association premises",
-            "FDA awaits replies from restaurants at MCA premises",
-            "Maharashtra FDA awaits replies from five MCA restaurants over licensing violations",
-        ] {
-            assert_eq!(check(&good(est)), Err("no concrete action yet"), "{est}");
-        }
-    }
-
-    #[test]
-    fn drops_headline_fragment_establishment() {
-        assert_eq!(
-            check(&good(
-                "Popular Re 1 Digestive Item Fails Maharashtra Quality Test Today Here"
-            )),
-            Err("establishment reads like a headline fragment")
-        );
-    }
-
-    #[test]
-    fn drops_content_free_record() {
-        let mut a = good("Domino's Vile Parle");
-        a.details = None;
-        a.violations.clear();
-        assert_eq!(check(&a), Err("no substantive details"));
-    }
-
-    #[test]
-    fn drops_short_details() {
-        let mut a = good("Domino's Vile Parle");
-        a.details = Some("1234567890123456789".into());
-        assert_eq!(check(&a), Err("no substantive details"));
-    }
-
-    #[test]
-    fn drops_cityless_record() {
-        let mut a = good("Domino's Vile Parle");
-        a.city = None;
-        assert_eq!(check(&a), Err("no city"));
-    }
-
-    #[test]
-    fn drops_seeks_explanation_details() {
-        let mut a = good("MCA BKC Club");
-        a.details = Some(
-            "FDA has issued a notice and seeks explanation from the club within seven days".into(),
-        );
-        assert_eq!(check(&a), Err("no concrete action yet"));
-    }
-
-    #[test]
-    fn drops_empty_establishment() {
-        assert_eq!(check(&good("   ")), Err("empty establishment"));
     }
 }

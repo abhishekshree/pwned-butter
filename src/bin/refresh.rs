@@ -3,7 +3,6 @@ use std::collections::HashSet;
 use anyhow::Result;
 use chrono::{Duration as ChronoDuration, Utc};
 
-use fda_mumbai_tracker::models::Scope;
 use fda_mumbai_tracker::{db, llm, news, scrape};
 
 #[tokio::main]
@@ -25,8 +24,8 @@ async fn main() -> Result<()> {
     let fresh = news::enrich(client, items, &HashSet::new(), news::MAX_ITEMS).await;
     println!("fresh {} items", fresh.len());
 
-    let (actions, calls) = llm::extract(&gemini_key, &model, &fresh, Scope::General).await?;
-    let rows = scrape::build_rows(&fresh, &actions, Scope::General);
+    let (actions, calls) = llm::extract(&gemini_key, &model, &fresh).await?;
+    let rows = scrape::build_rows(&fresh, &actions);
     let since = Utc::now() - ChronoDuration::days(days);
     let (deleted, inserted) = db::replace_actions(pool, since, &rows).await?;
     println!("refresh ok: llm_calls={calls} deleted={deleted} inserted={inserted}");

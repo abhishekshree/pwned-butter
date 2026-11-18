@@ -8,10 +8,10 @@ use genai::resolver::AuthData;
 use serde_json::{Value, json};
 use tracing::warn;
 
-use crate::models::{LlmAction, Scope};
+use crate::models::LlmAction;
 
 use super::triage::Job;
-use super::{strip_code_fences, system_prompt, truncate};
+use super::{SYSTEM_PROMPT, strip_code_fences, truncate};
 
 pub(crate) const DEFAULT_OPENROUTER_MODEL: &str = "openrouter/free";
 pub(crate) const OPENROUTER_FALLBACKS: &[&str] = &["inclusionai/ling-3.2-flash:free"];
@@ -71,7 +71,6 @@ pub(crate) async fn extract_batch(
     client: &Client,
     model: &str,
     chunk: &[Job<'_>],
-    scope: Scope,
     openrouter_key: Option<&str>,
     openrouter_model: &str,
     openrouter_fallbacks: &[String],
@@ -84,8 +83,7 @@ pub(crate) async fn extract_batch(
         Ok(user) => user,
         Err(error) => return (Err(error), 0),
     };
-    let request =
-        ChatRequest::from_system(system_prompt(scope)).append_message(ChatMessage::user(user));
+    let request = ChatRequest::from_system(SYSTEM_PROMPT).append_message(ChatMessage::user(user));
     let options = json_options(16_384, json!({"type": "array"}));
 
     let mut calls = 0;
@@ -119,40 +117,34 @@ pub(crate) async fn extract_batch(
             .filter(|fallback| *fallback != openrouter_model)
             .cloned(),
     );
-    let last_candidate = match candidates.pop() {
-        Some(candidate) => candidate,
-        None => {
-            return (
-                Err(anyhow::anyhow!("no OpenRouter model configured")),
-                calls,
-            );
-        }
-    };
-    for candidate in candidates {
+    let mut last_error = anyhow::anyhow!("no OpenRouter model configured");
+    for candidate in &candidates {
         let model = format!("open_router::{candidate}");
         let (text, used) = chat_text(client, &model, request.clone(), &options).await;
         calls += used;
         match text {
             Ok(text) => match parse_llm_text(&text) {
                 Ok(actions) => return (Ok(remap(actions, chunk)), calls),
-                Err(error) => warn!(
+                Err(error) => {
+                    warn!(
+                        model = %candidate,
+                        error = %format!("{error:#}"),
+                        "openrouter model returned invalid output"
+                    );
+                    last_error = error;
+                }
+            },
+            Err(error) => {
+                warn!(
                     model = %candidate,
                     error = %format!("{error:#}"),
-                    "openrouter model returned invalid output"
-                ),
-            },
-            Err(error) => warn!(
-                model = %candidate,
-                error = %format!("{error:#}"),
-                "openrouter model failed"
-            ),
+                    "openrouter model failed"
+                );
+                last_error = error;
+            }
         }
     }
-    let model = format!("open_router::{last_candidate}");
-    let (text, used) = chat_text(client, &model, request, &options).await;
-    calls += used;
-    let outcome = text.and_then(|text| parse_llm_text(&text).map(|actions| remap(actions, chunk)));
-    (outcome, calls)
+    (Err(last_error), calls)
 }
 
 pub(crate) async fn collapse_once(

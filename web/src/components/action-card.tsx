@@ -171,7 +171,7 @@ export function ActionCard({ a }: { a: ActionRow }) {
             <div
               className={cn(
                 "inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[10px] font-semibold",
-                comp.badge,
+                comp,
               )}
             >
               <span>COMPLIANCE:</span>
