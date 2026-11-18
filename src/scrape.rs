@@ -107,6 +107,25 @@ mod tests {
     }
 
     #[test]
+    fn candidate_keeps_its_source_provenance() {
+        let mut action = action();
+        action.brand = Some("Domino's".into());
+        action.outlet_type = Some("restaurant".into());
+        let source = article(published());
+        let candidate = crate::domain::Candidate::try_new(action, &source).expect("valid");
+
+        assert_eq!(candidate.source_url, "https://a.test/1");
+        assert_eq!(candidate.source_publisher.as_deref(), Some("Test Press"));
+        assert_eq!(
+            candidate.source_headline.as_deref(),
+            Some("Domino's licence suspended in Mumbai")
+        );
+        assert_eq!(candidate.brand.as_deref(), Some("Domino's"));
+        assert_eq!(candidate.action_type, ActionType::LicenceSuspension);
+        assert_eq!(candidate.city, crate::domain::CoveredCity::Mumbai);
+    }
+
+    #[test]
     fn rejects_out_of_scope_city() {
         let mut action = action();
         action.city = Some("Nashik".into());

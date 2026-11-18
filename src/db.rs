@@ -103,14 +103,20 @@ pub async fn upsert_actions(pool: &PgPool, rows: &[Candidate]) -> Result<StoreOu
     transact(pool, |mut tx| async move {
         let mut outcome = StoreOutcome::default();
         for r in rows {
-            // Same outlet within ±5 days = one event, even when outlets call
-            // it "inspection" then "licence suspension". Name matching
-            // tolerates "MCA BKC Club" vs "Mumbai Cricket Association (BKC)".
+            // One event per outlet AND action type. Action type must match so a
+            // reopening is not swallowed by the suspension it followed.
+            // The window is ±10, not ±5: the SQL constraint uses
+            // daterange(action_date - 5, action_date + 5, '[]'), which
+            // canonicalises to [d-5, d+6) and therefore overlaps for dates up
+            // to 10 days apart. A narrower pre-check would miss a conflicting
+            // row and abort the whole transaction on INSERT.
             let candidates: Vec<String> = sqlx::query(
                 "SELECT establishment FROM actions
-                 WHERE action_date BETWEEN $1 - 5 AND $1 + 5",
+                 WHERE action_date BETWEEN $1 - 10 AND $1 + 10
+                   AND action_type = $2",
             )
             .bind(r.action_date)
+            .bind(r.action_type.to_string())
             .fetch_all(&mut *tx)
             .await?
             .into_iter()

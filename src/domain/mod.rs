@@ -146,42 +146,9 @@ impl Candidate {
     }
 }
 
-/// The dashboard's three display states, derived from the closed action enum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Status {
-    Suspended,
-    Reopened,
-    Active,
-}
-
-impl From<ActionType> for Status {
-    fn from(action: ActionType) -> Self {
-        match action {
-            ActionType::Reopened => Self::Reopened,
-            ActionType::ImprovementNotice | ActionType::Inspection | ActionType::Seizure => {
-                Self::Active
-            }
-            ActionType::LicenceSuspension | ActionType::StopBusiness | ActionType::Sealing => {
-                Self::Suspended
-            }
-        }
-    }
-}
-
-impl Status {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Suspended => "suspended",
-            Self::Reopened => "reopened",
-            Self::Active => "active",
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{CoveredCity, Status};
-    use crate::models::ActionType;
+    use super::CoveredCity;
 
     #[test]
     fn covered_cities_accept_qualifiers_and_reject_prefixes() {
@@ -193,14 +160,11 @@ mod tests {
             CoveredCity::parse("navi mumbai"),
             Some(CoveredCity::NaviMumbai)
         );
+        assert_eq!(CoveredCity::parse("Pune City"), Some(CoveredCity::Pune));
+        assert_eq!(CoveredCity::parse("Thane West"), Some(CoveredCity::Thane));
+        assert_eq!(CoveredCity::parse("Lonavala"), Some(CoveredCity::Lonavala));
         assert_eq!(CoveredCity::parse("Panvel"), None);
         assert_eq!(CoveredCity::parse("Mumbaiwadi"), None);
-    }
-
-    #[test]
-    fn status_maps_every_action_exhaustively() {
-        assert_eq!(Status::from(ActionType::Reopened), Status::Reopened);
-        assert_eq!(Status::from(ActionType::Inspection), Status::Active);
-        assert_eq!(Status::from(ActionType::Sealing), Status::Suspended);
+        assert_eq!(CoveredCity::parse("Nashik"), None);
     }
 }

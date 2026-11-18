@@ -229,9 +229,7 @@ pub(crate) fn parse_llm_text(text: &str) -> Result<Vec<LlmAction>> {
     Ok(actions)
 }
 
-// Kept as the clamp/validation helper for raw LlmActions; the current
-// Candidate::try_new path validates instead, so there is no caller yet.
-#[allow(dead_code)]
+/// Bound untrusted LLM strings before they reach validation or the DB.
 pub(crate) fn sanitize_action(mut action: LlmAction) -> LlmAction {
     action.establishment = clamp(action.establishment, 200);
     clamp_opt(&mut action.area, 120);
@@ -267,7 +265,6 @@ fn clamp(value: String, max: usize) -> String {
     }
 }
 
-#[allow(dead_code)]
 fn clamp_opt(field: &mut Option<String>, max: usize) {
     if let Some(value) = field.take() {
         *field = Some(clamp(value, max));

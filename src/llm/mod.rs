@@ -21,6 +21,14 @@ mod genai;
 mod quality;
 mod triage;
 
+use triage::Verdict;
+
+/// A verdict's `sourceIndex` is chunk-local. Translate it to the caller's
+/// absolute index, rejecting anything outside the chunk.
+fn verdict_index(base: usize, verdict: &Verdict, chunk_len: usize) -> Option<usize> {
+    (verdict.source_index < chunk_len).then_some(base + verdict.source_index)
+}
+
 /// Strict relevance pass. Returns the absolute indices the extraction stage
 /// should process. A failed batch passes its items through and is counted, so
 /// a degraded run never silently drops the whole chunk.
@@ -42,14 +50,13 @@ pub(crate) async fn triage(
         match genai::triage_batch(&client, model, chunk, metrics).await {
             Ok(verdicts) => {
                 for verdict in verdicts {
-                    if verdict.source_index >= chunk.len() {
+                    let Some(index) = verdict_index(base, &verdict, chunk.len()) else {
                         warn!(
                             index = verdict.source_index,
                             "triage verdict index out of range"
                         );
                         continue;
-                    }
-                    let index = base + verdict.source_index;
+                    };
                     if seen.insert(index) {
                         debug!(index, reason = ?verdict.reason, "triage kept item");
                         kept.push(index);
@@ -198,8 +205,9 @@ pub(crate) fn strip_code_fences(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::extract;
+    use super::{BATCH_SIZE, extract, verdict_index};
     use crate::config::Config;
+    use crate::llm::triage::Verdict;
     use crate::report::RunMetrics;
 
     fn config() -> Config {
@@ -209,6 +217,18 @@ mod tests {
             gemini_model: "model".into(),
             openrouter: None,
         }
+    }
+
+    #[test]
+    fn verdict_indices_offset_across_batches() {
+        let verdict = |index| Verdict {
+            source_index: index,
+            reason: None,
+        };
+        // Second batch: base is BATCH_SIZE, local index 0 is absolute 20.
+        assert_eq!(verdict_index(BATCH_SIZE, &verdict(0), BATCH_SIZE), Some(20));
+        assert_eq!(verdict_index(BATCH_SIZE, &verdict(7), BATCH_SIZE), Some(27));
+        assert_eq!(verdict_index(0, &verdict(BATCH_SIZE), BATCH_SIZE), None);
     }
 
     #[tokio::test]
