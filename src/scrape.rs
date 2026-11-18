@@ -167,9 +167,11 @@ pub fn build_rows(items: &[NewsItem], actions: &[LlmAction]) -> Vec<ActionInsert
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
+    use test_case::test_case;
+
     use super::*;
     use crate::models::ActionType;
-    use chrono::Utc;
 
     fn item(title: &str, url: &str) -> NewsItem {
         NewsItem {
@@ -287,22 +289,17 @@ mod tests {
         }
     }
 
-    #[test]
-    fn compliance_score_keeps_only_0_to_100() {
+    #[test_case(Some(54), Some(54); "in range")]
+    #[test_case(Some(999), None; "too high")]
+    #[test_case(Some(-5), None; "negative")]
+    #[test_case(Some(101), None; "just out of range")]
+    #[test_case(None, None; "absent")]
+    fn compliance_score_keeps_only_0_to_100(score: Option<i32>, expected: Option<i32>) {
         let items = vec![item("a", "b")];
-        let cases = [
-            (Some(54), Some(54)),
-            (Some(999), None),
-            (Some(-5), None),
-            (Some(101), None),
-            (None, None),
-        ];
-        for (score, expected) in cases {
-            assert_eq!(
-                build_rows(&items, &[scored(score)])[0].compliance_score,
-                expected,
-                "{score:?}"
-            );
-        }
+        assert_eq!(
+            build_rows(&items, &[scored(score)])[0].compliance_score,
+            expected,
+            "{score:?}"
+        );
     }
 }

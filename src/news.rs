@@ -10,69 +10,9 @@ use tracing::{error, info, warn};
 use urlencoding::encode;
 
 use crate::models::NewsItem;
+use crate::rules::rules;
 
 pub const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-
-const QUERIES: &[&str] = &[
-    "\"Maharashtra FDA\"",
-    "\"Maharashtra Food and Drug Administration\"",
-    "\"FDA Mumbai\"",
-    "\"Tukaram Mundhe\"",
-    "\"Maharashtra FDA\" licence suspended",
-    "\"Maharashtra FDA\" licence cancelled",
-    "\"Maharashtra FDA\" seal",
-    "\"Maharashtra FDA\" seizure",
-    "\"Maharashtra FDA\" raid",
-    "\"Maharashtra FDA\" restaurant hygiene",
-    "\"Maharashtra FDA\" hotel dhaba eatery",
-    "\"Maharashtra FDA\" \"improvement notice\"",
-    "\"Maharashtra FDA\" expired cockroach",
-    "\"Maharashtra FDA\" milk adulteration",
-    "\"Maharashtra FDA\" chain restaurant",
-    "Dominos OR \"Pizza Hut\" OR \"Burger King\" FDA Maharashtra",
-    "KFC OR McDonalds OR Starbucks FDA licence Maharashtra",
-    "Blinkit OR Zepto OR \"Swiggy Instamart\" FDA licence suspended",
-    "Zomato OR Swiggy \"cloud kitchen\" FDA",
-    "\"Maharashtra FDA\" Mumbai food safety",
-    "\"Maharashtra FDA\" Pune",
-    "\"Maharashtra FDA\" Nashik OR Thane OR Nagpur OR Aurangabad",
-    "\"licence suspended\" \"Safe Food\" Maharashtra restaurant",
-    "\"Maharashtra FDA\" prosecution",
-    "\"Food Safety and Standards\" Maharashtra raid licence",
-    "site:x.com \"Maharashtra FDA\"",
-    "site:twitter.com \"Maharashtra FDA\"",
-    "site:x.com \"Maharashtra FDA\" raid OR licence OR suspend",
-    "site:x.com FDA Mumbai raid",
-    "site:x.com \"Tukaram Mundhe\"",
-    "site:x.com Mumbai restaurant FDA hygiene",
-    "site:x.com Blinkit OR Zepto OR Instamart FDA",
-];
-
-// RSS headlines are ranked before fetching publisher pages; these are the
-// signals, not an exclusion list.
-const AUTHORITY_SIGNALS: &[&str] = &[
-    "maharashtra fda",
-    "food and drug administration",
-    "tukaram mundhe",
-];
-const ACTION_SIGNALS: &[&str] = &[
-    "ordered to shut",
-    "ordered to stop",
-    "cease business",
-    "stop operations",
-    "sealed",
-    "seized",
-];
-const VENUE_SIGNALS: &[&str] = &[
-    "restaurant",
-    "hotel",
-    "cafe",
-    "caterer",
-    "dark store",
-    "quick-commerce",
-];
-const LICENCE_WORDS: &[&str] = &["licence", "license"];
-const LICENCE_ACTIONS: &[&str] = &["suspend", "cancel", "revok"];
 
 /// The number of distinct, high-signal articles to enrich in one scheduled run.
 /// Applied before fetching: Google News returns the same story from several
@@ -82,7 +22,7 @@ const FETCH_CONCURRENCY: usize = 8;
 /// Publisher pages are untrusted; without a ceiling one huge article OOMs
 /// the run before the snippet is truncated.
 const MAX_ARTICLE_BYTES: u64 = 5 * 1024 * 1024;
-// Google answers all 32 queries from one runner IP at once with 503s when we
+// Google answers all the queries from one runner IP at once with 503s when we
 // fan out too wide; four at a time keeps the burst below the threshold.
 const RSS_CONCURRENCY: usize = 4;
 
@@ -172,7 +112,9 @@ async fn fetch_feed_once(client: &reqwest::Client, url: &str) -> Result<Vec<News
 }
 
 pub async fn fetch_items(client: &reqwest::Client, window: &str) -> Result<Vec<NewsItem>> {
-    let jobs = QUERIES
+    let jobs = rules()
+        .news
+        .queries
         .iter()
         .map(|query| {
             let url = google_news_url(query, (!window.is_empty()).then_some(window));
@@ -192,7 +134,7 @@ pub async fn fetch_items(client: &reqwest::Client, window: &str) -> Result<Vec<N
     items.retain(|item| seen.insert(item.url.clone()));
     info!(
         "rss: {fetched} hits from {} queries, {} distinct Google News URLs",
-        QUERIES.len(),
+        rules().news.queries.len(),
         items.len()
     );
     Ok(items)
@@ -202,12 +144,17 @@ pub async fn fetch_items(client: &reqwest::Client, window: &str) -> Result<Vec<N
 /// publisher pages. This is only a priority signal, never an exclusion: a
 /// lower-scoring item still gets selected when there is room.
 fn enforcement_score(item: &NewsItem) -> u8 {
+    let config = &rules().news;
     let hay = item.haystack();
-    let any = |words: &[&str]| words.iter().any(|w| hay.contains(w));
-    let mut score = 8 * u8::from(any(AUTHORITY_SIGNALS));
-    score += 3 * u8::from(any(LICENCE_WORDS) && any(LICENCE_ACTIONS));
-    score += 3 * ACTION_SIGNALS.iter().filter(|s| hay.contains(**s)).count() as u8;
-    score += u8::from(any(VENUE_SIGNALS));
+    let any = |words: &[String]| words.iter().any(|w| hay.contains(w));
+    let mut score = 8 * u8::from(any(&config.authority_signals));
+    score += 3 * u8::from(any(&config.licence_words) && any(&config.licence_actions));
+    score += 3 * config
+        .action_signals
+        .iter()
+        .filter(|s| hay.contains(*s))
+        .count() as u8;
+    score += u8::from(any(&config.venue_signals));
     score
 }
 
@@ -291,8 +238,6 @@ struct FetchedArticle {
     snippet: Option<String>,
 }
 
-struct EnrichResult(Result<FetchedArticle>);
-
 async fn fetch_article(client: &reqwest::Client, url: &str) -> Result<FetchedArticle> {
     let resp = client
         .get(url)
@@ -337,7 +282,7 @@ pub async fn enrich(
             let url = item.url.clone();
             async move {
                 let res = fetch_article(&client, &url).await;
-                (i, item, EnrichResult(res))
+                (i, item, res)
             }
         })
         .collect();
@@ -346,7 +291,7 @@ pub async fn enrich(
 
     let mut out: Vec<NewsItem> = Vec::with_capacity(results.len());
     let mut urls: HashSet<String> = HashSet::new();
-    for (_, mut item, EnrichResult(res)) in results {
+    for (_, mut item, res) in results {
         match res {
             Ok(FetchedArticle { final_url, snippet }) => {
                 if already_seen(&urls, seen, &final_url) {

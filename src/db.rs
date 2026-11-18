@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
 use serde_json::Value;
+use sqlx::FromRow;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 
@@ -28,7 +29,7 @@ pub async fn pool() -> Result<&'static PgPool> {
     Ok(POOL.get_or_init(|| pool))
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, FromRow)]
 pub struct RecentEvent {
     pub establishment: String,
     pub action_type: String,
@@ -40,39 +41,25 @@ pub struct RecentEvent {
 /// Establishments acted against in the last `days` days, capped to bound
 /// prompt size for the LLM duplicate-grouping pass.
 pub async fn recent_events(pool: &PgPool, days: i32) -> Result<Vec<RecentEvent>> {
-    let rows = sqlx::query(
+    Ok(sqlx::query_as::<_, RecentEvent>(
         "SELECT establishment, action_type, action_date, city, area FROM actions \
          WHERE action_date >= CURRENT_DATE - ($1::int) \
          ORDER BY action_date DESC LIMIT 200",
     )
     .bind(days)
     .fetch_all(pool)
-    .await?;
-    Ok(rows
-        .iter()
-        .filter_map(|r| {
-            Some(RecentEvent {
-                establishment: r.try_get(0).ok()?,
-                action_type: r.try_get(1).ok()?,
-                action_date: r.try_get(2).ok()?,
-                city: r.try_get(3).ok(),
-                area: r.try_get(4).ok(),
-            })
-        })
-        .collect())
+    .await?)
 }
 
 pub async fn seen_urls(pool: &PgPool, cutoff: DateTime<Utc>) -> Result<HashSet<String>> {
-    let rows = sqlx::query(
+    Ok(sqlx::query_scalar::<_, String>(
         "SELECT source_url FROM actions WHERE published_at > $1 OR published_at IS NULL",
     )
     .bind(cutoff)
     .fetch_all(pool)
-    .await?;
-    Ok(rows
-        .iter()
-        .filter_map(|r| r.try_get::<String, _>("source_url").ok())
-        .collect())
+    .await?
+    .into_iter()
+    .collect())
 }
 
 #[derive(Debug, Clone)]

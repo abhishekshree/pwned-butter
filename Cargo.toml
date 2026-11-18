@@ -38,6 +38,7 @@ urlencoding = "2"
 dotenvy = "0.15"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+toml = "1.2.1"
 
 [profile.release]
 opt-level = 3
@@ -45,3 +46,6 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[dev-dependencies]
+test-case = "3.4.1"

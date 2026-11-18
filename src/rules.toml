@@ -1,0 +1,153 @@
+# All human-language rules for extraction. Order matters:
+# - triage.rules is first-match-wins (most specific first)
+# - triage.cities and establishment_prefixes are longest-first
+# Keywords are matched against lowercased text, so keep them lowercase.
+
+[triage]
+# Only these corroborate a generic-English trigger. seal/seiz/raid/inspect
+# are the ambiguous words themselves, so they cannot corroborate themselves.
+corroboration = ["fda", "food safety", "licence", "license"]
+
+# Cities seen in FDA coverage. Rule-extracted rows have no LLM to name the
+# city, so read it from the headline/body instead of leaving filters empty.
+cities = [
+    "Navi Mumbai", "Pimpri-Chinchwad", "Mahabaleshwar", "Aurangabad",
+    "Chandrapur", "Ratnagiri", "Kolhapur", "Amravati", "Jalgaon", "Solapur",
+    "Nanded", "Palghar", "Mumbai", "Thane", "Nashik", "Nagpur", "Pune",
+    "Sangli", "Satara", "Akola", "Latur", "Dhule", "Kalyan", "Vasai", "Panvel",
+]
+
+# Boilerplate that precedes the outlet name in enforcement headlines.
+establishment_prefixes = [
+    "Maharashtra FDA suspends food licences of",
+    "Maharashtra FDA suspends food licence of",
+    "Maharashtra FDA suspends licences of",
+    "Maharashtra FDA suspends licence of",
+    "Maharashtra FDA suspends",
+    "Maharashtra FDA cancels",
+    "Maharashtra FDA seals",
+    "Maharashtra FDA seizes",
+    "Maharashtra FDA raids",
+    "Maharashtra FDA crackdown on",
+    "Maharashtra FDA",
+    "FDA suspends food licences of",
+    "FDA suspends food licence of",
+    "FDA suspends licences of",
+    "FDA suspends licence of",
+    "FDA suspends",
+    "FDA seals",
+    "FDA seizes",
+    "FDA raids",
+    "FDA",
+]
+
+[[triage.rules]]
+action = "improvement_notice"
+needs = [["improvement notice"]]
+
+[[triage.rules]]
+action = "licence_suspension"
+needs = [
+    ["licence", "suspend"], ["license", "suspend"],
+    ["licence", "suspension"], ["license", "suspension"],
+    ["licence", "cancel"], ["license", "cancel"],
+    ["licence", "revok"], ["license", "revok"],
+]
+
+[[triage.rules]]
+action = "stop_business"
+needs = [
+    ["stop business"], ["cease business"], ["stop operations"],
+    ["operations", "stopped"], ["closure", "order"],
+    ["ordered", "shut"], ["shut down", "fda"],
+]
+
+[[triage.rules]]
+action = "sealing"
+needs = [["seal"]]
+
+[[triage.rules]]
+action = "seizure"
+needs = [["seiz"]]
+
+[[triage.rules]]
+action = "reopened"
+needs = [["reopen"]]
+
+[[triage.rules]]
+# "inspect"/"raid" need fda context: bare mentions also pass plan
+# announcements and awaiting-reply stories that name no outlet.
+action = "inspection"
+needs = [
+    ["raid", "fda"], ["raid", "food", "safety"],
+    ["raid", "licence"], ["raid", "license"],
+    ["inspect", "fda"], ["inspect", "food", "safety"],
+    ["inspect", "licence"], ["inspect", "license"],
+]
+
+[quality]
+# Words marking an establishment as a pharma product, never a food outlet.
+product_words = ["tablet", "syrup", "medicine", "drug"]
+# Phrasing that means "action pending". Bare "await" would nuke genuine
+# suspensions that are "awaiting reinspection".
+no_action_yet = [
+    "awaits repl", "awaiting respon", "reply awaited", "response awaited",
+    "seeks explanation", "seeks reply", "sought explanation", "yet to respond",
+]
+# An establishment naming the regulator is not an outlet.
+regulator_words = ["fda"]
+# Longest genuine outlet name in history is 9 words; shortest genuine details
+# is 43 chars, so the floor is 20.
+max_establishment_words = 9
+min_details_chars = 20
+
+[news]
+# Google News search queries. A press note can name dozens of outlets, so
+# missing a roundup costs more than fetching a few extra articles.
+queries = [
+    "\"Maharashtra FDA\"",
+    "\"Maharashtra Food and Drug Administration\"",
+    "\"FDA Mumbai\"",
+    "\"Tukaram Mundhe\"",
+    "\"Maharashtra FDA\" licence suspended",
+    "\"Maharashtra FDA\" licence cancelled",
+    "\"Maharashtra FDA\" seal",
+    "\"Maharashtra FDA\" seizure",
+    "\"Maharashtra FDA\" raid",
+    "\"Maharashtra FDA\" restaurant hygiene",
+    "\"Maharashtra FDA\" hotel dhaba eatery",
+    "\"Maharashtra FDA\" \"improvement notice\"",
+    "\"Maharashtra FDA\" expired cockroach",
+    "\"Maharashtra FDA\" milk adulteration",
+    "\"Maharashtra FDA\" chain restaurant",
+    "Dominos OR \"Pizza Hut\" OR \"Burger King\" FDA Maharashtra",
+    "KFC OR McDonalds OR Starbucks FDA licence Maharashtra",
+    "Blinkit OR Zepto OR \"Swiggy Instamart\" FDA licence suspended",
+    "Zomato OR Swiggy \"cloud kitchen\" FDA",
+    "\"Maharashtra FDA\" Mumbai food safety",
+    "\"Maharashtra FDA\" Pune",
+    "\"Maharashtra FDA\" Nashik OR Thane OR Nagpur OR Aurangabad",
+    "\"licence suspended\" \"Safe Food\" Maharashtra restaurant",
+    "\"Maharashtra FDA\" prosecution",
+    "\"Food Safety and Standards\" Maharashtra raid licence",
+    "site:x.com \"Maharashtra FDA\"",
+    "site:twitter.com \"Maharashtra FDA\"",
+    "site:x.com \"Maharashtra FDA\" raid OR licence OR suspend",
+    "site:x.com FDA Mumbai raid",
+    "site:x.com \"Tukaram Mundhe\"",
+    "site:x.com Mumbai restaurant FDA hygiene",
+    "site:x.com Blinkit OR Zepto OR Instamart FDA",
+]
+# RSS ranking signals only — a low-scoring item is never excluded.
+authority_signals = [
+    "maharashtra fda", "food and drug administration", "tukaram mundhe",
+]
+action_signals = [
+    "ordered to shut", "ordered to stop", "cease business",
+    "stop operations", "sealed", "seized",
+]
+venue_signals = [
+    "restaurant", "hotel", "cafe", "caterer", "dark store", "quick-commerce",
+]
+licence_words = ["licence", "license"]
+licence_actions = ["suspend", "cancel", "revok"]

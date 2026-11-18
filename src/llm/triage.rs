@@ -1,4 +1,5 @@
 use crate::models::{ActionType, LlmAction, NewsItem};
+use crate::rules::rules;
 
 /// A relevance-filtered batch item; `orig` still indexes the caller's `items`
 /// for `build_rows`.
@@ -7,85 +8,15 @@ pub(crate) struct Job<'a> {
     pub(crate) item: &'a NewsItem,
 }
 
-/// Keyword rules as data. First match in table order wins, so entries run
-/// most- to least-specific.
-struct Rule {
-    needs: &'static [&'static [&'static str]],
-    action: ActionType,
-}
-
-const RULES: &[Rule] = &[
-    Rule {
-        needs: &[&["improvement notice"]],
-        action: ActionType::ImprovementNotice,
-    },
-    Rule {
-        needs: &[
-            &["licence", "suspend"],
-            &["license", "suspend"],
-            &["licence", "suspension"],
-            &["license", "suspension"],
-            &["licence", "cancel"],
-            &["license", "cancel"],
-            &["licence", "revok"],
-            &["license", "revok"],
-        ],
-        action: ActionType::LicenceSuspension,
-    },
-    Rule {
-        needs: &[
-            &["stop business"],
-            &["cease business"],
-            &["stop operations"],
-            &["operations", "stopped"],
-            &["closure", "order"],
-            &["ordered", "shut"],
-            &["shut down", "fda"],
-        ],
-        action: ActionType::StopBusiness,
-    },
-    Rule {
-        needs: &[&["seal"]],
-        action: ActionType::Sealing,
-    },
-    Rule {
-        needs: &[&["seiz"]],
-        action: ActionType::Seizure,
-    },
-    Rule {
-        needs: &[&["reopen"]],
-        action: ActionType::Reopened,
-    },
-    Rule {
-        // Needs an enforcement verb AND fda context: bare "fda" also passes
-        // plan announcements and awaiting-reply stories.
-        needs: &[
-            &["raid", "fda"],
-            &["raid", "food", "safety"],
-            &["raid", "licence"],
-            &["raid", "license"],
-            &["inspect", "fda"],
-            &["inspect", "food", "safety"],
-            &["inspect", "licence"],
-            &["inspect", "license"],
-        ],
-        action: ActionType::Inspection,
-    },
-];
-
 /// Typed action from prose; `None` when no rule matches.
 fn signal(hay: &str) -> Option<ActionType> {
-    RULES.iter().find_map(|rule| {
+    rules().triage.rules.iter().find_map(|rule| {
         rule.needs
             .iter()
             .any(|needles| needles.iter().all(|n| hay.contains(n)))
             .then_some(rule.action)
     })
 }
-
-// Only these corroborate a generic-English trigger. seal/seiz/raid/inspect are
-// the ambiguous words themselves, so they cannot corroborate themselves.
-const CORROBORATION: &[&str] = &["fda", "food safety", "licence", "license"];
 
 /// Keyword signal plus a corroboration gate for ambiguous action types.
 /// `hay` must already be lowercase — [`NewsItem::haystack`] guarantees it.
@@ -98,75 +29,23 @@ pub(crate) fn triage(hay: &str) -> Option<ActionType> {
             | ActionType::Seizure
             | ActionType::Inspection
     );
-    (!needs_corroboration || CORROBORATION.iter().any(|c| hay.contains(c))).then_some(action)
+    (!needs_corroboration || rules().triage.corroboration.iter().any(|c| hay.contains(c)))
+        .then_some(action)
 }
-
-/// Cities that appear in FDA coverage, longest first so "Navi Mumbai" wins
-/// over "Mumbai".
-const CITIES: &[&str] = &[
-    "Navi Mumbai",
-    "Pimpri-Chinchwad",
-    "Mahabaleshwar",
-    "Aurangabad",
-    "Chandrapur",
-    "Ratnagiri",
-    "Kolhapur",
-    "Amravati",
-    "Jalgaon",
-    "Solapur",
-    "Nanded",
-    "Palghar",
-    "Mumbai",
-    "Thane",
-    "Nashik",
-    "Nagpur",
-    "Pune",
-    "Sangli",
-    "Satara",
-    "Akola",
-    "Latur",
-    "Dhule",
-    "Kalyan",
-    "Vasai",
-    "Panvel",
-];
 
 pub(crate) fn city_of(text: &str) -> Option<String> {
     let lower = text.to_lowercase();
-    CITIES
+    rules()
+        .triage
+        .cities
         .iter()
         .find(|city| lower.contains(&city.to_lowercase()))
-        .map(|city| (*city).to_string())
+        .cloned()
 }
-
-/// Boilerplate that precedes the outlet name in enforcement headlines,
-/// longest first so the brand name survives.
-const ESTABLISHMENT_PREFIXES: &[&str] = &[
-    "Maharashtra FDA suspends food licences of",
-    "Maharashtra FDA suspends food licence of",
-    "Maharashtra FDA suspends licences of",
-    "Maharashtra FDA suspends licence of",
-    "Maharashtra FDA suspends",
-    "Maharashtra FDA cancels",
-    "Maharashtra FDA seals",
-    "Maharashtra FDA seizes",
-    "Maharashtra FDA raids",
-    "Maharashtra FDA crackdown on",
-    "Maharashtra FDA",
-    "FDA suspends food licences of",
-    "FDA suspends food licence of",
-    "FDA suspends licences of",
-    "FDA suspends licence of",
-    "FDA suspends",
-    "FDA seals",
-    "FDA seizes",
-    "FDA raids",
-    "FDA",
-];
 
 fn clean_establishment_name(raw: &str) -> String {
     let trimmed = raw.trim();
-    for prefix in ESTABLISHMENT_PREFIXES {
+    for prefix in &rules().triage.establishment_prefixes {
         // `get` guards against a non-char-boundary slice on odd UTF-8.
         let Some(head) = trimmed.get(..prefix.len()) else {
             continue;

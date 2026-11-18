@@ -1,29 +1,10 @@
 use crate::models::LlmAction;
-
-/// Words marking an establishment as a pharma product, never a food outlet.
-const PRODUCT_WORDS: &[&str] = &["tablet", "syrup", "medicine", "drug"];
-
-/// Phrasing that means "action pending". Bare "await" would nuke genuine
-/// suspensions that are "awaiting reinspection".
-const NO_ACTION_YET: &[&str] = &[
-    "awaits repl",
-    "awaiting respon",
-    "reply awaited",
-    "response awaited",
-    "seeks explanation",
-    "seeks reply",
-    "sought explanation",
-    "yet to respond",
-];
-
-/// Longest genuine outlet name in history is 9 words.
-const MAX_ESTABLISHMENT_WORDS: usize = 9;
-/// Shortest genuine details in history is 43 chars; floor at 20.
-const MIN_DETAILS_CHARS: usize = 20;
+use crate::rules::rules;
 
 /// Post-LLM quality gate: better no record than a wrong one. Every rule is
 /// calibrated against the pre-Sept-2026 history (67/67 rows pass).
 pub(crate) fn check(a: &LlmAction) -> Result<(), &'static str> {
+    let config = &rules().quality;
     let name = a.establishment.trim();
     if name.is_empty() {
         return Err("empty establishment");
@@ -34,19 +15,19 @@ pub(crate) fn check(a: &LlmAction) -> Result<(), &'static str> {
     let lower = name.to_lowercase();
     let details = a.details.as_deref().unwrap_or("").trim();
     let hay = format!("{lower} {}", details.to_lowercase());
-    if NO_ACTION_YET.iter().any(|w| hay.contains(w)) {
+    if config.no_action_yet.iter().any(|w| hay.contains(w)) {
         return Err("no concrete action yet");
     }
-    if PRODUCT_WORDS.iter().any(|w| lower.contains(w)) {
+    if config.product_words.iter().any(|w| lower.contains(w)) {
         return Err("establishment is a product, not an outlet");
     }
-    if lower.contains("fda") {
+    if config.regulator_words.iter().any(|w| lower.contains(w)) {
         return Err("establishment is the regulator, not an outlet");
     }
-    if name.split_whitespace().count() > MAX_ESTABLISHMENT_WORDS {
+    if name.split_whitespace().count() > config.max_establishment_words {
         return Err("establishment reads like a headline fragment");
     }
-    if details.chars().count() < MIN_DETAILS_CHARS {
+    if details.chars().count() < config.min_details_chars {
         return Err("no substantive details");
     }
     if a.city.as_deref().is_none_or(|s| s.trim().is_empty()) {
@@ -57,17 +38,12 @@ pub(crate) fn check(a: &LlmAction) -> Result<(), &'static str> {
 
 #[cfg(test)]
 mod tests {
+    use test_case::test_case;
+
     use super::*;
     use crate::models::ActionType;
 
     const FULL: &str = "licence suspended over cockroach infestation found during inspection";
-
-    type Case<'a> = (
-        &'a str,
-        Option<&'a str>,
-        Option<&'a str>,
-        Result<(), &'static str>,
-    );
 
     fn action(est: &str, details: Option<&str>, city: Option<&str>) -> LlmAction {
         LlmAction {
@@ -81,82 +57,28 @@ mod tests {
         }
     }
 
-    fn ok(est: &str) -> Case<'_> {
-        (est, Some(FULL), Some("Mumbai"), Ok(()))
-    }
-
-    fn rejected<'a>(est: &'a str, reason: &'static str) -> Case<'a> {
-        (est, Some(FULL), Some("Mumbai"), Err(reason))
-    }
-
-    #[test]
-    fn gates_every_junk_shape_from_sept_2026() {
-        let no_action = "no concrete action yet";
-        let cases: [Case; 15] = [
-            ok("Domino's Vile Parle"),
-            ok("IIT Bombay Hostel Canteen (Hostels 12, 13 & 14)"),
-            (
-                "Domino's Vile Parle",
-                Some("12345678901234567890"),
-                Some("Mumbai"),
-                Ok(()),
-            ),
-            rejected("'Popularity was never my goal'", "quote-led establishment"),
-            rejected(
-                "Popular Re 1 Ayurvedic Digestive Tablet Fails Maharashtra FDA Quality Test",
-                "establishment is a product, not an outlet",
-            ),
-            rejected(
-                "Maharashtra FDA rolls out year",
-                "establishment is the regulator, not an outlet",
-            ),
-            rejected(
-                "FDA awaiting response from restaurants at Mumbai Cricket Association premises",
-                no_action,
-            ),
-            rejected(
-                "FDA awaits replies from restaurants at MCA premises",
-                no_action,
-            ),
-            rejected(
-                "Maharashtra FDA awaits replies from five MCA restaurants over licensing violations",
-                no_action,
-            ),
-            rejected(
-                "Popular Re 1 Digestive Item Fails Maharashtra Quality Test Today Here",
-                "establishment reads like a headline fragment",
-            ),
-            (
-                "Domino's Vile Parle",
-                None,
-                Some("Mumbai"),
-                Err("no substantive details"),
-            ),
-            (
-                "Domino's Vile Parle",
-                Some("1234567890123456789"),
-                Some("Mumbai"),
-                Err("no substantive details"),
-            ),
-            ("Domino's Vile Parle", Some(FULL), None, Err("no city")),
-            (
-                "MCA BKC Club",
-                Some(
-                    "FDA has issued a notice and seeks explanation from the club within seven days",
-                ),
-                Some("Mumbai"),
-                Err(no_action),
-            ),
-            (
-                "   ",
-                Some(FULL),
-                Some("Mumbai"),
-                Err("empty establishment"),
-            ),
-        ];
-        for (est, details, city, expected) in cases {
-            assert_eq!(check(&action(est, details, city)), expected, "{est}");
-        }
+    #[test_case("Domino's Vile Parle", Some(FULL), Some("Mumbai"), Ok(()); "complete record")]
+    #[test_case("IIT Bombay Hostel Canteen (Hostels 12, 13 & 14)", Some(FULL), Some("Mumbai"), Ok(()); "long genuine name")]
+    #[test_case("Domino's Vile Parle", Some("12345678901234567890"), Some("Mumbai"), Ok(()); "details at floor")]
+    #[test_case("'Popularity was never my goal'", Some(FULL), Some("Mumbai"), Err("quote-led establishment"); "quote-led name")]
+    #[test_case("Popular Re 1 Ayurvedic Digestive Tablet Fails Maharashtra FDA Quality Test", Some(FULL), Some("Mumbai"), Err("establishment is a product, not an outlet"); "product name")]
+    #[test_case("Maharashtra FDA rolls out year", Some(FULL), Some("Mumbai"), Err("establishment is the regulator, not an outlet"); "regulator name")]
+    #[test_case("FDA awaiting response from restaurants at Mumbai Cricket Association premises", Some(FULL), Some("Mumbai"), Err("no concrete action yet"); "awaiting response")]
+    #[test_case("FDA awaits replies from restaurants at MCA premises", Some(FULL), Some("Mumbai"), Err("no concrete action yet"); "awaits replies")]
+    #[test_case("Maharashtra FDA awaits replies from five MCA restaurants over licensing violations", Some(FULL), Some("Mumbai"), Err("no concrete action yet"); "awaits replies long")]
+    #[test_case("Popular Re 1 Digestive Item Fails Maharashtra Quality Test Today Here", Some(FULL), Some("Mumbai"), Err("establishment reads like a headline fragment"); "headline fragment")]
+    #[test_case("Domino's Vile Parle", None, Some("Mumbai"), Err("no substantive details"); "no details")]
+    #[test_case("Domino's Vile Parle", Some("1234567890123456789"), Some("Mumbai"), Err("no substantive details"); "short details")]
+    #[test_case("Domino's Vile Parle", Some(FULL), None, Err("no city"); "no city")]
+    #[test_case("MCA BKC Club", Some("FDA has issued a notice and seeks explanation from the club within seven days"), Some("Mumbai"), Err("no concrete action yet"); "seeks explanation")]
+    #[test_case("   ", Some(FULL), Some("Mumbai"), Err("empty establishment"); "blank name")]
+    fn gates_junk_shapes(
+        est: &str,
+        details: Option<&str>,
+        city: Option<&str>,
+        expected: Result<(), &'static str>,
+    ) {
+        assert_eq!(check(&action(est, details, city)), expected, "{est}");
     }
 
     #[test]

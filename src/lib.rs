@@ -2,6 +2,7 @@ pub mod db;
 pub mod llm;
 pub mod models;
 pub mod news;
+pub mod rules;
 pub mod scrape;
 
 use std::sync::OnceLock;
