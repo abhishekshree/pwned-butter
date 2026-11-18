@@ -1,7 +1,11 @@
+pub mod config;
 pub mod db;
+pub mod domain;
+pub mod error;
 pub mod llm;
 pub mod models;
 pub mod news;
+pub mod report;
 pub mod rules;
 pub mod scrape;
 
