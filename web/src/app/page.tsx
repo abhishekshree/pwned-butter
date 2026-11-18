@@ -168,7 +168,9 @@ export default async function Home({
             {stats.lastRun?.finished_at ? (
               <p className="inline-flex items-center gap-1 border-t border-border/50 pt-3 font-mono text-xs text-muted-foreground">
                 <Clock className="size-3 text-muted-foreground/70" />
-                Updated {formatDateTime(stats.lastRun.finished_at)}
+                Updated {formatDateTime(stats.lastRun.finished_at)} ·{" "}
+                {stats.lastRun.actions_upserted} row
+                {stats.lastRun.actions_upserted === 1 ? "" : "s"}
               </p>
             ) : null}
           </div>
