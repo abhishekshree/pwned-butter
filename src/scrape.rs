@@ -127,6 +127,23 @@ async fn collapse_dupes(
     (kept, calls)
 }
 
+/// The tracker covers Mumbai and Pune only. The FDA brief is statewide, so a
+/// roundup that names outlets in Nashik or Mahabaleshwar still parses — drop
+/// them at the insert boundary instead of showing cities the site has no
+/// section for.
+const IN_SCOPE_CITIES: &[&str] = &["mumbai", "pune"];
+
+/// Case-insensitive: "Mumbai Suburban" is still Mumbai, "Navi Mumbai" is not.
+fn in_scope(city: Option<&str>) -> bool {
+    city.is_some_and(|city| {
+        let city = city.trim().to_lowercase();
+        IN_SCOPE_CITIES.iter().any(|keep| {
+            city.strip_prefix(keep)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+        })
+    })
+}
+
 pub fn build_rows(items: &[NewsItem], actions: &[LlmAction], scope: Scope) -> Vec<ActionInsert> {
     actions
         .iter()
@@ -136,10 +153,14 @@ pub fn build_rows(items: &[NewsItem], actions: &[LlmAction], scope: Scope) -> Ve
             }
             let item = items.get(a.source_index)?;
             let establishment = nonempty(Some(a.establishment.as_str()))?;
+            let city = nonempty(a.city.as_deref());
+            if !in_scope(city.as_deref()) {
+                return None;
+            }
             Some(ActionInsert {
                 establishment,
                 area: nonempty(a.area.as_deref()),
-                city: nonempty(a.city.as_deref()),
+                city,
                 brand: nonempty(a.brand.as_deref()),
                 operator: nonempty(a.operator.as_deref()),
                 outlet_type: a.outlet_type.as_deref().map(OutletType::from),
@@ -208,6 +229,7 @@ mod tests {
         let items = vec![item("a", "b")];
         let action = LlmAction {
             establishment: "X".into(),
+            city: Some("Mumbai".into()),
             outlet_type: Some("pavement stand".into()),
             action_type: ActionType::Inspection,
             source_index: 0,
@@ -216,6 +238,55 @@ mod tests {
         let rows = build_rows(&items, &[action], Scope::General);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].outlet_type, Some(OutletType::Other));
+    }
+
+    fn with_city(city: &str) -> LlmAction {
+        LlmAction {
+            establishment: "X".into(),
+            city: Some(city.into()),
+            action_type: ActionType::LicenceSuspension,
+            source_index: 0,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn keeps_only_mumbai_and_pune() {
+        let items = vec![item("a", "b")];
+        let kept = build_rows(
+            &items,
+            &[
+                with_city("Mumbai"),
+                with_city("pune"),
+                with_city("Pune City"),
+            ],
+            Scope::General,
+        );
+        assert_eq!(kept.len(), 3, "Mumbai, Pune and Pune City are in scope");
+
+        let dropped = build_rows(
+            &items,
+            &[
+                with_city("Thane"),
+                with_city("Navi Mumbai"),
+                with_city("Mahabaleshwar"),
+                with_city("Nashik"),
+            ],
+            Scope::General,
+        );
+        assert!(dropped.is_empty(), "other cities are out of scope");
+    }
+
+    #[test]
+    fn drops_outlet_with_no_city() {
+        let items = vec![item("a", "b")];
+        let action = LlmAction {
+            establishment: "X".into(),
+            action_type: ActionType::Inspection,
+            source_index: 0,
+            ..Default::default()
+        };
+        assert!(build_rows(&items, &[action], Scope::General).is_empty());
     }
 
     #[test]
@@ -269,6 +340,7 @@ mod tests {
     fn scored(score: Option<i32>) -> LlmAction {
         LlmAction {
             establishment: "X".into(),
+            city: Some("Mumbai".into()),
             action_type: ActionType::Inspection,
             compliance_score: score,
             source_index: 0,
