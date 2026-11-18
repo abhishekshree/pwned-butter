@@ -2,13 +2,14 @@
 //! beyond this module without becoming one of these.
 
 use chrono::{DateTime, NaiveDate, Utc};
+use strum::{EnumIter, IntoEnumIterator};
 
 use crate::error::Rejection;
 use crate::models::{ActionType, LlmAction, NewsItem, OutletType, nonempty};
 
 /// Cities this tracker covers, and only these. Replaces the string-prefix
 /// `IN_SCOPE_CITIES` check that could drift from the prompts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter)]
 pub enum CoveredCity {
     Mumbai,
     Pune,
@@ -17,25 +18,20 @@ pub enum CoveredCity {
     Lonavala,
 }
 
-const COVERED: &[(CoveredCity, &str)] = &[
-    (CoveredCity::NaviMumbai, "navi mumbai"),
-    (CoveredCity::Mumbai, "mumbai"),
-    (CoveredCity::Pune, "pune"),
-    (CoveredCity::Thane, "thane"),
-    (CoveredCity::Lonavala, "lonavala"),
-];
-
 impl CoveredCity {
     /// Accepts a city with a locality qualifier ("Mumbai Suburban") but not a
-    /// different place that merely starts with the same characters.
+    /// different place that merely starts with the same characters. The names
+    /// come from `as_str`, so there is only one copy of each city string.
     pub fn parse(raw: &str) -> Option<Self> {
         let value = raw.trim().to_lowercase();
-        COVERED.iter().find_map(|(city, prefix)| {
-            value
-                .strip_prefix(prefix)
-                .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
-                .then_some(*city)
-        })
+        Self::iter()
+            .filter(|city| {
+                let name = city.as_str().to_lowercase();
+                value
+                    .strip_prefix(&name)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+            })
+            .max_by_key(|city| city.as_str().len())
     }
 
     pub fn as_str(self) -> &'static str {
@@ -112,8 +108,8 @@ impl Candidate {
     /// of the `Other` error sink; unrecognised action codes are already
     /// rejected by serde when the LLM response is parsed.
     pub fn try_new(action: LlmAction, article: &Article) -> Result<Self, Rejection> {
-        let establishment = nonempty(Some(action.establishment.as_str()))
-            .ok_or(Rejection::NoEstablishment)?;
+        let establishment =
+            nonempty(Some(action.establishment.as_str())).ok_or(Rejection::NoEstablishment)?;
         let city = CoveredCity::parse(action.city.as_deref().unwrap_or(""))
             .ok_or(Rejection::OutOfScopeCity)?;
         let action_date = action
@@ -189,8 +185,14 @@ mod tests {
 
     #[test]
     fn covered_cities_accept_qualifiers_and_reject_prefixes() {
-        assert_eq!(CoveredCity::parse("Mumbai Suburban"), Some(CoveredCity::Mumbai));
-        assert_eq!(CoveredCity::parse("navi mumbai"), Some(CoveredCity::NaviMumbai));
+        assert_eq!(
+            CoveredCity::parse("Mumbai Suburban"),
+            Some(CoveredCity::Mumbai)
+        );
+        assert_eq!(
+            CoveredCity::parse("navi mumbai"),
+            Some(CoveredCity::NaviMumbai)
+        );
         assert_eq!(CoveredCity::parse("Panvel"), None);
         assert_eq!(CoveredCity::parse("Mumbaiwadi"), None);
     }

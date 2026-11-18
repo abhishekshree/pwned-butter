@@ -23,6 +23,7 @@ export const OUTLET_TYPE_LABELS: Record<string, string> = {
   other: "Food Establishment",
 };
 
+// Mirrors domain::Status and the status CASE in migrations/0001_init.sql.
 export const STATUS_CONFIG: Record<
   string,
   { label: string; tone: string; dot: string; edge: string; glow: string }

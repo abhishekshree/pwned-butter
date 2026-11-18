@@ -12,18 +12,15 @@ An item qualifies only when ALL FOUR conditions hold:
    category, a quote, a product, a person, the regulator itself, a factory,
    processing plant, warehouse, wholesale supplier, dairy plant, farm, or any
    pharma/non-food business does NOT qualify. A roundup that names several
-   outlets STILL qualifies: emit one object for the item and put the most
-   specifically named outlet in `establishment`. Do not skip a roundup just
-   because it lists more than one outlet. Generic descriptors such as "a sweet
-   shop", "five outlets" or "nine restaurants" are NOT named outlets.
+   outlets STILL qualifies: emit one object for the item. Do not skip a roundup
+   just because it lists more than one outlet. Generic descriptors such as "a
+   sweet shop", "five outlets" or "nine restaurants" are NOT named outlets.
 2. CONCRETE ACTION. The text states a licence suspension, cancellation or
    revocation; a stop-business or closure order; an improvement notice; a
    sealing; a seizure; or an FDA inspection/raid that cites violations.
    Plans, announcements, drives, interviews, profiles, "awaits reply",
    "seeks explanation", "notice issued" with replies still pending, and
-   future programmes do NOT qualify. Treat revoked/cancelled licences as
-   licence_suspension and a named regulator's order to shut/cease as
-   stop_business.
+   future programmes do NOT qualify.
 3. COVERED CITY. The text places the outlet in Mumbai, Pune, Thane,
    Navi Mumbai or Lonavala. No covered city named means skip the item.
 4. EVIDENCE. You can point to specific words in the supplied title or text
@@ -35,33 +32,19 @@ An item qualifies only when ALL FOUR conditions hold:
 Use ONLY the supplied text. Do not open URLs, browse, or use outside
 knowledge. Do not guess an outlet name, city or action. When in doubt, skip.
 
-Output JSON only, no prose, no Markdown. Each object has exactly these
+Output JSON only, no prose, no Markdown. Each object has exactly these two
 camelCase fields:
 - sourceIndex: the integer index of the input item (required)
-- actionType: one of licence_suspension, stop_business, improvement_notice,
-  sealing, seizure, inspection, reopened
-- city: one of "Mumbai", "Pune", "Thane", "Navi Mumbai", "Lonavala", or null
-  if the text does not name one
-- establishment: the outlet name as written in the text, or null
-- reason: a short phrase copied from the text that proves the outlet and the
-  action (required). No such phrase exists means skip the item.
-- evidence: the exact substring from the title or text used as `reason`
-  (required). It must appear verbatim; do not paraphrase it.
-- confidence: a number from 0 to 1 in how certain you are (required).
-
-## Downstream acceptance rules
-A record failing any of these is discarded, so do not emit it:
-- `establishment` must be non-empty and at most {{MAX_ESTABLISHMENT_WORDS}} words
-- the finding must support at least {{MIN_DETAILS_CHARS}} characters of detail
-- `city` must be one of: {{CITIES}}
-- text containing any of [{{NO_ACTION_YET}}] counts as pending, not a concrete action
+- reason: a short phrase copied from the text that proves both the named
+  outlet and the concrete action (required). No such phrase exists means
+  skip the item.
 
 ## Real examples from this tracker
 
-KEEP this roundup, naming the most specific outlet in `establishment`:
+KEEP this roundup:
   headline: "Maharashtra FDA suspends licences of 9 Mumbai's restaurants,
              including Chetana, Bayroute, Cafe Ideal, Nat"
-  actionType: licence_suspension, city: Mumbai, establishment: Chetana
+  reason: "licences of 9 Mumbai's restaurants, including Chetana"
 
 SKIP these:
   "Maharashtra FDA crackdown: Rs 4.58 lakh food stock seized from Mumbra sweet shop after man's death"

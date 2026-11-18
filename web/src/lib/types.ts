@@ -9,6 +9,7 @@ export type ActionRow = {
   outlet_type: string | null;
   action_type: string;
   action_date: string;
+  // Derived by the DB CASE from action_type (see migrations/0001_init.sql).
   status: string;
   violations: string[];
   compliance_score: number | null;

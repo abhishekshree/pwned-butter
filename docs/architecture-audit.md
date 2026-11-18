@@ -362,6 +362,8 @@ binaries
 
 **What I explicitly would not do:** no framework, no DI container, no validation library, no async trait layer, no codegen for three TS labels, no newtype for every field, no rewriting the LLM prompts' business semantics, no changing what counts as an enforceable action, no repo-wide `thiserror` migration.
 
+**Standing pattern for every wave:** after each wave, run a test-hygiene pass over old and new tests together. Delete tests that only lock a trivial pass-through, a prompt string that is not a domain invariant, a rule the type system or SQL schema already enforces, or a helper that exists only to be tested. Keep tests that lock domain invariants or cover high-risk seams. Coverage percentage is not a goal.
+
 ---
 
 ## 5. Prioritized incremental plan

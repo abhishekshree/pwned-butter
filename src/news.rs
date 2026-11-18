@@ -9,6 +9,7 @@ use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
 use urlencoding::encode;
 
+use crate::domain::Article;
 use crate::models::NewsItem;
 use crate::rules::rules;
 
@@ -261,12 +262,24 @@ fn already_seen(urls: &HashSet<String>, seen: &HashSet<String>, url: &str) -> bo
     urls.contains(url) || seen.contains(url)
 }
 
+/// Pick the canonical URL and snippet exactly once, from the fetch outcome.
+fn canonical(item: &NewsItem, fetched: Option<FetchedArticle>) -> (String, Option<String>) {
+    match fetched {
+        Some(FetchedArticle { final_url, snippet }) => (final_url, snippet),
+        None => {
+            // Deliberate degradation: a failed fetch keeps the Google URL and uses the headline as snippet.
+            let snippet = item.snippet.clone().or_else(|| Some(item.title.clone()));
+            (item.url.clone(), snippet)
+        }
+    }
+}
+
 pub async fn enrich(
     client: &reqwest::Client,
     items: Vec<NewsItem>,
     seen: &HashSet<String>,
     max_items: usize,
-) -> Vec<NewsItem> {
+) -> Vec<Article> {
     let available = items.len();
     let items = select_for_enrichment(items, max_items);
     info!(
@@ -289,30 +302,22 @@ pub async fn enrich(
     let mut results = fan_out(FETCH_CONCURRENCY, jobs).await;
     results.sort_by_key(|(i, _, _)| *i);
 
-    let mut out: Vec<NewsItem> = Vec::with_capacity(results.len());
+    let mut out: Vec<Article> = Vec::with_capacity(results.len());
     let mut urls: HashSet<String> = HashSet::new();
-    for (_, mut item, res) in results {
-        match res {
-            Ok(FetchedArticle { final_url, snippet }) => {
-                if already_seen(&urls, seen, &final_url) {
-                    continue;
-                }
-                urls.insert(final_url.clone());
-                item.url = final_url;
-                item.snippet = snippet;
-            }
+    for (_, item, res) in results {
+        let fetched = match res {
+            Ok(fetched) => Some(fetched),
             Err(e) => {
                 warn!("article fetch failed ({}): {e}", item.url);
-                if already_seen(&urls, seen, &item.url) {
-                    continue;
-                }
-                urls.insert(item.url.clone());
-                if item.snippet.is_none() {
-                    item.snippet = Some(item.title.clone());
-                }
+                None
             }
+        };
+        let (url, snippet) = canonical(&item, fetched);
+        if already_seen(&urls, seen, &url) {
+            continue;
         }
-        out.push(item);
+        urls.insert(url.clone());
+        out.push(Article::new(item, url, snippet));
     }
     out.sort_by(|a, b| {
         b.published
@@ -324,7 +329,7 @@ pub async fn enrich(
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_snippet, select_for_enrichment};
+    use super::{FetchedArticle, canonical, extract_snippet, select_for_enrichment};
     use crate::models::NewsItem;
     use chrono::{Duration, Utc};
 
@@ -371,5 +376,44 @@ mod tests {
         };
         let selected = select_for_enrichment(vec![generic, action], 1);
         assert_eq!(selected[0].url, "https://example.test/action");
+    }
+
+    #[test]
+    fn canonical_uses_final_url_on_success_and_original_url_on_failure() {
+        let item = NewsItem {
+            title: "FDA seals eatery".into(),
+            url: "https://news.google.com/original".into(),
+            source: None,
+            published: None,
+            snippet: None,
+        };
+
+        let (url, snippet) = canonical(
+            &item,
+            Some(FetchedArticle {
+                final_url: "https://publisher.test/story".into(),
+                snippet: Some("extracted snippet".into()),
+            }),
+        );
+        assert_eq!(
+            url, "https://publisher.test/story",
+            "success uses final URL"
+        );
+        assert_eq!(
+            snippet.as_deref(),
+            Some("extracted snippet"),
+            "success uses fetched snippet"
+        );
+
+        let (url, snippet) = canonical(&item, None);
+        assert_eq!(
+            url, "https://news.google.com/original",
+            "failure keeps original URL"
+        );
+        assert_eq!(
+            snippet.as_deref(),
+            Some("FDA seals eatery"),
+            "failure degrades to headline"
+        );
     }
 }

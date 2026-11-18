@@ -18,17 +18,3 @@ pub enum Rejection {
     HeadlineFragment,
     NoSubstantiveDetails,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::Rejection;
-
-    #[test]
-    fn rejection_reasons_have_stable_codes() {
-        assert_eq!(Rejection::OutOfScopeCity.to_string(), "out_of_scope_city");
-        assert_eq!(
-            Rejection::NoSubstantiveDetails.to_string(),
-            "no_substantive_details"
-        );
-    }
-}
