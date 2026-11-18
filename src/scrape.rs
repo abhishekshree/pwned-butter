@@ -127,13 +127,13 @@ async fn collapse_dupes(
     (kept, calls)
 }
 
-/// The tracker covers Mumbai and Pune only. The FDA brief is statewide, so a
-/// roundup that names outlets in Nashik or Mahabaleshwar still parses — drop
-/// them at the insert boundary instead of showing cities the site has no
-/// section for.
-const IN_SCOPE_CITIES: &[&str] = &["mumbai", "pune"];
+/// Cities the tracker covers. The FDA brief is statewide, so a roundup that
+/// names outlets in Nashik or Mahabaleshwar still parses — drop them at the
+/// insert boundary instead of showing places the site has no section for.
+const IN_SCOPE_CITIES: &[&str] = &["mumbai", "pune", "thane", "navi mumbai", "lonavala"];
 
-/// Case-insensitive: "Mumbai Suburban" is still Mumbai, "Navi Mumbai" is not.
+/// Case-insensitive: "Mumbai Suburban" is still Mumbai, "Navi Mumbai" needs
+/// its own entry because the prefix does not match.
 fn in_scope(city: Option<&str>) -> bool {
     city.is_some_and(|city| {
         let city = city.trim().to_lowercase();
@@ -251,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_only_mumbai_and_pune() {
+    fn keeps_only_the_covered_cities() {
         let items = vec![item("a", "b")];
         let kept = build_rows(
             &items,
@@ -259,22 +259,26 @@ mod tests {
                 with_city("Mumbai"),
                 with_city("pune"),
                 with_city("Pune City"),
+                with_city("Thane"),
+                with_city("Thane West"),
+                with_city("Navi Mumbai"),
+                with_city("Lonavala"),
             ],
             Scope::General,
         );
-        assert_eq!(kept.len(), 3, "Mumbai, Pune and Pune City are in scope");
+        assert_eq!(kept.len(), 7, "all covered cities are kept");
 
         let dropped = build_rows(
             &items,
             &[
-                with_city("Thane"),
-                with_city("Navi Mumbai"),
                 with_city("Mahabaleshwar"),
                 with_city("Nashik"),
+                with_city("Panvel"),
+                with_city("Bhiwandi"),
             ],
             Scope::General,
         );
-        assert!(dropped.is_empty(), "other cities are out of scope");
+        assert!(dropped.is_empty(), "uncovered cities are out of scope");
     }
 
     #[test]
