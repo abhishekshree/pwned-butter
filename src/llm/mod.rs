@@ -33,6 +33,7 @@ pub(crate) async fn triage(
     if items.is_empty() {
         return Ok((Vec::new(), 0));
     }
+    let system = triage::build_system_prompt();
     let client = genai::client(api_key, None)?;
     let mut calls = 0;
     let mut verdicts = Vec::new();
@@ -40,7 +41,7 @@ pub(crate) async fn triage(
 
     for (batch_no, chunk) in items.chunks(BATCH_SIZE).enumerate() {
         let base = batch_no * BATCH_SIZE;
-        let (batch, used) = genai::triage_batch(&client, model, chunk).await;
+        let (batch, used) = genai::triage_batch(&client, model, chunk, &system).await;
         calls += used;
         match batch {
             Ok(batch) => {
@@ -52,11 +53,28 @@ pub(crate) async fn triage(
                         );
                         continue;
                     }
+                    if !triage::evidence_is_supplied(
+                        &chunk[verdict.source_index],
+                        verdict.evidence.as_deref(),
+                    ) {
+                        warn!(
+                            index = verdict.source_index,
+                            "triage evidence not found in item"
+                        );
+                        continue;
+                    }
                     verdict.source_index += base;
+                    if verdict.confidence.is_some_and(|c| c < 0.5) {
+                        warn!(
+                            index = verdict.source_index,
+                            "low-confidence triage verdict"
+                        );
+                    }
                     if seen.insert(verdict.source_index) {
                         debug!(
                             index = verdict.source_index,
                             reason = verdict.reason.as_deref().unwrap_or("-"),
+                            confidence = verdict.confidence.unwrap_or(-1.0),
                             "triage kept item"
                         );
                         verdicts.push(verdict);
@@ -76,6 +94,8 @@ pub(crate) async fn triage(
                             city: None,
                             establishment: None,
                             reason: None,
+                            evidence: None,
+                            confidence: None,
                         });
                     }
                 }

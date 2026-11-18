@@ -10,7 +10,7 @@ use tracing::warn;
 
 use crate::models::{LlmAction, NewsItem};
 
-use super::triage::{Job, TRIAGE_PROMPT, Verdict, parse_verdicts};
+use super::triage::{Job, Verdict, parse_verdicts, triage_schema};
 use super::{SYSTEM_PROMPT, strip_code_fences, truncate};
 
 pub(crate) const DEFAULT_OPENROUTER_MODEL: &str = "openrouter/free";
@@ -67,12 +67,14 @@ async fn chat_text(
     unreachable!("MAX_ATTEMPTS is nonzero")
 }
 
-/// Strict relevance pass over one chunk. The snippet is truncated here to
-/// bound the prompt; extraction still sees the full article text.
+/// Strict relevance pass over one chunk. Chunking already bounds the prompt —
+/// extraction sends the same full snippets in batches of 20 — so the model
+/// gets the article text, publication date and final URL, not a prefix.
 pub(crate) async fn triage_batch(
     client: &Client,
     model: &str,
     chunk: &[NewsItem],
+    system: &str,
 ) -> (Result<Vec<Verdict>>, usize) {
     let items: Vec<Value> = chunk
         .iter()
@@ -82,7 +84,9 @@ pub(crate) async fn triage_batch(
                 "sourceIndex": index,
                 "title": item.title,
                 "publisher": item.source,
-                "text": item.snippet.as_deref().unwrap_or("").chars().take(600).collect::<String>(),
+                "published": item.published,
+                "url": item.url,
+                "text": item.snippet.as_deref().unwrap_or(""),
             })
         })
         .collect();
@@ -90,8 +94,8 @@ pub(crate) async fn triage_batch(
         Ok(user) => user,
         Err(error) => return (Err(error.into()), 0),
     };
-    let request = ChatRequest::from_system(TRIAGE_PROMPT).append_message(ChatMessage::user(user));
-    let options = json_options(4096, json!({"type": "array"}));
+    let request = ChatRequest::from_system(system).append_message(ChatMessage::user(user));
+    let options = json_options(4096, triage_schema());
     let (text, calls) = chat_text(client, model, request, &options).await;
     (text.and_then(|text| parse_verdicts(&text)), calls)
 }
