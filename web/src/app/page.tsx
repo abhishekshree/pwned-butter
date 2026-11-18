@@ -15,7 +15,7 @@ import { AreaMap } from "@/components/area-map";
 import { SearchInput } from "@/components/search-input";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { buttonVariants } from "@/components/ui/button";
-import { formatDate, formatDateTime, formatNumber } from "@/lib/format";
+import { formatDate, formatDateTime, formatNumber, STATUS_CONFIG } from "@/lib/format";
 import { buildHref } from "@/lib/href";
 import {
   getStats,
@@ -31,9 +31,7 @@ const MAX_PAGE = 10_000;
 
 const STATUS_CHIPS: { v: string | null; label: string }[] = [
   { v: null, label: "All Actions" },
-  { v: "suspended", label: "Suspended" },
-  { v: "reopened", label: "Reopened" },
-  { v: "active", label: "Active / Notices" },
+  ...Object.entries(STATUS_CONFIG).map(([v, cfg]) => ({ v, label: cfg.chipLabel })),
 ];
 
 function single(v: string | string[] | undefined): string | undefined {

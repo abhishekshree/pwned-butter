@@ -23,43 +23,42 @@ mod triage;
 
 use triage::Verdict;
 
-/// A verdict's `sourceIndex` is chunk-local. Translate it to the caller's
-/// absolute index, rejecting anything outside the chunk.
-fn verdict_index(base: usize, verdict: &Verdict, chunk_len: usize) -> Option<usize> {
-    (verdict.source_index < chunk_len).then_some(base + verdict.source_index)
+/// Resolve a chunk-local `sourceIndex` to its article. Each chunk addresses
+/// only itself, so there is no absolute offset to carry between batches.
+fn verdict_article<'a>(chunk: &'a [Article], verdict: &Verdict) -> Option<&'a Article> {
+    chunk.get(verdict.source_index)
 }
 
-/// Strict relevance pass. Returns the absolute indices the extraction stage
-/// should process. A failed batch passes its items through and is counted, so
-/// a degraded run never silently drops the whole chunk.
-pub(crate) async fn triage(
+/// Strict relevance pass. Returns the articles the extraction stage should
+/// process. A failed batch passes its items through and is counted, so a
+/// degraded run never silently drops the whole chunk.
+pub(crate) async fn triage<'a>(
     api_key: &str,
     model: &str,
-    items: &[Article],
+    items: &'a [Article],
     metrics: &mut RunMetrics,
-) -> Result<Vec<usize>> {
+) -> Result<Vec<&'a Article>> {
     if items.is_empty() {
         return Ok(Vec::new());
     }
     let client = genai::client(api_key, None)?;
     let mut kept = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen: HashSet<&str> = HashSet::new();
 
     for (batch_no, chunk) in items.chunks(BATCH_SIZE).enumerate() {
-        let base = batch_no * BATCH_SIZE;
         match genai::triage_batch(&client, model, chunk, metrics).await {
             Ok(verdicts) => {
                 for verdict in verdicts {
-                    let Some(index) = verdict_index(base, &verdict, chunk.len()) else {
+                    let Some(item) = verdict_article(chunk, &verdict) else {
                         warn!(
                             index = verdict.source_index,
                             "triage verdict index out of range"
                         );
                         continue;
                     };
-                    if seen.insert(index) {
-                        debug!(index, reason = ?verdict.reason, "triage kept item");
-                        kept.push(index);
+                    if seen.insert(item.url.as_str()) {
+                        debug!(url = %item.url, reason = ?verdict.reason, "triage kept item");
+                        kept.push(item);
                     }
                 }
             }
@@ -70,10 +69,9 @@ pub(crate) async fn triage(
                     error = %format!("{error:#}"),
                     "triage failed; passing all items through"
                 );
-                for offset in 0..chunk.len() {
-                    let index = base + offset;
-                    if seen.insert(index) {
-                        kept.push(index);
+                for item in chunk {
+                    if seen.insert(item.url.as_str()) {
+                        kept.push(item);
                     }
                 }
             }
@@ -89,9 +87,9 @@ pub async fn extract(
     items: &[Article],
     metrics: &mut RunMetrics,
 ) -> Result<Vec<Candidate>> {
-    let indices = triage(&config.gemini_key, &config.gemini_model, items, metrics).await?;
-    info!(relevant = indices.len(), total = items.len(), "llm triage");
-    if indices.is_empty() {
+    let articles = triage(&config.gemini_key, &config.gemini_model, items, metrics).await?;
+    info!(relevant = articles.len(), total = items.len(), "llm triage");
+    if articles.is_empty() {
         return Ok(Vec::new());
     }
 
@@ -106,15 +104,10 @@ pub async fn extract(
     };
     let client = genai::client(&config.gemini_key, openrouter_key)?;
 
-    let mut jobs: Vec<triage::Job<'_>> = indices
+    let jobs: Vec<triage::Job<'_>> = articles
         .into_iter()
-        .filter_map(|index| {
-            items
-                .get(index)
-                .map(|item| triage::Job { orig: index, item })
-        })
+        .map(|item| triage::Job { item })
         .collect();
-    jobs.sort_by_key(|job| job.orig);
 
     let mut candidates = Vec::new();
     let mut failed = 0;
@@ -131,21 +124,17 @@ pub async fn extract(
         .await
         {
             Ok(batch) => {
-                for (index, action) in batch {
+                for (article, action) in batch {
                     // Bound untrusted LLM strings before they reach the DB or
                     // the dedup prompt: no new logic, reuse the existing clamps.
                     let action = genai::sanitize_action(action);
-                    let Some(article) = items.get(index) else {
-                        warn!(index, "extraction result index out of range");
-                        continue;
-                    };
                     match Candidate::try_new(action, article)
                         .and_then(|candidate| quality::check(&candidate).map(|()| candidate))
                     {
                         Ok(candidate) => candidates.push(candidate),
                         Err(rejection) => {
                             metrics.rejected += 1;
-                            warn!(reason = %rejection, index, "dropping rejected LLM record");
+                            warn!(reason = %rejection, url = %article.url, "dropping rejected LLM record");
                         }
                     }
                 }
@@ -205,8 +194,9 @@ pub(crate) fn strip_code_fences(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{BATCH_SIZE, extract, verdict_index};
+    use super::{BATCH_SIZE, extract, verdict_article};
     use crate::config::Config;
+    use crate::domain::Article;
     use crate::llm::triage::Verdict;
     use crate::report::RunMetrics;
 
@@ -219,16 +209,39 @@ mod tests {
         }
     }
 
+    fn article(title: &str) -> Article {
+        Article {
+            title: title.into(),
+            url: format!("https://example.test/{title}"),
+            source: None,
+            published: None,
+            snippet: None,
+        }
+    }
+
     #[test]
-    fn verdict_indices_offset_across_batches() {
-        let verdict = |index| Verdict {
-            source_index: index,
+    fn each_chunk_maps_local_index_zero_to_its_own_article() {
+        let items: Vec<Article> = (0..2 * BATCH_SIZE)
+            .map(|index| article(&format!("item-{index}")))
+            .collect();
+        let verdict = Verdict {
+            source_index: 0,
             reason: None,
         };
-        // Second batch: base is BATCH_SIZE, local index 0 is absolute 20.
-        assert_eq!(verdict_index(BATCH_SIZE, &verdict(0), BATCH_SIZE), Some(20));
-        assert_eq!(verdict_index(BATCH_SIZE, &verdict(7), BATCH_SIZE), Some(27));
-        assert_eq!(verdict_index(0, &verdict(BATCH_SIZE), BATCH_SIZE), None);
+        let chunks: Vec<&[Article]> = items.chunks(BATCH_SIZE).collect();
+
+        assert_eq!(chunks.len(), 2, "two distinct chunks expected");
+        assert_eq!(
+            verdict_article(chunks[0], &verdict).map(|item| item.title.as_str()),
+            Some("item-0"),
+            "first chunk's local index 0 is its own first item"
+        );
+        let expected = format!("item-{BATCH_SIZE}");
+        assert_eq!(
+            verdict_article(chunks[1], &verdict).map(|item| item.title.as_str()),
+            Some(expected.as_str()),
+            "second chunk's local index 0 is its own first item"
+        );
     }
 
     #[tokio::test]

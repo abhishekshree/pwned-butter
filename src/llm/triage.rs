@@ -9,10 +9,9 @@ use super::strip_code_fences;
 
 pub(crate) const TRIAGE_PROMPT: &str = include_str!("../prompts/triage.txt");
 
-/// A relevance-filtered batch item; `orig` indexes the caller's `items` slice
-/// so verdicts still address the original input after chunking.
+/// A relevance-filtered batch item. Provenance is the `&Article` itself, so
+/// no positional index has to survive chunking.
 pub(crate) struct Job<'a> {
-    pub(crate) orig: usize,
     pub(crate) item: &'a Article,
 }
 

@@ -1,20 +1,63 @@
 # Architecture audit — `fda-mumbai-tracker`
 
-**Status:** audit only. No refactoring has been applied.
+**Status:** implemented refactor on branch `refactor/architecture-audit`. The audit below is retained as the design record; Section 2 now annotates each finding with its implementation outcome.
 
-**Scope:** read-only review of all Rust sources (~2,700 LOC), migrations, prompts, config, CI workflows, and the TypeScript read side. The first pass was written before the LLM triage rewrite; every finding below was then re-checked against the current working tree and amended where necessary. A short section at the end records exactly what was corrected.
+**Scope (of the original audit):** read-only review of all Rust sources (~2,700 LOC), migrations, prompts, config, CI workflows, and the TypeScript read side. The first pass was written before the LLM triage rewrite; every finding below was then re-checked against the then-current working tree and amended where necessary. Section 6 records exactly what was corrected.
 
-**Current-state note:** the triage rewrite is uncommitted and includes `src/llm/triage.rs`, `src/llm/mod.rs`, `src/llm/genai.rs`, `src/rules.rs`, `src/rules.toml`, and the new `src/prompts/triage.txt`. It removed the keyword triage rules, the 25-city hint list, and the headline-derived name/city fallback, and replaced them with an LLM relevance pass that returns typed `Verdict`s. Findings affected by this are marked **Amended**; the one new finding is marked **New**.
+**Audit-baseline note:** at audit time the triage rewrite was uncommitted and included `src/llm/triage.rs`, `src/llm/mod.rs`, `src/llm/genai.rs`, `src/rules.rs`, `src/rules.toml`, and the new `src/prompts/triage.txt`. It removed the keyword triage rules, the 25-city hint list, and the headline-derived name/city fallback, and replaced them with an LLM relevance pass that returns typed `Verdict`s. Findings affected by this are marked **Amended**; the one new finding is marked **New**. That rewrite is now part of the baseline this refactor started from.
 
-**Baseline verification (current working tree):**
+**Audit-baseline verification (working tree at audit time, before this refactor):**
 
 - `cargo clippy --all-targets -- -D warnings` — clean.
 - `cargo test` — 45 passed, 1 ignored (`live_triage_demo`, a live-network test).
-- `.github/workflows/scrape.yml:54` greps stderr for `llm batch .* failed`. Verified by direct test: this pattern **does not match** the current message `"llm batch failed"` emitted at `src/llm/mod.rs:220` (it requires a second ` failed` after the wildcard). The CI "Failed subtasks" counter therefore undercounts extraction failures.
+- `.github/workflows/scrape.yml:54` greps stderr for `llm batch .* failed`. Verified by direct test: this pattern **does not match** the message `"llm batch failed"` emitted at `src/llm/mod.rs:220` (it requires a second ` failed` after the wildcard). The CI "Failed subtasks" counter therefore undercounts extraction failures. That grep has since been deleted (see Implementation outcome).
+
+---
+
+## Implementation outcome
+
+This branch is the implemented refactor, not an audit-only deliverable. The four commits in `5f54095..HEAD`:
+
+| Commit | What it did |
+|---|---|
+| `ec7c7c9` docs: record architectural audit and agreed refactor scope | Added this document — the audit, the agreed design, and the incremental plan. No code change. |
+| `29f598b` refactor: add validated domain types and centralised config | Added `src/config.rs` (all env reads in `Config::from_env`), `src/domain/mod.rs` (`Article`, `Candidate`, `CoveredCity`), `src/error.rs` (`Rejection`), `src/report.rs` (`RunMetrics`, `RunReport`, `StoreOutcome`). Types only, not yet wired in. |
+| `326d5b7` refactor: wire validated pipeline and drop redundant layers | The bulk of the change. Pipelines take `&Config` and return `RunReport`; deleted `src/bin/refresh.rs`, `replace_actions`, the LLM collapse pass and `src/prompts/dedupe.txt`, the salvage path, the counter tuples, the `&mut usize` salvage counter, the broken CI grep, and the prompt string-presence tests. Updated the runbook and the TS label comments. |
+| `ee7f3e2` fix: align dedup windows and restore invariant tests | Widened the `same_event` pre-check to ±10 days to match the SQL `daterange` canonicalisation, added the `action_type` filter so a `reopened` row is not swallowed, and restored invariant tests (`same_event` acronym/venue cases, action-code/SQL/dashboard parity, missing-date and unknown-outlet cases). |
+
+**Net code change:** `5f54095..HEAD` excluding this audit document is **932 insertions and 1,124 deletions across 23 files — net −192 lines**. (Including the document, the diff is larger; the document is design record, not shipped code.)
+
+**Verification at the final landed tree:**
+
+- `cargo fmt --check` — clean.
+- `cargo clippy --all-targets -- -D warnings` — clean.
+- `cargo test` — 44 passed.
+- `cargo nextest run --profile ci` — pass.
+- `cargo build --release` — succeeds.
+- All three binaries (`cache_bust`, `local_scrape`, `migrate`) build.
+
+These results cover the full tree including finding 7 and the web-status deduplication.
+
+### Scope decisions actually taken
+
+- No repo-wide `thiserror` migration. `Rejection` is a fieldless `strum::Display` enum (`src/error.rs`), not an error hierarchy; `anyhow` stays at I/O boundaries.
+- `parse_drops` was rejected as overcomplication — no helper was added just to report dropped records.
+- The canonical-key `canonical_outlet` column and one-off backfill (finding 1) were descoped by the owner; the SQL schema is unchanged.
+- A real end-to-end / database run is deferred: this environment has no scratch database and no API key. No live LLM/RSS path was exercised.
+
+### Protobuf decision: DEFER
+
+Keep the hand-maintained vocabulary and the parity test; do not introduce generated wire types.
+
+- The database is already the shared schema between Rust and TypeScript; there is no wire boundary between the two to justify a schema language.
+- The SQL `CHECK`/`CASE`, the prompt prose, and the TS label maps are not generator-producible from a proto definition — a generator could not remove those copies.
+- The parity test at `src/models.rs:148-162` already removes the duplication that is eliminable, by checking Rust codes against the SQL `CHECK` and the TS label map.
 
 ---
 
 ## 1. High-level assessment
+
+*This section and the findings below describe the audit baseline; implementation outcomes are annotated under each finding and summarised above.*
 
 ### What the system actually is
 
@@ -47,7 +90,9 @@ Verdict: the difficulty is not Rust idiom — it is that **domain decisions have
 
 Severity is about architectural impact, not style. "Verification" states how the finding survived the re-check.
 
-### 1. Five competing definitions of "same event" — **Critical** — *Confirmed*
+### 1. Five competing definitions of "same event" — **Critical** — *Partial (audit verdict: Confirmed)*
+
+**Implemented status — partial.** The five policies were reduced to two. The LLM collapse pass (`collapse_dupes`, `src/prompts/dedupe.txt`) and the replace-window in-memory dedup are deleted; `same_event` in `upsert_actions` (`src/db.rs:100-148`) is now the one Rust dedup authority, with the SQL `EXCLUDE` constraint as the final backstop. `ee7f3e2` widened the pre-check from ±5 to ±10 days so it matches the SQL `daterange` canonicalisation, and filtered candidate rows by `action_type` so a `reopened` row is not swallowed. A canonical `canonical_outlet` key and the one-off backfill were descoped by the owner; no migration was added.
 
 **Locations**
 
@@ -87,7 +132,9 @@ Severity is about architectural impact, not style. "Verification" states how the
 
 ---
 
-### 2. Failures are not visible in the run report — **Medium** — *Amended and descoped*
+### 2. Failures are not visible in the run report — **Medium** — *Done (audit verdict: Amended and descoped)*
+
+**Implemented status — done.** `triage_failures`, `extraction_failures` and `rejected` are counted in `RunReport.metrics` (`src/report.rs:3-9`), written into `fetch_runs.details` by `finish_run` (`src/db.rs:229-242`) and printed in the completion line; the broken CI grep is deleted. `quality::check` now returns `Result<(), Rejection>` where `Rejection` is a fieldless strum enum (`src/error.rs:8-20`) — not `&'static str`, and without adding `thiserror`. No repo-wide error migration.
 
 **Locations.** `src/llm/quality.rs:6` returns `Result<(), &'static str>`. `src/llm/genai.rs:58,60,136,149,252,264,266,324,332` constructs errors as formatted `anyhow!` strings. The new triage code adds more (`src/llm/triage.rs:36,39`). There is no `thiserror` in `Cargo.toml`.
 
@@ -118,7 +165,9 @@ As noted above, that first pattern does not even match the message the code emit
 
 ---
 
-### 3. Raw strings cross every boundary; validation happens six times with silent defaults — **High** — *Amended*
+### 3. Raw strings cross every boundary; validation happens six times with silent defaults — **High** — *Done (audit verdict: Amended)*
+
+**Implemented status — done.** `Article` and `Candidate` are separate types and `Candidate::try_new` (`src/domain/mod.rs:105-147`) is the single structural validation point; the flat `db::ActionInsert` DTO is gone. There is no `Utc::now()` fallback — undated records are rejected with `Rejection::NoActionDate`. Unknown outlet codes become `None`, covered cities are parsed by `CoveredCity::parse`, and out-of-range scores are filtered to `None`. The extraction/salvage split is gone, so `quality::check` applies to every candidate (`src/llm/mod.rs:142-149`).
 
 **Locations.** `LlmAction` (`src/models.rs:83-113`) has 14 fields, almost all `String`/`Option<String>`/`Vec<String>`, with no invariants. The same values are processed by:
 
@@ -154,7 +203,9 @@ Specific corrections: reject undated records instead of calling `Utc::now()`; ma
 
 ---
 
-### 4. Three write paths with divergent semantics — **High** — *Confirmed*
+### 4. Three write paths with divergent semantics — **High** — *Partial (audit verdict: Confirmed)*
+
+**Implemented status — partial.** `replace_actions` and `src/bin/refresh.rs` are deleted; `db::upsert_actions` is the only Rust write path. The Python repair script in `docs/manual-backfill.md` remains by deliberate choice — no `--since` repair mode was added to the Rust binary, so two repair mechanisms (one Rust, one Python) still exist.
 
 **Locations.**
 
@@ -172,7 +223,9 @@ Specific corrections: reject undated records instead of calling `Utc::now()`; ma
 
 ---
 
-### 5. Domain vocabulary duplicated across five artifacts — **High** — *Amended*
+### 5. Domain vocabulary duplicated across five artifacts — **High** — *Partial (audit verdict: Amended)*
+
+**Implemented status — partial.** `CoveredCity` is now an enum used by `Candidate::try_new` (`src/domain/mod.rs:12-46`), replacing the string-prefix city check, and `action_codes_match_sql_and_dashboard` (`src/models.rs:148-162`) checks Rust codes against the SQL `CHECK` and TS label map. Still open: no Rust `Status` enum or SQL `CASE` parity test, the SQL `ELSE 'suspended'` catch-all remains, and the prompts are still unstructured prose. The TS changes are comments pointing at the SQL/Rust sources, not generated labels.
 
 **Locations.**
 
@@ -194,7 +247,9 @@ Specific corrections: reject undated records instead of calling `Utc::now()`; ma
 
 ---
 
-### 6. Observability counters threaded as tuple elements through nine signatures — **High** — *Amended*
+### 6. Observability counters threaded as tuple elements through nine signatures — **High** — *Done (audit verdict: Amended)*
+
+**Implemented status — done.** `RunMetrics`, `RunReport` and `StoreOutcome` (`src/report.rs`) replace the nine counter tuples; one `&mut RunMetrics` is created in `scrape_once` and passed to the pipeline (`src/scrape.rs:60-69`) instead of a hidden parameter per helper. `finish_run` writes all five counters to `fetch_runs.details`, and the CI summary reads `triage_failures`/`extraction_failures` from the completion line instead of grepping stderr.
 
 **Locations.**
 
@@ -222,28 +277,21 @@ Plus `salvaged(..., failed: &mut usize)` (`src/llm/mod.rs:202-208`) and a duplic
 
 ---
 
-### 7. Provenance is a positional index into two parallel vector spaces — **Medium** — *Amended*
+### 7. Provenance is a positional index into two parallel vector spaces — **Medium** — *Done (audit verdict: Amended)*
 
-**Locations.** `LlmAction.source_index: usize` (`src/models.rs:112`) and `Verdict.source_index: usize` (`src/llm/triage.rs:23`).
+**Implemented status — done.** Verdict indices are resolved to `&Article` at the wire boundary and the pipeline carries references from then on. `Job<'a>` is now `{ item: &'a Article }` with no `orig`; `triage()` returns `Vec<&Article>` and dedups by URL; `verdict_index` and the `base = batch_no * BATCH_SIZE` offset math are gone; `extract_batch`/`absolute` return `Vec<(&Article, LlmAction)>`; and both `items.get(index)?` lookups in `extract()` are deleted. `LlmAction.source_index` and `Verdict.source_index` remain only as required wire fields for parsing LLM JSON, consumed once at the boundary. The sole remaining guarded lookup is `chunk.get(source_index)` in `absolute`, where an out-of-range model index is warned and dropped.
 
-The index now travels through two remaps:
+**Original evidence (pre-refactor).** `LlmAction.source_index: usize` (`src/models.rs:112`) and `Verdict.source_index: usize` (`src/llm/triage.rs:23`) travelled through two remaps: a triage `base` offset (`src/llm/mod.rs:41-63`), a `HashMap<usize, Verdict>` plus `items.get(index)?` and sort (`src/llm/mod.rs:93-133`), extraction's `remap` to `job.orig` (`src/llm/genai.rs:238-247`), and `build_rows`' `items.get(a.source_index)?` (`src/scrape.rs:139`). Four `get()?` sites could quietly discard evidence; a reorder or batch-boundary bug could attribute a record to the wrong article despite the README's source-link contract.
 
-1. `triage()` splits `items` into chunks, sets `base = batch_no * BATCH_SIZE`, and converts each chunk-local verdict index to an absolute one (`src/llm/mod.rs:41-63`).
-2. `extract()` keys verdicts into a `HashMap<usize, Verdict>`, filters `items.get(index)?` for each key, sorts by `orig`, and chunks again (`src/llm/mod.rs:93-133`).
-3. The extraction LLM returns chunk-local indices; `remap` translates them to `job.orig` (`src/llm/genai.rs:238-247`).
-4. `build_rows` does `items.get(a.source_index)?` and silently drops on out-of-range (`src/scrape.rs:139`).
+**Resolution.** No newtype. Each LLM stage now pairs its output with the borrowed `Article`; identity is the URL already deduplicated by `fetch_items`. Two pure tests cover multi-chunk local-index resolution and out-of-range dropping.
 
-Map of silent-drop sites: `src/llm/mod.rs:48-54` (out-of-range verdict), `src/llm/mod.rs:98-102` (`items.get`), `src/llm/genai.rs:242` (`chunk.get`), `src/scrape.rs:139` (`items.get`).
-
-**Underlying problem.** Source identity — the entire point of a "every record links to its source" tracker (`README.md:52-53`) — is an integer only meaningful relative to a vector in another function. A reorder or batch-boundary bug produces plausible but falsely attributed records, and four `get()?` sites quietly discard evidence.
-
-**Proposed design.** Do not introduce a newtype. Have each LLM stage return pairs — `Vec<(usize, Verdict)>`, `Vec<(usize, LlmAction)>` — or a small `Sourced<T> { value: T, source_url: String }`. Keep the `NewsItem` attached until `ActionInsert.source_url` is set. Then `remap`, the `base` offset arithmetic, `source_index`, and the silent `get()?` drops all disappear. Add one test with 21+ items split across two batches — currently there is none.
-
-**Migration scope:** `models.rs`, `llm/{mod,genai,triage}.rs`, `scrape.rs`.
+**Migration scope was:** `models.rs`, `llm/{mod,genai,triage}.rs`, `scrape.rs`.
 
 ---
 
-### 8. Hidden globals and environment reads inside library functions — **Medium** — *Confirmed*
+### 8. Hidden globals and environment reads inside library functions — **Medium** — *Partial (audit verdict: Confirmed; by deliberate choice)*
+
+**Implemented status — partial, by deliberate choice.** All environment reads moved to `Config::from_env()` (`src/config.rs:23-56`) and `&Config` is passed down from the binaries; the `db::pool()` check-then-init race is removed with a `Mutex` (`src/db.rs:19-35`); one `genai::Client` per stage now receives its keys from config. Kept deliberately: the `OnceLock`s for compile-time constants (selectors, bundled rules, shared HTTP client) and the `.expect()` on client build (`src/lib.rs:29-36`). No fake-client seam was added.
 
 **Locations.** `OnceLock<Client>` (`src/lib.rs:14`), `OnceLock<PgPool>` (`src/db.rs:16`), `OnceLock<Rules>` (`src/rules.rs:32`), four `OnceLock<Selector>` (`src/news.rs:175-178`). `db::pool()` reads `DATABASE_URL` itself (`src/db.rs:22`); `llm::extract` reads three OpenRouter variables mid-pipeline (`src/llm/mod.rs:111-127`).
 
@@ -261,7 +309,9 @@ Map of silent-drop sites: `src/llm/mod.rs:48-54` (out-of-range verdict), `src/ll
 
 ---
 
-### 9. Enrichment mutates `NewsItem`; identity changes when fetch fails — **Medium** — *Confirmed*
+### 9. Enrichment mutates `NewsItem`; identity changes when fetch fails — **Medium** — *Partial (audit verdict: Confirmed; by deliberate choice)*
+
+**Implemented status — partial, by deliberate choice.** `Article` is a separate type whose `url` is set once by `news::enrich` and never mutated (`src/domain/mod.rs:48-69`), and `Candidate.source_url` is copied from it, so downstream code cannot see the mid-pipeline identity change. Not changed: `fetch_items` still dedups on the Google News URL, and there is no one-off cleanup of mixed Google/publisher URLs already in the table. Full resolution was descoped with the canonical-key work (finding 1).
 
 **Locations.** `news::enrich` (`src/news.rs:264-323`), `fetch_items` dedup (`src/news.rs:133-134`), `db::seen_urls` (`src/db.rs:54-63`).
 
@@ -277,13 +327,15 @@ Map of silent-drop sites: `src/llm/mod.rs:48-54` (out-of-range verdict), `src/ll
 
 ---
 
-### 10. Tests lock string details, not the risky seams — **Medium** — *Amended*
+### 10. Tests lock string details, not the risky seams — **Medium** — *Partial (audit verdict: Amended)*
+
+**Implemented status — partial.** The test-hygiene pass removed the string-presence prompt tripwires and the live-demo test. New invariant/seam tests cover `verdict_index` offsets across two batches, `absolute()` chunk-local translation and out-of-range drops, `CoveredCity::parse`, `Candidate::try_new` (provenance, out-of-scope city, missing date, unknown outlet, score bounds), the `quality::check` rejection table, and `same_event` acronym/venue cases. Remaining gaps: no parity test between `same_event` and the SQL exclusion constraint, and no real end-to-end run.
 
 **Current design.** Good table-driven tests for `quality::check`, `parse_verdicts`, `parse_llm_text`, `same_event`, compliance-score bounds, and `drops_from_groups`. But `prompt_names_every_code_and_covered_city` (`src/llm/mod.rs:285-297`) and `prompt_names_every_action_code` (`src/llm/triage.rs:88-98`) assert that prompt text *contains substrings* — tripwires, not behavior tests. `live_triage_demo` (`src/llm/mod.rs:299-323`) is correctly `#[ignore]`d.
 
 **Uncovered high-risk seams:**
 
-- `remap` / triage base-offset translation with more than one `BATCH_SIZE` chunk (finding 7) — the index math is now more complex and still untested.
+- ~~`remap` / triage base-offset translation (finding 7)~~ — resolved: the offset math and positional indices are gone, so this seam no longer exists.
 - parity between `same_event`, the in-memory dedup, and the SQL exclusion constraint (finding 1).
 - `coerce_action_date` with neither input — the fabricated-today case is untested; existing tests only cover reported and published dates (`src/models.rs:183-195`).
 - unknown outlet code → `Other` is asserted as *desired* (`src/scrape.rs:214-228`), cementing the silent-substitution policy.
@@ -294,7 +346,9 @@ Map of silent-drop sites: `src/llm/mod.rs:48-54` (out-of-range verdict), `src/ll
 
 ---
 
-### 11. The new triage pass computes typed facts and discards them — **High** — *New*
+### 11. The new triage pass computes typed facts and discards them — **High** — *Done (audit verdict: New)*
+
+**Implemented status — done.** Triage is now a pure relevance filter: `Verdict` carries only `source_index` and `reason` (`src/llm/triage.rs:19-27`), and the prompt and JSON schema emit only those two fields. The salvage path is deleted. An all-batches-failed extraction now returns `Err(anyhow!("all llm batches failed"))` (`src/llm/mod.rs:164-166`) and partial batches increment `extraction_failures`, so the green zero-data run described below can no longer be reported as success.
 
 **Locations.** `src/prompts/triage.txt:31-40`, `src/llm/triage.rs:20-31`, `src/llm/mod.rs:93-103`, `src/llm/mod.rs:202-231`.
 
@@ -362,28 +416,29 @@ binaries
 
 **What I explicitly would not do:** no framework, no DI container, no validation library, no async trait layer, no codegen for three TS labels, no newtype for every field, no rewriting the LLM prompts' business semantics, no changing what counts as an enforceable action, no repo-wide `thiserror` migration.
 
-**Standing pattern for every wave:** after each wave, run a test-hygiene pass over old and new tests together. Delete tests that only lock a trivial pass-through, a prompt string that is not a domain invariant, a rule the type system or SQL schema already enforces, or a helper that exists only to be tested. Keep tests that lock domain invariants or cover high-risk seams. Coverage percentage is not a goal.
+**Standing pattern for every wave (adopted; applied in `ee7f3e2`):** after each wave, run a test-hygiene pass over old and new tests together. Delete tests that only lock a trivial pass-through, a prompt string that is not a domain invariant, a rule the type system or SQL schema already enforces, or a helper that exists only to be tested. Keep tests that lock domain invariants or cover high-risk seams. Coverage percentage is not a goal.
 
 ---
 
-## 5. Prioritized incremental plan
+## 5. Prioritized incremental plan — landed status
 
-Each step is independently shippable with `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, and `cargo nextest run`.
+Steps were shipped with `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` and `cargo nextest run --profile ci` (see Implementation outcome). "Done" means landed at `ee7f3e2`, not that the original finding was fully eliminated.
 
-| Order | Change | Depends on | Affects |
+| Order | Change | Status | Notes / affects |
 |---|---|---|---|
-| **P0-1** | `config.rs`: `Config::from_env()`, all env reads moved there, pass `&Config`. Build one `genai::Client`. Fix the `db::pool()` race and the `.expect()` on client build. | — | `lib.rs`, `db.rs`, `llm/mod.rs`, 4 binaries, `.env.example` |
-| **P0-2** | Replace counter tuples with `RunMetrics`/`RunReport` / `StoreOutcome`; add `triage_failures`, `extraction_failures`, `rejected` to the run report and its printed line; delete `salvaged`'s `&mut usize` and the broken CI grep. | — | `genai.rs`, `llm/mod.rs`, `scrape.rs`, `db.rs`, `scrape.yml` |
-| **P1-3** | Data states: `Article`, `Candidate`, single `TryFrom` validation. Remove `Utc::now()` date fabrication, unify outlet-code handling, quality gate on both paths, city validation in one place. | P0-1 | `models.rs`, `news.rs`, `scrape.rs`, `llm/*` |
-| **P1-4** | Delete triage's duplicate typed facts; make failure explicit (finding 11). | P1-3, P0-2 | `triage.txt`, `triage.rs`, `llm/mod.rs`, `genai.rs`, `scrape.yml` |
-| **P1-5** | Replace both index remaps with sourced pairs; keep the `NewsItem` attached through extraction. Add the two-batch test. | P1-3 | `models.rs`, `llm/*`, `scrape.rs` |
-| **P1-6** | `CoveredCity` enum + `Status`/`From<ActionType>` parity test; cover both prompts in the prompt test. Drop the SQL `ELSE 'suspended'` catch-all. | P1-3 | `models.rs`, both prompts, a migration, `format.ts` |
-| **P2-7** | One dedup authority: `canonical_outlet` column, one exclusion constraint, one-off Rust backfill; delete `same_event`, the in-memory dedup, and the LLM collapse pass. | P1-3 | `db.rs`, `llm/*`, `dedupe.txt`, new migration, runbook |
-| **P2-8** | One write path: delete `replace_actions` and `src/bin/refresh.rs`; make the backfill runbook call the Rust binary with `--since`. | P2-7 | `db.rs`, `bin/refresh.rs`, `docs/manual-backfill.md` |
-| **Deferred** | Replace `Result<(), &'static str>` in `quality.rs` with one small local error enum (`thiserror` is fine). Add other custom error types only if a caller needs to discriminate on them. | after P1-3 | `quality.rs` |
-| **Continuous** | Replace string-presence tests with seam tests: multi-batch remap, dedup parity, config validation, undated-record rejection, fallback quality gate, triage prompt cities. | each step | test modules |
+| **P0-1** | `config.rs`: `Config::from_env()`, all env reads moved there, pass `&Config`. Build one `genai::Client`. Fix the `db::pool()` race and the `.expect()` on client build. | **Done** | `lib.rs`, `db.rs`, `llm/mod.rs`, 4 binaries, `.env.example`. Env reads centralised and the pool race fixed; the `.expect()`, the `OnceLock`s for constants and per-stage client construction were kept by choice (finding 8). |
+| **P0-2** | Replace counter tuples with `RunMetrics`/`RunReport` / `StoreOutcome`; add `triage_failures`, `extraction_failures`, `rejected` to the run report and its printed line; delete `salvaged`'s `&mut usize` and the broken CI grep. | **Done** | `genai.rs`, `llm/mod.rs`, `scrape.rs`, `db.rs`, `report.rs`, `scrape.yml`. |
+| **P1-3** | Data states: `Article`, `Candidate`, single `TryFrom` validation. Remove `Utc::now()` date fabrication, unify outlet-code handling, quality gate on both paths, city validation in one place. | **Done** | `models.rs`, `news.rs`, `scrape.rs`, `domain/mod.rs`, `llm/*`. The salvage path was deleted rather than gated, so "both paths" is now one path. |
+| **P1-4** | Delete triage's duplicate typed facts; make failure explicit (finding 11). | **Done** | `triage.txt`, `triage.rs`, `llm/mod.rs`, `genai.rs`, `scrape.yml`. |
+| **P1-5** | Replace both index remaps with sourced pairs; keep the `NewsItem` attached through extraction. Add the two-batch test. | **Done** | `llm/{mod,genai,triage}.rs`. Verdict indices resolve to `&Article` at the wire boundary; no `base` offset, no `orig`, no `items.get(index)?`. Two pure tests cover multi-chunk resolution and out-of-range dropping. |
+| **P1-6** | `CoveredCity` enum + `Status`/`From<ActionType>` parity test; cover both prompts in the prompt test. Drop the SQL `ELSE 'suspended'` catch-all. | **Partial** | `CoveredCity` and the action-code/SQL/TS parity test landed (`models.rs`). No Rust `Status` enum, no `CASE` parity test, no migration; prompt string tests were removed rather than extended. |
+| **P2-7** | One dedup authority: `canonical_outlet` column, one exclusion constraint, one-off Rust backfill; delete `same_event`, the in-memory dedup, and the LLM collapse pass. | **Partial** | `db.rs`, `llm/*`, `dedupe.txt`. The collapse pass is gone and `same_event` is the sole Rust authority with the ±10 window aligned to SQL; the canonical key and backfill were descoped by the owner. |
+| **P2-8** | One write path: delete `replace_actions` and `src/bin/refresh.rs`; make the backfill runbook call the Rust binary with `--since`. | **Partial** | `db.rs`, `bin/refresh.rs`, `docs/manual-backfill.md`. Two Rust paths reduced to one; the Python runbook repair path remains. |
+| **Deferred** | Replace `Result<(), &'static str>` in `quality.rs` with one small local error enum (`thiserror` is fine). Add other custom error types only if a caller needs to discriminate on them. | **Done in limited form** | `error.rs`, `quality.rs`. `Rejection` is a fieldless strum enum; no `thiserror`, no repo-wide migration. |
+| **Continuous** | Replace string-presence tests with seam tests: multi-batch remap, dedup parity, config validation, undated-record rejection, fallback quality gate, triage prompt cities. | **Partial** | Test modules. The hygiene pass landed the seam tests listed in finding 10; dedup parity and the remaining seams are open. |
+| **Open** | Real end-to-end / database run, including dedup behaviour against a copy of `actions`. | **Deferred** | No scratch database or API key in this environment; see Section 7. |
 
-**Dependency logic:** P0-1 and P0-2 are independent and can land in either order. P1-3 is the hinge — dedup (P2-7) needs a validated `Candidate`, and the triage cleanup (P1-4) needs a single validation path to fall back to. P2-8 is last because deleting a write path is only safe once the surviving path has the right semantics. The error-type work is deliberately deferred: it is not a prerequisite for anything else.
+**Dependency logic:** P0-1 and P0-2 landed independently, as planned. P1-3 was the hinge: the dedup and triage work built on a validated `Candidate`, and P1-5 then removed the positional indices that crossed those stages. P2-7 and P2-8 stopped short of the canonical key and the runbook repair mode by owner decision; the surviving write path is already the only Rust one. The error-type question was settled with a local `Rejection` enum rather than a hierarchy. No code step remains in flight.
 
 **Behavior to preserve explicitly:** the article-fetch, triage, and OpenRouter fallbacks; the ±5-day event window; the five covered cities; the quality thresholds in `rules.toml`; and the three dashboard statuses. The only intended behavior changes are: no fabricated dates, no silent skip of legitimate `reopened` rows, identical results across binaries, and an explicit failure signal instead of a green zero-data run.
 
@@ -401,12 +456,12 @@ Each step is independently shippable with `cargo fmt --check`, `cargo clippy --a
 | `refresh.rs` needs a `Cargo.toml` edit to remove | **Corrected.** Cargo auto-discovers `src/bin/*.rs`; there is no `[[bin]]` entry for `refresh`. Deleting the file is sufficient. |
 | Baseline build status unknown | **Verified.** `cargo clippy --all-targets -- -D warnings` clean; `cargo test` 45 passed, 1 ignored. |
 | No finding about the new triage pass | **Added as finding 11.** Verdict fields are discarded on success; the placeholder verdict chain produces a green zero-data run on double failure. |
-| Repo-wide `thiserror` hierarchy as P0-1 | **Dropped and descoped per owner decision.** Finding 2 is now Medium, split into a cheap "report the failures" step now and one local error enum (possibly `thiserror`-derived) later. The `&'static str` in `quality.rs` is still considered bad, just low priority. |
+| Repo-wide `thiserror` hierarchy as P0-1 | **Dropped and descoped per owner decision.** Finding 2 is now Medium, split into a cheap "report the failures" step now and one local error enum (possibly `thiserror`-derived) later. The `&'static str` in `quality.rs` is still considered bad, just low priority. Since then, `quality.rs` returns the fieldless strum `Rejection` enum and no `thiserror` dependency was added. |
 
 ---
 
 ## 7. What was not checked, and the main risk
 
-I did not run `cargo nextest run --profile ci` (CI uses that, but plain `cargo test` passed), did not exercise any live LLM/RSS path, and did not measure how often the double-failure path in finding 11 occurs in production logs. All dedup-abort and concurrency claims are reasoned from the code, not observed.
+At audit time I had not run `cargo nextest run --profile ci`; that profile now passes for the landed refactor (see Implementation outcome). Still not done: any live LLM/RSS path, a real end-to-end / database run (no scratch database or API key in this environment), and measuring how often the double-failure path in finding 11 occurred in production logs. All dedup-abort and concurrency claims are reasoned from the code, not observed.
 
-Main risk: **finding 1 changes dedup semantics**, so it needs a dry run against a copy of `actions` before it touches production data; the one-off canonical-key backfill is the only step that mutates existing rows.
+Main risk: **finding 1 remains partial** — two dedup authorities still exist (`same_event` in `src/db.rs` and the SQL `EXCLUDE` constraint), and the ±10 alignment is a code-level fix, not a tested parity guarantee. Any future canonical-key migration needs a dry run against a copy of `actions` before it touches production data. Finding 7 is landed and verified in the final tree; no code work remains in flight.

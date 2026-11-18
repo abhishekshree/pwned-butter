@@ -95,19 +95,19 @@ pub(crate) async fn triage_batch(
     parse_verdicts(&text)
 }
 
-/// Extract actions for one chunk, pairing each result with the absolute index
-/// of its source item. The model returns chunk-local indices; `absolute`
-/// translates them through `chunk` and drops out-of-range values.
+/// Extract actions for one chunk, pairing each result with its source article.
+/// The model returns chunk-local indices; `absolute` resolves them through
+/// `chunk` and drops out-of-range values.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn extract_batch(
+pub(crate) async fn extract_batch<'a>(
     client: &Client,
     model: &str,
-    chunk: &[Job<'_>],
+    chunk: &[Job<'a>],
     openrouter_key: Option<&str>,
     openrouter_model: &str,
     openrouter_fallbacks: &[String],
     metrics: &mut RunMetrics,
-) -> Result<Vec<(usize, LlmAction)>> {
+) -> Result<Vec<(&'a Article, LlmAction)>> {
     let items: Vec<Value> = chunk
         .iter()
         .map(|job| {
@@ -183,15 +183,20 @@ pub(crate) async fn extract_batch(
     Err(last_error)
 }
 
-/// Translate chunk-local `sourceIndex` values into absolute input indices,
-/// discarding any value outside the chunk.
-fn absolute(actions: Vec<LlmAction>, chunk: &[Job<'_>]) -> Vec<(usize, LlmAction)> {
+/// Attach each action's source article, resolved from its chunk-local
+/// `sourceIndex`. Values outside the chunk are dropped with a warning.
+fn absolute<'a>(actions: Vec<LlmAction>, chunk: &[Job<'a>]) -> Vec<(&'a Article, LlmAction)> {
     actions
         .into_iter()
-        .filter_map(|mut action| {
-            let job = chunk.get(action.source_index)?;
-            action.source_index = job.orig;
-            Some((job.orig, action))
+        .filter_map(|action| {
+            let Some(job) = chunk.get(action.source_index) else {
+                warn!(
+                    index = action.source_index,
+                    "extraction result index out of range"
+                );
+                return None;
+            };
+            Some((job.item, action))
         })
         .collect()
 }
@@ -316,19 +321,10 @@ mod tests {
     }
 
     #[test]
-    fn translates_chunk_local_indices_to_absolute() {
+    fn attaches_source_articles_and_drops_out_of_range() {
         let first = article("first");
         let second = article("second");
-        let chunk = [
-            Job {
-                orig: 5,
-                item: &first,
-            },
-            Job {
-                orig: 9,
-                item: &second,
-            },
-        ];
+        let chunk = [Job { item: &first }, Job { item: &second }];
         let actions = vec![
             LlmAction {
                 source_index: 1,
@@ -350,11 +346,17 @@ mod tests {
         let result = absolute(actions, &chunk);
 
         assert_eq!(result.len(), 2, "out-of-range index is dropped");
-        assert_eq!(result[0].0, 9);
+        assert!(
+            std::ptr::eq(result[0].0, &second),
+            "chunk-local index 1 resolves to the second article"
+        );
         assert_eq!(result[0].1.establishment, "B");
-        assert_eq!(result[0].1.source_index, 9);
-        assert_eq!(result[1].0, 5);
+        assert_eq!(result[0].1.source_index, 1, "wire index is left untouched");
+        assert!(
+            std::ptr::eq(result[1].0, &first),
+            "chunk-local index 0 resolves to the first article"
+        );
         assert_eq!(result[1].1.establishment, "A");
-        assert_eq!(result[1].1.source_index, 5);
+        assert_eq!(result[1].1.source_index, 0, "wire index is left untouched");
     }
 }
