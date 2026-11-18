@@ -1,10 +1,12 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, anyhow};
 use tracing::{debug, info, warn};
 
 use crate::db::{ActionInsert, RecentEvent};
-use crate::models::{LlmAction, NewsItem};
+use crate::models::{ActionType, LlmAction, NewsItem};
+
+use triage::Verdict;
 
 pub const SYSTEM_PROMPT: &str = include_str!("../prompts/system.txt");
 
@@ -21,20 +23,88 @@ mod genai;
 mod quality;
 mod triage;
 
+/// Strict relevance pass. On a model/parse failure every item passes through
+/// rather than dropping the run: extraction and the quality gate still decide.
+pub(crate) async fn triage(
+    api_key: &str,
+    model: &str,
+    items: &[NewsItem],
+) -> Result<(Vec<Verdict>, usize)> {
+    if items.is_empty() {
+        return Ok((Vec::new(), 0));
+    }
+    let client = genai::client(api_key, None)?;
+    let mut calls = 0;
+    let mut verdicts = Vec::new();
+    let mut seen = HashSet::new();
+
+    for (batch_no, chunk) in items.chunks(BATCH_SIZE).enumerate() {
+        let base = batch_no * BATCH_SIZE;
+        let (batch, used) = genai::triage_batch(&client, model, chunk).await;
+        calls += used;
+        match batch {
+            Ok(batch) => {
+                for mut verdict in batch {
+                    if verdict.source_index >= chunk.len() {
+                        warn!(
+                            index = verdict.source_index,
+                            "triage verdict index out of range"
+                        );
+                        continue;
+                    }
+                    verdict.source_index += base;
+                    if seen.insert(verdict.source_index) {
+                        debug!(
+                            index = verdict.source_index,
+                            reason = verdict.reason.as_deref().unwrap_or("-"),
+                            "triage kept item"
+                        );
+                        verdicts.push(verdict);
+                    }
+                }
+            }
+            Err(error) => {
+                warn!(error = %format!("{error:#}"), "triage failed; passing all items through");
+                for (i, _) in chunk.iter().enumerate() {
+                    let index = base + i;
+                    if seen.insert(index) {
+                        verdicts.push(Verdict {
+                            source_index: index,
+                            // Placeholder: only used if extraction also fails,
+                            // and the minimal record has no name or city.
+                            action_type: ActionType::Inspection,
+                            city: None,
+                            establishment: None,
+                            reason: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Ok((verdicts, calls))
+}
+
 pub async fn extract(
     api_key: &str,
     model: &str,
     items: &[NewsItem],
 ) -> Result<(Vec<LlmAction>, usize)> {
-    let mut jobs = Vec::new();
-    for (orig, item) in items.iter().enumerate() {
-        if triage::triage(&item.haystack()).is_some() {
-            jobs.push(triage::Job { orig, item });
-        }
-    }
-    info!(relevant = jobs.len(), total = items.len(), "llm pre-filter");
+    let (verdicts, triage_calls) = triage(api_key, model, items).await?;
+    let verdicts: HashMap<usize, Verdict> =
+        verdicts.into_iter().map(|v| (v.source_index, v)).collect();
+    let mut jobs: Vec<triage::Job<'_>> = verdicts
+        .keys()
+        .filter_map(|&index| {
+            items
+                .get(index)
+                .map(|item| triage::Job { orig: index, item })
+        })
+        .collect();
+    jobs.sort_by_key(|job| job.orig);
+    info!(relevant = jobs.len(), total = items.len(), "llm triage");
     if jobs.is_empty() {
-        return Ok((Vec::new(), 0));
+        return Ok((Vec::new(), triage_calls));
     }
 
     // ponytail: resolve config once at the boundary; deeper fns stay pure of env reads.
@@ -57,7 +127,7 @@ pub async fn extract(
         });
 
     let client = genai::client(api_key, openrouter_key.as_deref())?;
-    let mut calls = 0;
+    let mut calls = triage_calls;
     let mut actions = Vec::new();
     let mut failed = 0;
     for (batch_no, chunk) in jobs.chunks(BATCH_SIZE).enumerate() {
@@ -72,8 +142,8 @@ pub async fn extract(
         .await;
         calls += used;
         match batch {
-            // Gate LLM output only: rule-fallback rows are grounded in a real
-            // headline and have no LLM to name a city or tighten the name.
+            // Gate LLM output only: salvage rows come from triage verdicts,
+            // not from this model's free-form generation.
             Ok(batch) => actions.extend(batch.into_iter().filter(|a| match quality::check(a) {
                 Ok(()) => true,
                 Err(reason) => {
@@ -85,7 +155,7 @@ pub async fn extract(
                     false
                 }
             })),
-            Err(e) => actions.extend(salvaged(batch_no, &e, chunk, &mut failed)),
+            Err(e) => actions.extend(salvaged(batch_no, &e, chunk, &verdicts, &mut failed)),
         }
     }
     let batch_count = jobs.len().div_ceil(BATCH_SIZE);
@@ -127,15 +197,23 @@ pub async fn extract(
     Ok((actions, calls))
 }
 
-/// Rule fallback for a failed batch. An empty vec means the whole batch
-/// failed; the caller counts it and moves on.
+/// Fallback for a failed extraction batch, built only from triage verdicts.
+/// An empty vec means the batch is unrecoverable; the caller counts it.
 fn salvaged(
     batch_no: usize,
     err: &anyhow::Error,
     chunk: &[triage::Job<'_>],
+    verdicts: &HashMap<usize, Verdict>,
     failed: &mut usize,
 ) -> Vec<LlmAction> {
-    let kept = triage::rule_extract(chunk);
+    let kept: Vec<LlmAction> = chunk
+        .iter()
+        .filter_map(|job| {
+            verdicts
+                .get(&job.orig)
+                .map(|verdict| triage::minimal_from_verdict(verdict, job.item))
+        })
+        .collect();
     let n = chunk.len();
     if kept.is_empty() {
         *failed += 1;
@@ -146,7 +224,7 @@ fn salvaged(
             items = n,
             kept = kept.len(),
             error = %format!("{err:#}"),
-            "llm batch failed; rule fallback kept records"
+            "llm batch failed; triage fallback kept records"
         );
     }
     kept

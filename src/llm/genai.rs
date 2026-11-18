@@ -8,9 +8,9 @@ use genai::resolver::AuthData;
 use serde_json::{Value, json};
 use tracing::warn;
 
-use crate::models::LlmAction;
+use crate::models::{LlmAction, NewsItem};
 
-use super::triage::Job;
+use super::triage::{Job, TRIAGE_PROMPT, Verdict, parse_verdicts};
 use super::{SYSTEM_PROMPT, strip_code_fences, truncate};
 
 pub(crate) const DEFAULT_OPENROUTER_MODEL: &str = "openrouter/free";
@@ -65,6 +65,35 @@ async fn chat_text(
         tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
     }
     unreachable!("MAX_ATTEMPTS is nonzero")
+}
+
+/// Strict relevance pass over one chunk. The snippet is truncated here to
+/// bound the prompt; extraction still sees the full article text.
+pub(crate) async fn triage_batch(
+    client: &Client,
+    model: &str,
+    chunk: &[NewsItem],
+) -> (Result<Vec<Verdict>>, usize) {
+    let items: Vec<Value> = chunk
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            json!({
+                "sourceIndex": index,
+                "title": item.title,
+                "publisher": item.source,
+                "text": item.snippet.as_deref().unwrap_or("").chars().take(600).collect::<String>(),
+            })
+        })
+        .collect();
+    let user = match serde_json::to_string(&json!({"items": items})) {
+        Ok(user) => user,
+        Err(error) => return (Err(error.into()), 0),
+    };
+    let request = ChatRequest::from_system(TRIAGE_PROMPT).append_message(ChatMessage::user(user));
+    let options = json_options(4096, json!({"type": "array"}));
+    let (text, calls) = chat_text(client, model, request, &options).await;
+    (text.and_then(|text| parse_verdicts(&text)), calls)
 }
 
 pub(crate) async fn extract_batch(

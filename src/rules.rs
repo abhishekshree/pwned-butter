@@ -2,30 +2,12 @@ use std::sync::OnceLock;
 
 use serde::Deserialize;
 
-use crate::models::ActionType;
-
 const TEXT: &str = include_str!("rules.toml");
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct Rules {
-    pub(crate) triage: Triage,
     pub(crate) quality: Quality,
     pub(crate) news: News,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct Triage {
-    pub(crate) rules: Vec<Signal>,
-    pub(crate) corroboration: Vec<String>,
-    pub(crate) cities: Vec<String>,
-    pub(crate) establishment_prefixes: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct Signal {
-    pub(crate) action: ActionType,
-    /// Alternative conjunctions; all needles in one group must appear.
-    pub(crate) needs: Vec<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -58,33 +40,27 @@ pub(crate) fn rules() -> &'static Rules {
 
 #[cfg(test)]
 mod tests {
-    use strum::IntoEnumIterator;
-
     use super::*;
 
     #[test]
-    fn bundled_rules_are_complete_and_lowercase() {
+    fn bundled_rules_are_lowercase_and_nonempty() {
         let r = rules();
-        let covered: Vec<_> = r.triage.rules.iter().map(|s| s.action).collect();
-        for action in ActionType::iter() {
-            assert!(covered.contains(&action), "no keyword rule for {action}");
-        }
-        for signal in &r.triage.rules {
-            assert!(
-                !signal.needs.is_empty(),
-                "{} has no keywords",
-                signal.action
-            );
-            for group in &signal.needs {
-                for needle in group {
-                    assert_eq!(needle, &needle.to_lowercase(), "{needle} must be lowercase");
-                }
+        let groups: [&[String]; 6] = [
+            &r.quality.product_words,
+            &r.quality.no_action_yet,
+            &r.quality.regulator_words,
+            &r.news.authority_signals,
+            &r.news.action_signals,
+            &r.news.venue_signals,
+        ];
+        for group in groups {
+            assert!(!group.is_empty());
+            for needle in group {
+                assert_eq!(needle, &needle.to_lowercase(), "{needle} must be lowercase");
             }
-        }
-        for needle in &r.triage.corroboration {
-            assert_eq!(needle, &needle.to_lowercase(), "{needle} must be lowercase");
         }
         assert!(!r.news.queries.is_empty());
         assert!(r.quality.min_details_chars > 0);
+        assert!(r.quality.max_establishment_words > 0);
     }
 }
