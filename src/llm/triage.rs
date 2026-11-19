@@ -7,7 +7,6 @@ use super::strip_code_fences;
 
 pub(crate) const TRIAGE_PROMPT: &str = include_str!("../prompts/triage.txt");
 
-/// One qualifying item from the triage relevance filter.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Verdict {

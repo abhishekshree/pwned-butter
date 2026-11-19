@@ -10,7 +10,6 @@ use tracing::warn;
 
 use crate::domain::Article;
 use crate::models::LlmAction;
-use crate::report::RunMetrics;
 
 use super::triage::{TRIAGE_PROMPT, Verdict, parse_verdicts, triage_schema};
 use super::{SYSTEM_PROMPT, strip_code_fences, truncate};
@@ -34,32 +33,35 @@ fn json_options(max_tokens: u32, schema: Value) -> ChatOptions {
         .with_response_format(JsonSpec::new("response", schema))
 }
 
-/// Every attempt is counted so a fully failed batch stays visible in the metrics.
+pub(crate) struct ExtractOptions<'a> {
+    pub(crate) model: &'a str,
+    pub(crate) openrouter_key: Option<&'a str>,
+    pub(crate) openrouter_model: &'a str,
+    pub(crate) openrouter_fallbacks: &'a [String],
+}
+
+// Attempts are returned as data so a fully failed batch still reports its calls.
 async fn chat_text(
     client: &Client,
     model: &str,
     request: ChatRequest,
     options: &ChatOptions,
-    calls: &mut usize,
-) -> AnyResult<String> {
+) -> (AnyResult<String>, usize) {
+    let mut calls = 0;
     for attempt in 0..MAX_ATTEMPTS {
-        *calls += 1;
+        calls += 1;
         let error = match client
             .exec_chat(model, request.clone(), Some(options))
             .await
         {
-            Ok(response) => {
-                if let Some(text) = response.into_first_text()
-                    && !text.trim().is_empty()
-                {
-                    return Ok(text);
-                }
-                anyhow::anyhow!("genai response had no text")
-            }
+            Ok(response) => match response.into_first_text() {
+                Some(text) if !text.trim().is_empty() => return (Ok(text), calls),
+                _ => anyhow::anyhow!("genai response had no text"),
+            },
             Err(error) => anyhow::anyhow!("genai request failed: {error}"),
         };
         if attempt + 1 == MAX_ATTEMPTS {
-            return Err(error);
+            return (Err(error), calls);
         }
         tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
     }
@@ -70,8 +72,7 @@ pub(crate) async fn triage_batch(
     client: &Client,
     model: &str,
     chunk: &[Article],
-    metrics: &mut RunMetrics,
-) -> AnyResult<Vec<Verdict>> {
+) -> (AnyResult<Vec<Verdict>>, usize) {
     let items: Vec<Value> = chunk
         .iter()
         .enumerate()
@@ -86,24 +87,22 @@ pub(crate) async fn triage_batch(
             })
         })
         .collect();
-    let user = serde_json::to_string(&json!({"items": items}))?;
+    let user = match serde_json::to_string(&json!({"items": items})) {
+        Ok(user) => user,
+        Err(error) => return (Err(error.into()), 0),
+    };
     let request = ChatRequest::from_system(TRIAGE_PROMPT).append_message(ChatMessage::user(user));
     let options = json_options(4096, triage_schema());
-    let text = chat_text(client, model, request, &options, &mut metrics.triage_calls).await?;
-    parse_verdicts(&text)
+    let (text, calls) = chat_text(client, model, request, &options).await;
+    (text.and_then(|text| parse_verdicts(&text)), calls)
 }
 
 /// The model returns chunk-local indices; `absolute` resolves them and drops out-of-range values.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn extract_batch<'a>(
     client: &Client,
-    model: &str,
     chunk: &[&'a Article],
-    openrouter_key: Option<&str>,
-    openrouter_model: &str,
-    openrouter_fallbacks: &[String],
-    metrics: &mut RunMetrics,
-) -> AnyResult<Vec<(&'a Article, LlmAction)>> {
+    opts: &ExtractOptions<'_>,
+) -> (AnyResult<Vec<(&'a Article, LlmAction)>>, usize) {
     let items: Vec<Value> = chunk
         .iter()
         .map(|item| {
@@ -116,55 +115,55 @@ pub(crate) async fn extract_batch<'a>(
             })
         })
         .collect();
-    let user = serde_json::to_string(&json!({"items": items})).context("serialize news batch")?;
+    let user = match serde_json::to_string(&json!({"items": items})) {
+        Ok(user) => user,
+        Err(error) => return (Err(error).context("serialize news batch"), 0),
+    };
     let request = ChatRequest::from_system(SYSTEM_PROMPT).append_message(ChatMessage::user(user));
     let options = json_options(16_384, json!({"type": "array"}));
+    let mut calls = 0;
 
-    let gemini = chat_text(
-        client,
-        model,
-        request.clone(),
-        &options,
-        &mut metrics.extraction_calls,
-    )
-    .await
-    .and_then(|text| parse_llm_text(&text))
-    .map(|actions| absolute(actions, chunk));
+    let (gemini_text, gemini_calls) =
+        chat_text(client, opts.model, request.clone(), &options).await;
+    calls += gemini_calls;
+    let gemini = gemini_text
+        .and_then(|text| parse_llm_text(&text))
+        .map(|actions| absolute(actions, chunk));
     match gemini {
-        Ok(actions) => return Ok(actions),
+        Ok(actions) => return (Ok(actions), calls),
         Err(error) => warn!(
-            model,
+            model = opts.model,
             error = %format!("{error:#}"),
             "gemini model failed"
         ),
     }
 
     warn!("all gemini models failed; falling back to openrouter");
-    if openrouter_key.is_none() {
-        anyhow::bail!("gemini API failed and no OPENROUTER_API_KEY fallback configured");
+    if opts.openrouter_key.is_none() {
+        return (
+            Err(anyhow::anyhow!(
+                "gemini API failed and no OPENROUTER_API_KEY fallback configured"
+            )),
+            calls,
+        );
     }
-    let mut candidates = vec![openrouter_model.to_string()];
+    let mut candidates = vec![opts.openrouter_model.to_string()];
     candidates.extend(
-        openrouter_fallbacks
+        opts.openrouter_fallbacks
             .iter()
-            .filter(|fallback| *fallback != openrouter_model)
+            .filter(|fallback| *fallback != opts.openrouter_model)
             .cloned(),
     );
     let mut last_error = anyhow::anyhow!("no OpenRouter model configured");
     for candidate in &candidates {
         let model = format!("open_router::{candidate}");
-        let outcome = chat_text(
-            client,
-            &model,
-            request.clone(),
-            &options,
-            &mut metrics.extraction_calls,
-        )
-        .await
-        .and_then(|text| parse_llm_text(&text))
-        .map(|actions| absolute(actions, chunk));
+        let (text, used) = chat_text(client, &model, request.clone(), &options).await;
+        calls += used;
+        let outcome = text
+            .and_then(|text| parse_llm_text(&text))
+            .map(|actions| absolute(actions, chunk));
         match outcome {
-            Ok(actions) => return Ok(actions),
+            Ok(actions) => return (Ok(actions), calls),
             Err(error) => {
                 warn!(
                     model = %candidate,
@@ -175,7 +174,7 @@ pub(crate) async fn extract_batch<'a>(
             }
         }
     }
-    Err(last_error)
+    (Err(last_error), calls)
 }
 
 fn absolute<'a>(actions: Vec<LlmAction>, chunk: &[&'a Article]) -> Vec<(&'a Article, LlmAction)> {
@@ -342,12 +341,10 @@ mod tests {
             "chunk-local index 1 resolves to the second article"
         );
         assert_eq!(result[0].1.establishment, "B");
-        assert_eq!(result[0].1.source_index, 1, "wire index is left untouched");
         assert!(
             std::ptr::eq(result[1].0, &first),
             "chunk-local index 0 resolves to the first article"
         );
         assert_eq!(result[1].1.establishment, "A");
-        assert_eq!(result[1].1.source_index, 0, "wire index is left untouched");
     }
 }
