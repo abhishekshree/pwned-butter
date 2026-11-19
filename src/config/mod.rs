@@ -1,44 +1,16 @@
+mod openrouter;
+mod persistence;
+
+pub use openrouter::OpenRouterConfig;
+pub(crate) use openrouter::{DEFAULT_OPENROUTER_FALLBACKS, DEFAULT_OPENROUTER_MODEL};
+pub use persistence::Persistence;
+
 use std::fmt;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result as AnyResult, bail};
 
 pub(crate) const DEFAULT_GEMINI_MODEL: &str = "gemini-flash-latest";
-pub(crate) const DEFAULT_OPENROUTER_MODEL: &str = "openrouter/free";
-pub(crate) const DEFAULT_OPENROUTER_FALLBACKS: &[&str] = &["inclusionai/ling-3.2-flash:free"];
-
-/// Where a completed run writes its rows and provenance.
-#[derive(Clone)]
-pub enum Persistence {
-    Postgres { url: String },
-    Local { path: PathBuf },
-}
-
-impl fmt::Debug for Persistence {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Postgres { .. } => f.write_str("Postgres { url: <redacted> }"),
-            Self::Local { path } => f.debug_tuple("Local").field(path).finish(),
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct OpenRouterConfig {
-    pub key: String,
-    pub model: String,
-    pub fallbacks: Vec<String>,
-}
-
-impl fmt::Debug for OpenRouterConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("OpenRouterConfig")
-            .field("key", &"<redacted>")
-            .field("model", &self.model)
-            .field("fallbacks", &self.fallbacks)
-            .finish()
-    }
-}
 
 /// Every environment read in the crate happens here.
 #[derive(Clone)]
