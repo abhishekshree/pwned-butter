@@ -5,7 +5,7 @@ use serde::Serialize;
 use strum::{EnumIter, IntoEnumIterator};
 
 use crate::error::Rejection;
-use crate::models::{ActionType, LlmAction, NewsItem, OutletType};
+use crate::models::{ActionType, LlmAction, NewsItem, OutletType, Sanitized};
 use crate::rules::rules;
 
 /// The only cities this tracker covers.
@@ -103,7 +103,8 @@ pub struct Candidate {
 
 impl Candidate {
     /// Unknown outlet codes become `None` because the DB column is nullable.
-    pub fn try_new(action: LlmAction, article: &Article) -> Result<Self, Rejection> {
+    pub fn try_new(action: Sanitized<LlmAction>, article: &Article) -> Result<Self, Rejection> {
+        let action = action.into_inner();
         let establishment =
             nonempty(Some(action.establishment.as_str())).ok_or(Rejection::NoEstablishment)?;
         let city = CoveredCity::parse(action.city.as_deref().unwrap_or(""))
@@ -252,7 +253,7 @@ mod tests {
     use test_case::test_case;
 
     use super::*;
-    use crate::models::{ActionType, LlmAction};
+    use crate::models::{ActionType, LlmAction, Sanitized};
 
     const FULL: &str = "licence suspended over cockroach infestation found during inspection";
 
@@ -274,7 +275,7 @@ mod tests {
             details: details.map(str::to_string),
             ..Default::default()
         };
-        Candidate::try_new(action, &article())
+        Candidate::try_new(Sanitized::new(action), &article())
     }
 
     #[test_case("Domino's Vile Parle", Some(FULL), Ok(()); "complete record")]
@@ -307,6 +308,6 @@ mod tests {
             ),
             ..Default::default()
         };
-        assert!(Candidate::try_new(action, &article()).is_ok());
+        assert!(Candidate::try_new(Sanitized::new(action), &article()).is_ok());
     }
 }

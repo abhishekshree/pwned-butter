@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use tracing::warn;
 
 use crate::domain::Article;
-use crate::models::LlmAction;
+use crate::models::{LlmAction, Sanitized};
 
 use super::triage::{TRIAGE_PROMPT, Verdict, parse_verdicts, triage_schema};
 use super::{SYSTEM_PROMPT, strip_code_fences, truncate};
@@ -226,7 +226,7 @@ pub(crate) fn parse_llm_text(text: &str) -> AnyResult<Vec<LlmAction>> {
     Ok(actions)
 }
 
-pub(crate) fn sanitize_action(mut action: LlmAction) -> LlmAction {
+pub(crate) fn sanitize_action(mut action: LlmAction) -> Sanitized<LlmAction> {
     action.establishment = clamp(action.establishment, 200);
     clamp_opt(&mut action.area, 120);
     clamp_opt(&mut action.city, 120);
@@ -248,7 +248,7 @@ pub(crate) fn sanitize_action(mut action: LlmAction) -> LlmAction {
         .filter(|platform| !platform.is_empty())
         .collect();
     action.platforms.truncate(6);
-    action
+    Sanitized::new(action)
 }
 
 fn clamp(value: String, max: usize) -> String {
@@ -296,7 +296,7 @@ mod tests {
 
     #[test]
     fn sanitizes_strings_and_limits_lists() {
-        let mut action: LlmAction = serde_json::from_value(json!({
+        let action: LlmAction = serde_json::from_value(json!({
             "establishment": "  X  ",
             "actionType": "inspection",
             "sourceIndex": 0,
@@ -304,7 +304,7 @@ mod tests {
             "platforms": [" Swiggy ", " "]
         }))
         .unwrap();
-        action = sanitize_action(action);
+        let action = sanitize_action(action).into_inner();
         assert_eq!(action.establishment, "X");
         assert_eq!(action.violations, vec!["issue"]);
         assert_eq!(action.platforms, vec!["swiggy"]);
@@ -341,10 +341,12 @@ mod tests {
             "chunk-local index 1 resolves to the second article"
         );
         assert_eq!(result[0].1.establishment, "B");
+        assert_eq!(result[0].1.source_index, 1, "wire index is left untouched");
         assert!(
             std::ptr::eq(result[1].0, &first),
             "chunk-local index 0 resolves to the first article"
         );
         assert_eq!(result[1].1.establishment, "A");
+        assert_eq!(result[1].1.source_index, 0, "wire index is left untouched");
     }
 }

@@ -7,7 +7,7 @@ use crate::db;
 use crate::llm;
 use crate::local::LocalWriter;
 use crate::news;
-use crate::report::{RunMetrics, RunReport, StoreOutcome};
+use crate::report::{RunReport, StoreOutcome};
 use crate::store::Store;
 
 pub async fn run_scrape(config: &Config) -> AnyResult<RunReport> {
@@ -77,15 +77,15 @@ async fn scrape_once(
     let articles = news::enrich(&client, items, &already_seen, max_items).await;
     let articles_new = articles.len();
 
-    let mut metrics = RunMetrics::default();
-    let candidates = llm::extract(config, &articles, &mut metrics).await?;
-    let StoreOutcome { inserted, .. } = store.upsert_actions(&candidates).await?;
+    let extraction = llm::extract(config, &articles).await?;
+    let StoreOutcome { inserted, .. } = store.upsert_actions(&extraction.candidates).await?;
 
     Ok(RunReport {
         articles_seen,
         articles_new,
         actions_upserted: inserted,
-        metrics,
+        metrics: extraction.metrics,
+        degraded: extraction.degraded,
     })
 }
 
@@ -121,6 +121,10 @@ mod tests {
         }
     }
 
+    fn try_new(action: LlmAction, source: &Article) -> Result<crate::domain::Candidate, Rejection> {
+        crate::domain::Candidate::try_new(crate::models::Sanitized::new(action), source)
+    }
+
     fn published() -> Option<chrono::DateTime<Utc>> {
         Some(
             Utc.with_ymd_and_hms(2026, 11, 18, 9, 0, 0)
@@ -135,7 +139,7 @@ mod tests {
         action.brand = Some("Domino's".into());
         action.outlet_type = Some("restaurant".into());
         let source = article(published());
-        let candidate = crate::domain::Candidate::try_new(action, &source).expect("valid");
+        let candidate = try_new(action, &source).expect("valid");
 
         assert_eq!(candidate.source_url, "https://a.test/1");
         assert_eq!(candidate.source_publisher.as_deref(), Some("Test Press"));
@@ -153,7 +157,7 @@ mod tests {
         let mut action = action();
         action.city = Some("Nashik".into());
         assert_eq!(
-            crate::domain::Candidate::try_new(action, &article(published())).err(),
+            try_new(action, &article(published())).err(),
             Some(Rejection::OutOfScopeCity),
             "uncovered city is rejected at the boundary"
         );
@@ -164,7 +168,7 @@ mod tests {
         let mut action = action();
         action.action_date = None;
         assert_eq!(
-            crate::domain::Candidate::try_new(action, &article(None)).err(),
+            try_new(action, &article(None)).err(),
             Some(Rejection::NoActionDate),
             "no reported or published date means no fabricated date"
         );
@@ -174,8 +178,7 @@ mod tests {
     fn unknown_outlet_code_becomes_none() {
         let mut action = action();
         action.outlet_type = Some("pavement stand".into());
-        let candidate = crate::domain::Candidate::try_new(action, &article(published()))
-            .expect("valid candidate");
+        let candidate = try_new(action, &article(published())).expect("valid candidate");
         assert_eq!(
             candidate.outlet_type, None,
             "unknown codes are not an error sink"
@@ -190,8 +193,7 @@ mod tests {
     fn compliance_score_keeps_only_0_to_100(score: Option<i32>, expected: Option<i32>) {
         let mut action = action();
         action.compliance_score = score;
-        let candidate = crate::domain::Candidate::try_new(action, &article(published()))
-            .expect("valid candidate");
+        let candidate = try_new(action, &article(published())).expect("valid candidate");
         assert_eq!(candidate.compliance_score, expected, "{score:?}");
     }
 }

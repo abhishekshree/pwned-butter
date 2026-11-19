@@ -8,10 +8,19 @@ pub(crate) const DEFAULT_OPENROUTER_MODEL: &str = "openrouter/free";
 pub(crate) const DEFAULT_OPENROUTER_FALLBACKS: &[&str] = &["inclusionai/ling-3.2-flash:free"];
 
 /// Where a completed run writes its rows and provenance.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum Persistence {
     Postgres { url: String },
     Local { path: PathBuf },
+}
+
+impl fmt::Debug for Persistence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Postgres { .. } => f.write_str("Postgres { url: <redacted> }"),
+            Self::Local { path } => f.debug_tuple("Local").field(path).finish(),
+        }
+    }
 }
 
 #[derive(Clone)]

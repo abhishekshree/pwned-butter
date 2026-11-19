@@ -75,7 +75,7 @@ impl LocalWriter {
             .collect())
     }
 
-    // shortcut: no transactionality; debug backend only, upgrade if used for backfills.
+    // shortcut: no transactionality, seen-window uses published_at; debug backend only, upgrade if used for backfills.
     pub fn upsert_actions(&self, rows: &[Candidate]) -> AnyResult<StoreOutcome> {
         let mut records = Self::read_records(&self.path)?;
         let mut outcome = StoreOutcome::default();
@@ -126,6 +126,7 @@ impl LocalWriter {
                 "triage_failures": report.metrics.triage_failures,
                 "extraction_failures": report.metrics.extraction_failures,
                 "rejected": report.metrics.rejected,
+                "degraded": report.degraded,
             }),
         )
     }
@@ -164,7 +165,8 @@ mod tests {
             published: None,
             snippet: None,
         };
-        Candidate::try_new(action, &article).expect("valid candidate")
+        Candidate::try_new(crate::models::Sanitized::new(action), &article)
+            .expect("valid candidate")
     }
 
     #[test]

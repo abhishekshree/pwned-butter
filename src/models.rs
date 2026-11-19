@@ -114,9 +114,11 @@ where
 pub struct Sanitized<T>(T);
 
 impl<T> Sanitized<T> {
-    // shortcut: unused until genai threads it through; expect fires once wired.
-    #[expect(dead_code)]
     pub(crate) fn new(value: T) -> Self {
         Self(value)
+    }
+
+    pub(crate) fn into_inner(self) -> T {
+        self.0
     }
 }

@@ -13,28 +13,6 @@ impl RunMetrics {
     }
 }
 
-/// Call/failure counters returned as data so a degraded run cannot be persisted unnoticed.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct Usage {
-    pub triage_calls: usize,
-    pub extraction_calls: usize,
-    pub triage_failures: usize,
-    pub extraction_failures: usize,
-    pub rejected: usize,
-}
-
-impl From<Usage> for RunMetrics {
-    fn from(usage: Usage) -> Self {
-        Self {
-            triage_calls: usage.triage_calls,
-            extraction_calls: usage.extraction_calls,
-            triage_failures: usage.triage_failures,
-            extraction_failures: usage.extraction_failures,
-            rejected: usage.rejected,
-        }
-    }
-}
-
 #[derive(Debug, Default, Clone)]
 pub struct RunReport {
     pub articles_seen: usize,

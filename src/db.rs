@@ -2,15 +2,15 @@ use std::collections::HashSet;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use anyhow::{Context, Result as AnyResult};
+use anyhow::{Context, Result as AnyResult, bail};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use tokio::sync::Mutex;
 
-use crate::config::Config;
-use crate::domain::Candidate;
+use crate::config::{Config, Persistence};
+use crate::domain::{Candidate, EventKey};
 use crate::report::{RunReport, StoreOutcome};
 
 static POOL: OnceLock<PgPool> = OnceLock::new();
@@ -25,10 +25,13 @@ pub async fn pool(config: &Config) -> AnyResult<&'static PgPool> {
     if let Some(pool) = POOL.get() {
         return Ok(pool);
     }
+    let Persistence::Postgres { url } = &config.persistence else {
+        bail!("pool requires Postgres persistence");
+    };
     let pool = PgPoolOptions::new()
         .max_connections(5)
         .acquire_timeout(Duration::from_secs(15))
-        .connect(&config.database_url)
+        .connect(url)
         .await
         .context("connect to neon")?;
     Ok(POOL.get_or_init(|| pool))
@@ -127,59 +130,14 @@ pub(crate) async fn upsert_actions(pool: &PgPool, rows: &[Candidate]) -> AnyResu
     Ok(outcome)
 }
 
-/// Venue-type words that vary between reports of the same outlet.
-const GENERIC_WORDS: [&str; 7] = [
-    "club",
-    "facility",
-    "canteen",
-    "restaurant",
-    "hotel",
-    "outlet",
-    "kitchen",
-];
-
-fn tokens(s: &str) -> Vec<&str> {
-    s.split(|c: char| !c.is_alphanumeric())
-        .filter(|t| !t.is_empty() && !GENERIC_WORDS.contains(t))
-        .collect()
-}
-
-/// "mca" = initials of the consecutive run "mumbai cricket association".
-fn is_acronym_of(acro: &str, words: &[&str]) -> bool {
-    !acro.is_empty()
-        && acro.len() <= words.len()
-        && acro.chars().zip(words).all(|(c, w)| w.starts_with(c))
-}
-
-fn token_matches(t: &str, words: &[&str]) -> bool {
-    words.contains(&t)
-        || (0..=words.len().saturating_sub(t.len())).any(|i| is_acronym_of(t, &words[i..]))
-}
-
-/// Exact, containment for 6+ char names, or token/acronym matching with a 3+ char word in common.
+/// Dedup identity lives in `domain::EventKey`; this keeps the store call sites terse.
 pub(crate) fn same_event(a: &str, b: &str) -> bool {
-    let norm = |s: &str| -> String {
-        s.to_lowercase()
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|t| !t.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
-    let (a, b) = (norm(a), norm(b));
-    if a == b {
-        return true;
+    EventKey {
+        establishment: a.to_string(),
     }
-    // Short-name containment is too loose ("KFC" everywhere).
-    if a.len().min(b.len()) >= 6 && (a.contains(&b) || b.contains(&a)) {
-        return true;
-    }
-    let side_matches = |from: &[&str], to: &[&str]| {
-        from.iter().map(|t| t.len()).sum::<usize>() >= 6
-            && from.iter().all(|t| token_matches(t, to))
-            && from.iter().any(|t| t.len() >= 3 && to.contains(t))
-    };
-    let (ta, tb) = (tokens(&a), tokens(&b));
-    side_matches(&ta, &tb) || side_matches(&tb, &ta)
+    .same_event_as(&EventKey {
+        establishment: b.to_string(),
+    })
 }
 
 pub(crate) async fn begin_run(pool: &PgPool) -> AnyResult<i64> {
@@ -201,6 +159,7 @@ pub(crate) async fn finish_run(
         "triage_failures": report.metrics.triage_failures,
         "extraction_failures": report.metrics.extraction_failures,
         "rejected": report.metrics.rejected,
+        "degraded": report.degraded,
     });
     // Typed metrics win on collision, so only add caller keys we do not already have.
     if let (Some(obj), Some(extra)) = (details_json.as_object_mut(), details.as_object()) {
