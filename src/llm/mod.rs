@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use anyhow::{Result as AnyResult, anyhow};
 use tracing::{debug, info, warn};
 
-use crate::config::Config;
+use crate::config::{Config, DEFAULT_OPENROUTER_MODEL};
 use crate::domain::{Article, Candidate};
 use crate::report::RunMetrics;
 
@@ -99,7 +99,7 @@ pub(crate) async fn extract(config: &Config, items: &[Article]) -> AnyResult<Ext
     let openrouter_key = openrouter.map(|options| options.key.expose());
     let openrouter_model = openrouter
         .map(|options| options.model.as_str())
-        .unwrap_or(crate::config::DEFAULT_OPENROUTER_MODEL);
+        .unwrap_or(DEFAULT_OPENROUTER_MODEL);
     let openrouter_fallbacks: &[String] = match openrouter {
         Some(options) => options.fallbacks.as_slice(),
         None => &[],

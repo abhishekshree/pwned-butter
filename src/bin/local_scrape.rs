@@ -1,12 +1,13 @@
 use anyhow::Result as AnyResult;
 use fda_mumbai_tracker::config::Config;
 use fda_mumbai_tracker::context::AppContext;
+use fda_mumbai_tracker::init;
 use fda_mumbai_tracker::scrape::run_scrape;
 use tracing::info;
 
 #[tokio::main]
 async fn main() -> AnyResult<()> {
-    fda_mumbai_tracker::init();
+    init();
     let config = Config::from_env()?;
 
     let ctx = AppContext::from_config(&config).await?;

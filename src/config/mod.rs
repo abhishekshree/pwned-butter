@@ -7,6 +7,7 @@ pub(crate) use openrouter::{DEFAULT_OPENROUTER_FALLBACKS, DEFAULT_OPENROUTER_MOD
 pub use persistence::Persistence;
 pub use secret::SecretString;
 
+use std::env::var;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result as AnyResult, bail};
@@ -24,29 +25,28 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> AnyResult<Self> {
-        let persistence = match std::env::var("LOCAL_WRITER_PATH") {
+        let persistence = match var("LOCAL_WRITER_PATH") {
             Ok(path) => Persistence::Local {
                 path: PathBuf::from(non_empty("LOCAL_WRITER_PATH", path)?),
             },
             Err(_) => Persistence::Postgres {
                 url: SecretString::new(non_empty(
                     "DATABASE_URL",
-                    std::env::var("DATABASE_URL").context("DATABASE_URL is not set")?,
+                    var("DATABASE_URL").context("DATABASE_URL is not set")?,
                 )?),
             },
         };
-        let gemini_key = std::env::var("GEMINI_API_KEY").context("GEMINI_API_KEY is not set")?;
-        let gemini_model =
-            std::env::var("GEMINI_MODEL").unwrap_or_else(|_| DEFAULT_GEMINI_MODEL.to_string());
-        let openrouter = match std::env::var("OPENROUTER_API_KEY") {
+        let gemini_key = var("GEMINI_API_KEY").context("GEMINI_API_KEY is not set")?;
+        let gemini_model = var("GEMINI_MODEL").unwrap_or_else(|_| DEFAULT_GEMINI_MODEL.to_string());
+        let openrouter = match var("OPENROUTER_API_KEY") {
             Ok(key) => Some(OpenRouterConfig {
                 key: SecretString::new(non_empty("OPENROUTER_API_KEY", key)?),
                 model: non_empty(
                     "OPENROUTER_MODEL",
-                    std::env::var("OPENROUTER_MODEL")
+                    var("OPENROUTER_MODEL")
                         .unwrap_or_else(|_| DEFAULT_OPENROUTER_MODEL.to_string()),
                 )?,
-                fallbacks: std::env::var("OPENROUTER_FALLBACKS")
+                fallbacks: var("OPENROUTER_FALLBACKS")
                     .map(|raw| {
                         raw.split(',')
                             .map(str::trim)

@@ -85,9 +85,9 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use test_case::test_case;
 
-    use crate::domain::Article;
+    use crate::domain::{Article, Candidate, CoveredCity};
     use crate::error::Rejection;
-    use crate::models::{ActionType, LlmAction};
+    use crate::models::{ActionType, LlmAction, Sanitized};
 
     fn article(published: Option<chrono::DateTime<Utc>>) -> Article {
         Article {
@@ -112,8 +112,8 @@ mod tests {
         }
     }
 
-    fn try_new(action: LlmAction, source: &Article) -> Result<crate::domain::Candidate, Rejection> {
-        crate::domain::Candidate::try_new(crate::models::Sanitized::new(action), source)
+    fn try_new(action: LlmAction, source: &Article) -> Result<Candidate, Rejection> {
+        Candidate::try_new(Sanitized::new(action), source)
     }
 
     fn published() -> Option<chrono::DateTime<Utc>> {
@@ -140,7 +140,7 @@ mod tests {
         );
         assert_eq!(candidate.brand.as_deref(), Some("Domino's"));
         assert_eq!(candidate.action_type, ActionType::LicenceSuspension);
-        assert_eq!(candidate.city, crate::domain::CoveredCity::Mumbai);
+        assert_eq!(candidate.city, CoveredCity::Mumbai);
     }
 
     #[test]

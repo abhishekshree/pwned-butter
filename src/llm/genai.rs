@@ -6,6 +6,7 @@ use genai::adapter::AdapterKind;
 use genai::chat::{ChatMessage, ChatOptions, ChatRequest, JsonSpec};
 use genai::resolver::AuthData;
 use serde_json::{Value, json};
+use tokio::time::sleep;
 use tracing::warn;
 
 use crate::domain::Article;
@@ -63,7 +64,7 @@ async fn chat_text(
         if attempt + 1 == MAX_ATTEMPTS {
             return (Err(error), calls);
         }
-        tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
+        sleep(Duration::from_secs(1 << attempt)).await;
     }
     unreachable!("MAX_ATTEMPTS is nonzero")
 }
@@ -268,6 +269,8 @@ fn clamp_opt(field: &mut Option<String>, max: usize) {
 
 #[cfg(test)]
 mod tests {
+    use std::ptr::eq;
+
     use super::*;
     use crate::models::ActionType;
 
@@ -337,13 +340,13 @@ mod tests {
 
         assert_eq!(result.len(), 2, "out-of-range index is dropped");
         assert!(
-            std::ptr::eq(result[0].0, &second),
+            eq(result[0].0, &second),
             "chunk-local index 1 resolves to the second article"
         );
         assert_eq!(result[0].1.establishment, "B");
         assert_eq!(result[0].1.source_index, 1, "wire index is left untouched");
         assert!(
-            std::ptr::eq(result[1].0, &first),
+            eq(result[1].0, &first),
             "chunk-local index 0 resolves to the first article"
         );
         assert_eq!(result[1].1.establishment, "A");

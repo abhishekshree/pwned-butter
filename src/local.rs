@@ -1,12 +1,13 @@
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result as AnyResult};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 
+use crate::db::same_event;
 use crate::domain::Candidate;
 use crate::report::{RunReport, StoreOutcome};
 
@@ -27,7 +28,7 @@ impl LocalWriter {
     fn read_records(path: &Path) -> AnyResult<Vec<Value>> {
         let file = match File::open(path) {
             Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error).with_context(|| format!("open {}", path.display())),
         };
         BufReader::new(file)
@@ -86,7 +87,7 @@ impl LocalWriter {
                     && record
                         .get("establishment")
                         .and_then(Value::as_str)
-                        .is_some_and(|name| crate::db::same_event(name, &row.establishment))
+                        .is_some_and(|name| same_event(name, &row.establishment))
                     && record.get("action_date").and_then(Value::as_str) == Some(date.as_str())
             });
             if duplicate {
@@ -136,11 +137,15 @@ impl LocalWriter {
 
 #[cfg(test)]
 mod tests {
+    use std::env::temp_dir;
+    use std::fs::remove_file;
+    use std::process::id;
+
     use chrono::Duration;
 
     use super::*;
     use crate::domain::Article;
-    use crate::models::{ActionType, LlmAction};
+    use crate::models::{ActionType, LlmAction, Sanitized};
 
     fn candidate(url: &str, establishment: &str) -> Candidate {
         let action = LlmAction {
@@ -160,29 +165,26 @@ mod tests {
             published: None,
             snippet: None,
         };
-        Candidate::try_new(crate::models::Sanitized::new(action), &article)
-            .expect("valid candidate")
+        Candidate::try_new(Sanitized::new(action), &article).expect("valid candidate")
     }
 
     #[test]
     fn run_ids_increment_once_per_run() {
-        let path =
-            std::env::temp_dir().join(format!("fda-local-runs-{}.jsonl", std::process::id()));
+        let path = temp_dir().join(format!("fda-local-runs-{}.jsonl", id()));
         let writer = LocalWriter::new(path);
-        let _ = std::fs::remove_file(writer.runs_path());
+        let _ = remove_file(writer.runs_path());
 
         let first = writer.begin_run().expect("first run");
         let second = writer.begin_run().expect("second run");
 
         assert_eq!((first, second), (1, 2));
-        let _ = std::fs::remove_file(writer.runs_path());
+        let _ = remove_file(writer.runs_path());
     }
 
     #[test]
     fn writes_deduplicates_and_reports_seen_urls() {
-        let path =
-            std::env::temp_dir().join(format!("fda-local-writer-{}.jsonl", std::process::id()));
-        let _ = std::fs::remove_file(&path);
+        let path = temp_dir().join(format!("fda-local-writer-{}.jsonl", id()));
+        let _ = remove_file(&path);
         let writer = LocalWriter::new(path.clone());
         let rows = [candidate("https://example.test/1", "Domino's Vile Parle")];
 
@@ -195,6 +197,6 @@ mod tests {
         assert_eq!((first.inserted, second.skipped), (1, 1));
         assert!(seen.contains("https://example.test/1"));
 
-        let _ = std::fs::remove_file(&path);
+        let _ = remove_file(&path);
     }
 }

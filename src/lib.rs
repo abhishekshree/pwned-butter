@@ -12,6 +12,8 @@ pub mod rules;
 pub mod scrape;
 mod store;
 
+use std::io::stderr;
+
 /// The single startup boundary for binaries.
 pub fn init() {
     dotenvy::dotenv().ok();
@@ -23,7 +25,7 @@ fn init_logging() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_writer(std::io::stderr)
+        .with_writer(stderr)
         .with_target(false)
         .try_init();
 }

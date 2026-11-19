@@ -1,6 +1,7 @@
 use std::env;
 
 use anyhow::{Context, Result as AnyResult, bail};
+use fda_mumbai_tracker::init;
 use tracing::info;
 
 // POSTs to the dashboard's /api/revalidate route to clear the cached
@@ -9,7 +10,7 @@ use tracing::info;
 // URL can also be passed as the first arg when it ends with /api/revalidate.
 #[tokio::main]
 async fn main() -> AnyResult<()> {
-    fda_mumbai_tracker::init();
+    init();
     let mut args = env::args().skip(1).collect::<Vec<_>>();
     let mut url = env::var("REVALIDATE_URL").unwrap_or_default();
     if args.first().is_some_and(|a| a.contains("/api/revalidate")) {

@@ -1,11 +1,15 @@
+use std::cmp::Reverse;
 use std::collections::HashSet;
+use std::future::Future;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use anyhow::{Context, Result as AnyResult};
 use chrono::{DateTime, Utc};
 use rss::Channel;
 use scraper::{Html, Selector};
 use tokio::sync::Semaphore;
+use tokio::time::sleep;
 use tracing::{error, info, warn};
 use urlencoding::encode;
 
@@ -35,7 +39,7 @@ fn google_news_url(query: &str, window: Option<&str>) -> String {
 
 async fn fan_out<T, Fut>(concurrency: usize, jobs: Vec<Fut>) -> Vec<T>
 where
-    Fut: std::future::Future<Output = T> + Send + 'static,
+    Fut: Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
     let sem = Arc::new(Semaphore::new(concurrency));
@@ -62,7 +66,7 @@ async fn fetch_feed(client: &reqwest::Client, url: &str) -> AnyResult<Vec<NewsIt
     match fetch_feed_once(client, url).await {
         Ok(items) => Ok(items),
         Err(first) => {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            sleep(Duration::from_secs(10)).await;
             fetch_feed_once(client, url)
                 .await
                 .map_err(|second| second.context(format!("after retry; first: {first:#}")))
@@ -167,8 +171,8 @@ fn enforcement_score(item: &NewsItem) -> u32 {
 fn select_for_enrichment(mut items: Vec<NewsItem>, max_items: usize) -> Vec<NewsItem> {
     items.sort_by_cached_key(|item| {
         (
-            std::cmp::Reverse(enforcement_score(item)),
-            std::cmp::Reverse(item.published.unwrap_or(chrono::DateTime::<Utc>::MIN_UTC)),
+            Reverse(enforcement_score(item)),
+            Reverse(item.published.unwrap_or(DateTime::<Utc>::MIN_UTC)),
             item.url.clone(),
         )
     });
@@ -321,8 +325,8 @@ pub(crate) async fn enrich(
     }
     out.sort_by(|a, b| {
         b.published
-            .unwrap_or(chrono::DateTime::<Utc>::MIN_UTC)
-            .cmp(&a.published.unwrap_or(chrono::DateTime::<Utc>::MIN_UTC))
+            .unwrap_or(DateTime::<Utc>::MIN_UTC)
+            .cmp(&a.published.unwrap_or(DateTime::<Utc>::MIN_UTC))
     });
     out
 }
