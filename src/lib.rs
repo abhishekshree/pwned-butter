@@ -11,12 +11,9 @@ pub mod rules;
 pub mod scrape;
 mod store;
 
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use reqwest::Client;
-
-static HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
 
 /// The single startup boundary for binaries.
 pub fn init() {
@@ -34,12 +31,10 @@ fn init_logging() {
         .try_init();
 }
 
-pub(crate) fn http_client() -> &'static Client {
-    HTTP_CLIENT.get_or_init(|| {
-        Client::builder()
-            .user_agent(news::USER_AGENT)
-            .timeout(Duration::from_secs(60))
-            .build()
-            .expect("build shared reqwest client")
-    })
+pub(crate) fn http_client() -> Client {
+    Client::builder()
+        .user_agent(news::USER_AGENT)
+        .timeout(Duration::from_secs(60))
+        .build()
+        .expect("build shared reqwest client")
 }

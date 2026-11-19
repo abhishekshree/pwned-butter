@@ -19,6 +19,7 @@ pub struct RunReport {
     pub articles_new: usize,
     pub actions_upserted: usize,
     pub metrics: RunMetrics,
+    pub degraded: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy)]

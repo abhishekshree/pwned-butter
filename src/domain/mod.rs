@@ -5,7 +5,7 @@ use serde::Serialize;
 use strum::{EnumIter, IntoEnumIterator};
 
 use crate::error::Rejection;
-use crate::models::{ActionType, LlmAction, NewsItem, OutletType};
+use crate::models::{ActionType, LlmAction, NewsItem, OutletType, Sanitized};
 use crate::rules::rules;
 
 /// The only cities this tracker covers.
@@ -103,7 +103,8 @@ pub struct Candidate {
 
 impl Candidate {
     /// Unknown outlet codes become `None` because the DB column is nullable.
-    pub fn try_new(action: LlmAction, article: &Article) -> Result<Self, Rejection> {
+    pub fn try_new(action: Sanitized<LlmAction>, article: &Article) -> Result<Self, Rejection> {
+        let action = action.into_inner();
         let establishment =
             nonempty(Some(action.establishment.as_str())).ok_or(Rejection::NoEstablishment)?;
         let city = CoveredCity::parse(action.city.as_deref().unwrap_or(""))
@@ -178,12 +179,81 @@ fn nonempty(v: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Outlet identity used to detect the same action across reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventKey {
+    pub establishment: String,
+}
+
+impl EventKey {
+    pub fn from_candidate(c: &Candidate) -> Self {
+        Self {
+            establishment: c.establishment.clone(),
+        }
+    }
+
+    /// Exact, containment for 6+ char names, or token/acronym match with a 3+ char word in common.
+    pub fn same_event_as(&self, other: &Self) -> bool {
+        // Venue words that vary between reports of the same outlet.
+        const GENERIC_WORDS: [&str; 7] = [
+            "club",
+            "facility",
+            "canteen",
+            "restaurant",
+            "hotel",
+            "outlet",
+            "kitchen",
+        ];
+
+        fn tokens(s: &str) -> Vec<&str> {
+            s.split(|c: char| !c.is_alphanumeric())
+                .filter(|t| !t.is_empty() && !GENERIC_WORDS.contains(t))
+                .collect()
+        }
+
+        // "mca" = initials of the consecutive run "mumbai cricket association".
+        fn is_acronym_of(acro: &str, words: &[&str]) -> bool {
+            !acro.is_empty()
+                && acro.len() <= words.len()
+                && acro.chars().zip(words).all(|(c, w)| w.starts_with(c))
+        }
+
+        fn token_matches(t: &str, words: &[&str]) -> bool {
+            words.contains(&t)
+                || (0..=words.len().saturating_sub(t.len())).any(|i| is_acronym_of(t, &words[i..]))
+        }
+
+        let norm = |s: &str| -> String {
+            s.to_lowercase()
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let (a, b) = (norm(&self.establishment), norm(&other.establishment));
+        if a == b {
+            return true;
+        }
+        // Short-name containment is too loose ("KFC" everywhere).
+        if a.len().min(b.len()) >= 6 && (a.contains(&b) || b.contains(&a)) {
+            return true;
+        }
+        let side_matches = |from: &[&str], to: &[&str]| {
+            from.iter().map(|t| t.len()).sum::<usize>() >= 6
+                && from.iter().all(|t| token_matches(t, to))
+                && from.iter().any(|t| t.len() >= 3 && to.contains(t))
+        };
+        let (ta, tb) = (tokens(&a), tokens(&b));
+        side_matches(&ta, &tb) || side_matches(&tb, &ta)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use test_case::test_case;
 
     use super::*;
-    use crate::models::{ActionType, LlmAction};
+    use crate::models::{ActionType, LlmAction, Sanitized};
 
     const FULL: &str = "licence suspended over cockroach infestation found during inspection";
 
@@ -205,7 +275,7 @@ mod tests {
             details: details.map(str::to_string),
             ..Default::default()
         };
-        Candidate::try_new(action, &article())
+        Candidate::try_new(Sanitized::new(action), &article())
     }
 
     #[test_case("Domino's Vile Parle", Some(FULL), Ok(()); "complete record")]
@@ -238,6 +308,6 @@ mod tests {
             ),
             ..Default::default()
         };
-        assert!(Candidate::try_new(action, &article()).is_ok());
+        assert!(Candidate::try_new(Sanitized::new(action), &article()).is_ok());
     }
 }

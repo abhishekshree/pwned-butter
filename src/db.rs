@@ -2,15 +2,15 @@ use std::collections::HashSet;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use anyhow::{Context, Result as AnyResult};
+use anyhow::{Context, Result as AnyResult, bail};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use tokio::sync::Mutex;
 
-use crate::config::Config;
-use crate::domain::Candidate;
+use crate::config::{Config, Persistence};
+use crate::domain::{Candidate, EventKey};
 use crate::report::{RunReport, StoreOutcome};
 
 static POOL: OnceLock<PgPool> = OnceLock::new();
@@ -25,43 +25,33 @@ pub async fn pool(config: &Config) -> AnyResult<&'static PgPool> {
     if let Some(pool) = POOL.get() {
         return Ok(pool);
     }
+    let Persistence::Postgres { url } = &config.persistence else {
+        bail!("pool requires Postgres persistence");
+    };
     let pool = PgPoolOptions::new()
         .max_connections(5)
         .acquire_timeout(Duration::from_secs(15))
-        .connect(&config.database_url)
+        .connect(url)
         .await
         .context("connect to neon")?;
     Ok(POOL.get_or_init(|| pool))
 }
 
 pub(crate) async fn seen_urls(pool: &PgPool, cutoff: DateTime<Utc>) -> AnyResult<HashSet<String>> {
-    Ok(sqlx::query_scalar::<_, String>(
-        "SELECT source_url FROM actions WHERE published_at > $1 OR published_at IS NULL",
+    // Seen-window is when we first stored the URL, not when the article was published.
+    Ok(
+        sqlx::query_scalar::<_, String>("SELECT source_url FROM actions WHERE created_at > $1")
+            .bind(cutoff)
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .collect(),
     )
-    .bind(cutoff)
-    .fetch_all(pool)
-    .await?
-    .into_iter()
-    .collect())
 }
 
 const INSERT_TAIL: &str = "establishment, area, city, brand, operator, outlet_type, action_type,
                 action_date, violations, compliance_score, fssai_number, details,
                 platforms, source_url, source_publisher, source_headline, published_at";
-
-type Tx = sqlx::Transaction<'static, sqlx::Postgres>;
-
-/// Tx goes in by value and comes back out so callers compile on stable.
-async fn transact<T, F, Fut>(pool: &PgPool, f: F) -> AnyResult<T>
-where
-    F: FnOnce(Tx) -> Fut,
-    Fut: std::future::Future<Output = AnyResult<(Tx, T)>>,
-{
-    let tx = pool.begin().await?;
-    let (tx, out) = f(tx).await?;
-    tx.commit().await?;
-    Ok(out)
-}
 
 async fn execute_insert(
     conn: &mut sqlx::PgConnection,
@@ -99,103 +89,55 @@ async fn execute_insert(
 
 /// `same_event` is the Rust dedup authority; the SQL EXCLUDE constraint is the backstop.
 pub(crate) async fn upsert_actions(pool: &PgPool, rows: &[Candidate]) -> AnyResult<StoreOutcome> {
-    transact(pool, |mut tx| async move {
-        let mut outcome = StoreOutcome::default();
-        for r in rows {
-            // One event per outlet AND action type, so a reopening is not swallowed.
-            // The window is ±10, not ±5: the SQL daterange canonicalises to
-            // [d-5, d+6), so a narrower pre-check would miss a conflicting row
-            // and abort the transaction on INSERT.
-            let candidates: Vec<String> = sqlx::query(
-                "SELECT establishment FROM actions
+    let mut tx = pool.begin().await?;
+    let mut outcome = StoreOutcome::default();
+    for r in rows {
+        // One event per outlet AND action type, so a reopening is not swallowed.
+        // ±10 pre-check vs SQL's ±5 daterange: a narrower check misses conflicts and aborts the tx.
+        let candidates: Vec<String> = sqlx::query(
+            "SELECT establishment FROM actions
                  WHERE action_date BETWEEN $1 - 10 AND $1 + 10
                    AND action_type = $2",
-            )
-            .bind(r.action_date)
-            .bind(r.action_type.to_string())
-            .fetch_all(&mut *tx)
-            .await?
-            .into_iter()
-            .filter_map(|row| row.try_get(0).ok())
-            .collect();
-            if candidates
-                .iter()
-                .any(|name| same_event(name, &r.establishment))
-            {
-                outcome.skipped += 1;
-                continue;
-            }
-            outcome.inserted += usize::try_from(
-                execute_insert(
-                    &mut tx,
-                    r,
-                    "DO UPDATE SET
+        )
+        .bind(r.action_date)
+        .bind(r.action_type.to_string())
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .filter_map(|row| row.try_get(0).ok())
+        .collect();
+        if candidates
+            .iter()
+            .any(|name| same_event(name, &r.establishment))
+        {
+            outcome.skipped += 1;
+            continue;
+        }
+        outcome.inserted += usize::try_from(
+            execute_insert(
+                &mut tx,
+                r,
+                "DO UPDATE SET
                     violations = EXCLUDED.violations,
                     platforms = EXCLUDED.platforms,
                     details = EXCLUDED.details,
                     updated_at = now()",
-                )
-                .await?,
-            )?;
-        }
-        Ok((tx, outcome))
+            )
+            .await?,
+        )?;
+    }
+    tx.commit().await?;
+    Ok(outcome)
+}
+
+/// Dedup identity lives in `domain::EventKey`; this keeps the store call sites terse.
+pub(crate) fn same_event(a: &str, b: &str) -> bool {
+    EventKey {
+        establishment: a.to_string(),
+    }
+    .same_event_as(&EventKey {
+        establishment: b.to_string(),
     })
-    .await
-}
-
-/// Venue-type words that vary between reports of the same outlet.
-const GENERIC_WORDS: [&str; 7] = [
-    "club",
-    "facility",
-    "canteen",
-    "restaurant",
-    "hotel",
-    "outlet",
-    "kitchen",
-];
-
-fn tokens(s: &str) -> Vec<&str> {
-    s.split(|c: char| !c.is_alphanumeric())
-        .filter(|t| !t.is_empty() && !GENERIC_WORDS.contains(t))
-        .collect()
-}
-
-/// "mca" = initials of the consecutive run "mumbai cricket association".
-fn is_acronym_of(acro: &str, words: &[&str]) -> bool {
-    !acro.is_empty()
-        && acro.len() <= words.len()
-        && acro.chars().zip(words).all(|(c, w)| w.starts_with(c))
-}
-
-fn token_matches(t: &str, words: &[&str]) -> bool {
-    words.contains(&t)
-        || (0..=words.len().saturating_sub(t.len())).any(|i| is_acronym_of(t, &words[i..]))
-}
-
-/// Exact, containment for 6+ char names, or token/acronym matching with a 3+ char word in common.
-fn same_event(a: &str, b: &str) -> bool {
-    let norm = |s: &str| -> String {
-        s.to_lowercase()
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|t| !t.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
-    let (a, b) = (norm(a), norm(b));
-    if a == b {
-        return true;
-    }
-    // Short-name containment is too loose ("KFC" everywhere).
-    if a.len().min(b.len()) >= 6 && (a.contains(&b) || b.contains(&a)) {
-        return true;
-    }
-    let side_matches = |from: &[&str], to: &[&str]| {
-        from.iter().map(|t| t.len()).sum::<usize>() >= 6
-            && from.iter().all(|t| token_matches(t, to))
-            && from.iter().any(|t| t.len() >= 3 && to.contains(t))
-    };
-    let (ta, tb) = (tokens(&a), tokens(&b));
-    side_matches(&ta, &tb) || side_matches(&tb, &ta)
 }
 
 pub(crate) async fn begin_run(pool: &PgPool) -> AnyResult<i64> {
@@ -211,28 +153,20 @@ pub(crate) async fn finish_run(
     report: &RunReport,
     details: &Value,
 ) -> AnyResult<()> {
-    // Caller-supplied keys are kept, then the typed metrics win on collision.
-    let mut merged = serde_json::Map::new();
-    if let Some(extra) = details.as_object() {
+    let mut details_json = json!({
+        "triage_calls": report.metrics.triage_calls,
+        "extraction_calls": report.metrics.extraction_calls,
+        "triage_failures": report.metrics.triage_failures,
+        "extraction_failures": report.metrics.extraction_failures,
+        "rejected": report.metrics.rejected,
+        "degraded": report.degraded,
+    });
+    // Typed metrics win on collision, so only add caller keys we do not already have.
+    if let (Some(obj), Some(extra)) = (details_json.as_object_mut(), details.as_object()) {
         for (key, value) in extra {
-            merged.insert(key.clone(), value.clone());
+            obj.entry(key.clone()).or_insert_with(|| value.clone());
         }
     }
-    merged.insert("triage_calls".into(), json!(report.metrics.triage_calls));
-    merged.insert(
-        "extraction_calls".into(),
-        json!(report.metrics.extraction_calls),
-    );
-    merged.insert(
-        "triage_failures".into(),
-        json!(report.metrics.triage_failures),
-    );
-    merged.insert(
-        "extraction_failures".into(),
-        json!(report.metrics.extraction_failures),
-    );
-    merged.insert("rejected".into(), json!(report.metrics.rejected));
-    let details_json = Value::Object(merged);
 
     sqlx::query(
         "UPDATE fetch_runs SET finished_at = now(), status = 'ok',

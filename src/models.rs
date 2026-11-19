@@ -109,3 +109,16 @@ where
 {
     Ok(Option::<Vec<String>>::deserialize(de)?.unwrap_or_default())
 }
+
+/// Marks a value that has passed validation; construct only through `new`.
+pub struct Sanitized<T>(T);
+
+impl<T> Sanitized<T> {
+    pub(crate) fn new(value: T) -> Self {
+        Self(value)
+    }
+
+    pub(crate) fn into_inner(self) -> T {
+        self.0
+    }
+}
