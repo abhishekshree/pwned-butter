@@ -66,7 +66,8 @@ extraction contract:
 - Merge cross-cluster duplicates, keeping the richest fields
   (re-reported drives appear in several outlets' coverage).
 - Collapse same-outlet re-reports within ±5 days into one row.
-- Apply the live quality gate (`src/llm/quality.rs`) by hand: city
+- Apply the live quality gate by hand: thresholds come from
+  `src/rules.toml`, enforcement lives in `src/domain/mod.rs` — city
   required, details ≥ 20 chars, establishment ≤ 9 words, not the
   regulator, not a product, not quote-led.
 - Thin rows (named + suspended + city, no outlet-level violations) pass
@@ -189,10 +190,10 @@ Then open the dashboard and confirm the new cards render.
 - The OpenRouter fallback 404s entirely when the account requires
   zero data retention (free endpoints offer none). Fix is at
   `openrouter.ai/settings/privacy`, not in code.
-- `z-ai/glm-5.2:free` was delisted without warning; re-verify pinned
-  IDs against `https://openrouter.ai/api/v1/models` (the date is in
-  the code comment — honor it). Replaced 2026-10-10 with
-  `google/gemma-4-26b-a4b-it:free`.
+- Free OpenRouter models get delisted without warning. Re-verify the
+  pinned IDs (`openrouter/free` and fallback
+  `inclusionai/ling-3.2-flash:free` in `src/config.rs`) against
+  `https://openrouter.ai/api/v1/models` before relying on them.
 - Thin rows and cross-city namesakes are the two judgment calls that
   recur; when unsure, keep the row and let the exclusion constraint
   decide — it reports what it skips.

@@ -1,13 +1,13 @@
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result as AnyResult};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 
-use crate::domain::Candidate;
+use crate::domain::{Candidate, EventKey};
 use crate::report::{RunReport, StoreOutcome};
 
 /// A file-backed stand-in for Postgres, so local runs never touch the live DB.
@@ -27,21 +27,19 @@ impl LocalWriter {
     fn read_records(path: &Path) -> AnyResult<Vec<Value>> {
         let file = match File::open(path) {
             Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error).with_context(|| format!("open {}", path.display())),
         };
         BufReader::new(file)
             .lines()
             .enumerate()
-            .filter_map(|(index, line)| match line {
-                Ok(line) if line.trim().is_empty() => None,
-                Ok(line) => Some(
-                    serde_json::from_str(&line)
-                        .with_context(|| format!("{} line {}", path.display(), index + 1)),
-                ),
-                Err(error) => Some(
-                    Err(error).with_context(|| format!("{} line {}", path.display(), index + 1)),
-                ),
+            .filter_map(|(index, line)| {
+                let context = || format!("{} line {}", path.display(), index + 1);
+                match line {
+                    Ok(line) if line.trim().is_empty() => None,
+                    Ok(line) => Some(serde_json::from_str(&line).with_context(context)),
+                    Err(error) => Some(Err(error).with_context(context)),
+                }
             })
             .collect()
     }
@@ -77,15 +75,19 @@ impl LocalWriter {
             .collect())
     }
 
+    // shortcut: no transactionality, seen-window uses published_at; debug backend only, upgrade if used for backfills.
     pub fn upsert_actions(&self, rows: &[Candidate]) -> AnyResult<StoreOutcome> {
         let mut records = Self::read_records(&self.path)?;
         let mut outcome = StoreOutcome::default();
         for row in rows {
             let date = row.action_date.to_string();
+            let key = EventKey::from_candidate(row);
             let duplicate = records.iter().any(|record| {
                 record.get("source_url").and_then(Value::as_str) == Some(row.source_url.as_str())
-                    && record.get("establishment").and_then(Value::as_str)
-                        == Some(row.establishment.as_str())
+                    && record
+                        .get("establishment")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| key.matches(&EventKey::from_name(name)))
                     && record.get("action_date").and_then(Value::as_str) == Some(date.as_str())
             });
             if duplicate {
@@ -113,20 +115,16 @@ impl LocalWriter {
     }
 
     pub fn finish_run(&self, run_id: i64, report: &RunReport) -> AnyResult<()> {
-        self.append(
-            &self.runs_path(),
-            &json!({
-                "id": run_id,
-                "status": "ok",
-                "articles_seen": report.articles_seen,
-                "articles_new": report.articles_new,
-                "actions_upserted": report.actions_upserted,
-                "llm_calls": report.metrics.total_calls(),
-                "triage_failures": report.metrics.triage_failures,
-                "extraction_failures": report.metrics.extraction_failures,
-                "rejected": report.metrics.rejected,
-            }),
-        )
+        let mut record = report.to_details(&json!({}));
+        if let Some(obj) = record.as_object_mut() {
+            obj.insert("id".into(), json!(run_id));
+            obj.insert("status".into(), json!("ok"));
+            obj.insert("articles_seen".into(), json!(report.articles_seen));
+            obj.insert("articles_new".into(), json!(report.articles_new));
+            obj.insert("actions_upserted".into(), json!(report.actions_upserted));
+            obj.insert("llm_calls".into(), json!(report.metrics.total_calls()));
+        }
+        self.append(&self.runs_path(), &record)
     }
 
     pub fn fail_run(&self, run_id: i64, error: &str) -> AnyResult<()> {
@@ -139,12 +137,15 @@ impl LocalWriter {
 
 #[cfg(test)]
 mod tests {
+    use std::env::temp_dir;
+    use std::fs::remove_file;
+    use std::process::id;
+
     use chrono::Duration;
 
     use super::*;
     use crate::domain::Article;
-    use crate::models::{ActionType, LlmAction};
-    use crate::report::RunReport;
+    use crate::models::{ActionType, LlmAction, Sanitized};
 
     fn candidate(url: &str, establishment: &str) -> Candidate {
         let action = LlmAction {
@@ -164,31 +165,26 @@ mod tests {
             published: None,
             snippet: None,
         };
-        Candidate::try_new(action, &article).expect("valid candidate")
+        Candidate::try_new(Sanitized::new(action), &article).expect("valid candidate")
     }
 
     #[test]
     fn run_ids_increment_once_per_run() {
-        let path =
-            std::env::temp_dir().join(format!("fda-local-runs-{}.jsonl", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let writer = LocalWriter::new(path.with_extension("jsonl"));
+        let path = temp_dir().join(format!("fda-local-runs-{}.jsonl", id()));
+        let writer = LocalWriter::new(path);
+        let _ = remove_file(writer.runs_path());
 
         let first = writer.begin_run().expect("first run");
-        writer
-            .finish_run(first, &RunReport::default())
-            .expect("finish");
         let second = writer.begin_run().expect("second run");
 
         assert_eq!((first, second), (1, 2));
-        let _ = std::fs::remove_file(writer.runs_path());
+        let _ = remove_file(writer.runs_path());
     }
 
     #[test]
     fn writes_deduplicates_and_reports_seen_urls() {
-        let path =
-            std::env::temp_dir().join(format!("fda-local-writer-{}.jsonl", std::process::id()));
-        let _ = std::fs::remove_file(&path);
+        let path = temp_dir().join(format!("fda-local-writer-{}.jsonl", id()));
+        let _ = remove_file(&path);
         let writer = LocalWriter::new(path.clone());
         let rows = [candidate("https://example.test/1", "Domino's Vile Parle")];
 
@@ -198,10 +194,9 @@ mod tests {
             .seen_urls(Utc::now() - Duration::days(1))
             .expect("read back");
 
-        assert_eq!(first.inserted, 1);
-        assert_eq!(second.skipped, 1);
+        assert_eq!((first.inserted, second.skipped), (1, 1));
         assert!(seen.contains("https://example.test/1"));
 
-        let _ = std::fs::remove_file(&path);
+        let _ = remove_file(&path);
     }
 }

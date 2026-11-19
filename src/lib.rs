@@ -1,4 +1,5 @@
 pub mod config;
+pub mod context;
 pub mod db;
 pub mod domain;
 pub mod error;
@@ -11,12 +12,7 @@ pub mod rules;
 pub mod scrape;
 mod store;
 
-use std::sync::OnceLock;
-use std::time::Duration;
-
-use reqwest::Client;
-
-static HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
+use std::io::stderr;
 
 /// The single startup boundary for binaries.
 pub fn init() {
@@ -26,20 +22,12 @@ pub fn init() {
 
 fn init_logging() {
     use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::fmt::format::FmtSpan;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_writer(std::io::stderr)
+        .with_writer(stderr)
+        .with_span_events(FmtSpan::CLOSE)
         .with_target(false)
         .try_init();
-}
-
-pub(crate) fn http_client() -> &'static Client {
-    HTTP_CLIENT.get_or_init(|| {
-        Client::builder()
-            .user_agent(news::USER_AGENT)
-            .timeout(Duration::from_secs(60))
-            .build()
-            .expect("build shared reqwest client")
-    })
 }

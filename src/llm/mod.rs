@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 
 use anyhow::{Result as AnyResult, anyhow};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, warn};
 
-use crate::config::Config;
+use crate::config::{Config, DEFAULT_OPENROUTER_MODEL};
 use crate::domain::{Article, Candidate};
 use crate::report::RunMetrics;
 
@@ -16,29 +16,40 @@ const BATCH_SIZE: usize = 20;
 mod genai;
 mod triage;
 
+use genai::ExtractOptions;
 use triage::Verdict;
+
+/// The result of an LLM run, including degradation the caller must not ignore.
+pub struct Extraction {
+    pub candidates: Vec<Candidate>,
+    pub metrics: RunMetrics,
+    pub degraded: bool,
+}
 
 /// Each chunk addresses only itself, so no absolute index survives batching.
 fn verdict_article<'a>(chunk: &'a [Article], verdict: &Verdict) -> Option<&'a Article> {
     chunk.get(verdict.source_index)
 }
 
-/// A failed batch passes its items through and is counted.
+/// A failed batch passes its items through and is counted as degradation.
+#[instrument(skip_all, fields(total = items.len(), model = %model))]
 async fn triage<'a>(
     api_key: &str,
     model: &str,
     items: &'a [Article],
-    metrics: &mut RunMetrics,
-) -> AnyResult<Vec<&'a Article>> {
+) -> AnyResult<(Vec<&'a Article>, RunMetrics)> {
     if items.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), RunMetrics::default()));
     }
     let client = genai::client(api_key, None)?;
+    let mut metrics = RunMetrics::default();
     let mut kept = Vec::new();
     let mut seen: HashSet<&str> = HashSet::new();
 
     for (batch_no, chunk) in items.chunks(BATCH_SIZE).enumerate() {
-        match genai::triage_batch(&client, model, chunk, metrics).await {
+        let (result, calls) = genai::triage_batch(&client, model, chunk).await;
+        metrics.triage_calls += calls;
+        match result {
             Ok(verdicts) => {
                 for verdict in verdicts {
                     let Some(item) = verdict_article(chunk, &verdict) else {
@@ -69,45 +80,46 @@ async fn triage<'a>(
             }
         }
     }
-    Ok(kept)
+    Ok((kept, metrics))
 }
 
-pub(crate) async fn extract(
-    config: &Config,
-    items: &[Article],
-    metrics: &mut RunMetrics,
-) -> AnyResult<Vec<Candidate>> {
-    let articles = triage(&config.gemini_key, &config.gemini_model, items, metrics).await?;
+#[instrument(skip_all, fields(total = items.len(), model = %config.gemini_model))]
+pub(crate) async fn extract(config: &Config, items: &[Article]) -> AnyResult<Extraction> {
+    let (articles, mut metrics) =
+        triage(config.gemini_key.expose(), &config.gemini_model, items).await?;
     info!(relevant = articles.len(), total = items.len(), "llm triage");
     if articles.is_empty() {
-        return Ok(Vec::new());
+        let degraded = metrics.triage_failures > 0;
+        return Ok(Extraction {
+            candidates: Vec::new(),
+            metrics,
+            degraded,
+        });
     }
 
     let openrouter = config.openrouter.as_ref();
-    let openrouter_key = openrouter.map(|options| options.key.as_str());
+    let openrouter_key = openrouter.map(|options| options.key.expose());
     let openrouter_model = openrouter
         .map(|options| options.model.as_str())
-        .unwrap_or(crate::config::DEFAULT_OPENROUTER_MODEL);
+        .unwrap_or(DEFAULT_OPENROUTER_MODEL);
     let openrouter_fallbacks: &[String] = match openrouter {
         Some(options) => options.fallbacks.as_slice(),
         None => &[],
     };
-    let client = genai::client(&config.gemini_key, openrouter_key)?;
+    let client = genai::client(config.gemini_key.expose(), openrouter_key)?;
+    let opts = ExtractOptions {
+        model: &config.gemini_model,
+        openrouter_key,
+        openrouter_model,
+        openrouter_fallbacks,
+    };
 
     let mut candidates = Vec::new();
     let mut failed = 0;
     for (batch_no, chunk) in articles.chunks(BATCH_SIZE).enumerate() {
-        match genai::extract_batch(
-            &client,
-            &config.gemini_model,
-            chunk,
-            openrouter_key,
-            openrouter_model,
-            openrouter_fallbacks,
-            metrics,
-        )
-        .await
-        {
+        let (result, calls) = genai::extract_batch(&client, chunk, &opts).await;
+        metrics.extraction_calls += calls;
+        match result {
             Ok(batch) => {
                 for (article, action) in batch {
                     let action = genai::sanitize_action(action);
@@ -149,7 +161,12 @@ pub(crate) async fn extract(
             "record"
         );
     }
-    Ok(candidates)
+    let degraded = metrics.triage_failures > 0 || metrics.extraction_failures > 0;
+    Ok(Extraction {
+        candidates,
+        metrics,
+        degraded,
+    })
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -176,18 +193,18 @@ fn strip_code_fences(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{BATCH_SIZE, extract, verdict_article};
-    use crate::config::Config;
+    use crate::config::{Config, Persistence, SecretString};
     use crate::domain::Article;
     use crate::llm::triage::Verdict;
-    use crate::report::RunMetrics;
 
     fn config() -> Config {
         Config {
-            database_url: String::new(),
-            gemini_key: "key".into(),
+            persistence: Persistence::Postgres {
+                url: SecretString::new(String::new()),
+            },
+            gemini_key: SecretString::new("key".into()),
             gemini_model: "model".into(),
             openrouter: None,
-            local_writer: None,
         }
     }
 
@@ -228,9 +245,11 @@ mod tests {
 
     #[tokio::test]
     async fn empty_items_skip_llm() {
-        let mut metrics = RunMetrics::default();
-        let candidates = extract(&config(), &[], &mut metrics).await.unwrap();
-        assert!(candidates.is_empty());
-        assert_eq!(metrics.total_calls(), 0);
+        let extraction = extract(&config(), &[]).await.unwrap();
+        assert!(extraction.candidates.is_empty());
+        assert_eq!(
+            extraction.metrics.triage_calls + extraction.metrics.extraction_calls,
+            0
+        );
     }
 }

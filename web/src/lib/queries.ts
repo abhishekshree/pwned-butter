@@ -4,7 +4,7 @@ import { sql } from "./db";
 import { activeFilter } from "./href";
 import type { ActionRow, DimCount, Filters, RunSummary, Stats } from "./types";
 
-const DAILY = { revalidate: 21600, tags: ["actions"] };
+const CACHE = { revalidate: 1800 };
 
 const toInt = (v: unknown): number =>
   typeof v === "string" ? parseInt(v, 10) : Number(v ?? 0);
@@ -79,8 +79,8 @@ export const listActions = unstable_cache(
       actions: rows as unknown as ActionRow[],
     };
   },
-  ["list-actions", "v2"],
-  DAILY,
+  ["list-actions", "v3"],
+  CACHE,
 );
 
 async function dims(col: string, limit?: number): Promise<DimCount[]> {
@@ -143,6 +143,6 @@ export const getStats = unstable_cache(
         : null,
     };
   },
-  ["get-stats", "v2"],
-  DAILY,
+  ["get-stats", "v3"],
+  CACHE,
 );
