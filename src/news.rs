@@ -15,7 +15,6 @@ use crate::rules::rules;
 
 pub(crate) const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
-/// Capped before fetching: fetching every hit exhausted the run's time budget.
 pub(crate) const MAX_ITEMS: usize = 100;
 const FETCH_CONCURRENCY: usize = 8;
 /// One huge publisher page can OOM the run before the snippet is truncated.
@@ -78,7 +77,13 @@ async fn fetch_feed_once(client: &reqwest::Client, url: &str) -> AnyResult<Vec<N
         .await
         .context("rss get")?
         .error_for_status()?;
+    if resp.content_length().is_some_and(|n| n > MAX_ARTICLE_BYTES) {
+        anyhow::bail!("rss feed too large: {url}");
+    }
     let bytes = resp.bytes().await.context("rss bytes")?;
+    if u64::try_from(bytes.len()).is_ok_and(|len| len > MAX_ARTICLE_BYTES) {
+        anyhow::bail!("rss feed too large: {url}");
+    }
     let channel = Channel::read_from(&bytes[..]).context("rss parse")?;
     let mut items = Vec::new();
     for it in channel.into_items() {
@@ -139,25 +144,27 @@ pub(crate) async fn fetch_items(
     Ok(items)
 }
 
-/// Priority signal only: a lower-scoring item still gets selected when there is room.
-fn enforcement_score(item: &NewsItem) -> u8 {
+fn enforcement_score(item: &NewsItem) -> u32 {
     let config = &rules().news;
     let hay = item.haystack();
     let any = |words: &[String]| words.iter().any(|w| hay.contains(w));
-    let mut score = 8 * u8::from(any(&config.authority_signals));
-    score += 3 * u8::from(any(&config.licence_words) && any(&config.licence_actions));
-    let action_hits = config
-        .action_signals
-        .iter()
-        .filter(|s| hay.contains(*s))
-        .count();
-    score += 3 * u8::try_from(action_hits).unwrap_or(u8::MAX);
-    score += u8::from(any(&config.venue_signals));
+    let mut score = 8 * u32::from(any(&config.authority_signals));
+    score = score
+        .saturating_add(3 * u32::from(any(&config.licence_words) && any(&config.licence_actions)));
+    let action_hits = u32::try_from(
+        config
+            .action_signals
+            .iter()
+            .filter(|s| hay.contains(*s))
+            .count(),
+    )
+    .unwrap_or(u32::MAX);
+    score = score.saturating_add(action_hits.saturating_mul(3));
+    score = score.saturating_add(u32::from(any(&config.venue_signals)));
     score
 }
 
 fn select_for_enrichment(mut items: Vec<NewsItem>, max_items: usize) -> Vec<NewsItem> {
-    // Cached because enforcement_score lowercases the whole haystack.
     items.sort_by_cached_key(|item| {
         (
             std::cmp::Reverse(enforcement_score(item)),
@@ -257,15 +264,10 @@ async fn fetch_article(client: &reqwest::Client, url: &str) -> AnyResult<Fetched
     })
 }
 
-fn already_seen(urls: &HashSet<String>, seen: &HashSet<String>, url: &str) -> bool {
-    urls.contains(url) || seen.contains(url)
-}
-
 fn canonical(item: &NewsItem, fetched: Option<FetchedArticle>) -> (String, Option<String>) {
     match fetched {
         Some(FetchedArticle { final_url, snippet }) => (final_url, snippet),
         None => {
-            // A failed fetch keeps the Google URL and uses the headline as snippet.
             let snippet = item.snippet.clone().or_else(|| Some(item.title.clone()));
             (item.url.clone(), snippet)
         }
@@ -311,7 +313,7 @@ pub(crate) async fn enrich(
             }
         };
         let (url, snippet) = canonical(&item, fetched);
-        if already_seen(&urls, seen, &url) {
+        if urls.contains(&url) || seen.contains(&url) {
             continue;
         }
         urls.insert(url.clone());
