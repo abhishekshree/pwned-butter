@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result as AnyResult, bail};
 
-pub(crate) const DEFAULT_GEMINI_MODEL: &str = "gemini-flash-latest";
+pub(crate) const DEFAULT_GEMINI_MODEL: &str = "gemini-3.8-flash";
 
 /// Every environment read in the crate happens here.
 #[derive(Debug, Clone)]
