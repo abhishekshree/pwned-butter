@@ -2,48 +2,39 @@ use anyhow::Result as AnyResult;
 use chrono::{Duration as ChronoDuration, Utc};
 use serde_json::json;
 
-use crate::config::{Config, Persistence};
-use crate::db;
+use crate::config::Config;
+use crate::context::AppContext;
 use crate::llm;
-use crate::local::LocalWriter;
 use crate::news;
 use crate::report::{RunReport, StoreOutcome};
-use crate::store::Store;
 
-pub async fn run_scrape(config: &Config) -> AnyResult<RunReport> {
+pub async fn run_scrape(config: &Config, ctx: &AppContext) -> AnyResult<RunReport> {
     // Google News indexes regional reports hours late; an overlapping window
     // with dedup beats a one-shot daily fetch.
-    run_with_window(config, "when:3d", 21, news::MAX_ITEMS).await
+    run_with_window(config, ctx, "when:3d", 21, news::MAX_ITEMS).await
 }
 
 pub async fn run_with_window(
     config: &Config,
+    ctx: &AppContext,
     window: &str,
     seen_days: i64,
     max_items: usize,
 ) -> AnyResult<RunReport> {
-    match &config.persistence {
-        Persistence::Local { path } => {
-            let writer = LocalWriter::new(path.clone());
-            run(config, &writer, window, seen_days, max_items).await
-        }
-        Persistence::Postgres { .. } => {
-            let pool = db::pool(config).await?;
-            run(config, pool, window, seen_days, max_items).await
-        }
-    }
+    run(config, ctx, window, seen_days, max_items).await
 }
 
 async fn run(
     config: &Config,
-    store: &dyn Store,
+    ctx: &AppContext,
     window: &str,
     seen_days: i64,
     max_items: usize,
 ) -> AnyResult<RunReport> {
+    let store = ctx.store.as_ref();
     let run_id = store.begin_run().await?;
 
-    match scrape_once(store, config, window, seen_days, max_items).await {
+    match scrape_once(ctx, config, window, seen_days, max_items).await {
         Ok(report) => {
             store
                 .finish_run(
@@ -62,19 +53,19 @@ async fn run(
 }
 
 async fn scrape_once(
-    store: &dyn Store,
+    ctx: &AppContext,
     config: &Config,
     window: &str,
     seen_days: i64,
     max_items: usize,
 ) -> AnyResult<RunReport> {
-    let client = crate::http_client();
+    let store = ctx.store.as_ref();
     let seen = Utc::now() - ChronoDuration::days(seen_days);
 
-    let items = news::fetch_items(&client, window).await?;
+    let items = news::fetch_items(&ctx.http, window).await?;
     let already_seen = store.seen_urls(seen).await?;
     let articles_seen = items.len();
-    let articles = news::enrich(&client, items, &already_seen, max_items).await;
+    let articles = news::enrich(&ctx.http, items, &already_seen, max_items).await;
     let articles_new = articles.len();
 
     let extraction = llm::extract(config, &articles).await?;

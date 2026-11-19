@@ -114,21 +114,16 @@ impl LocalWriter {
     }
 
     pub fn finish_run(&self, run_id: i64, report: &RunReport) -> AnyResult<()> {
-        self.append(
-            &self.runs_path(),
-            &json!({
-                "id": run_id,
-                "status": "ok",
-                "articles_seen": report.articles_seen,
-                "articles_new": report.articles_new,
-                "actions_upserted": report.actions_upserted,
-                "llm_calls": report.metrics.total_calls(),
-                "triage_failures": report.metrics.triage_failures,
-                "extraction_failures": report.metrics.extraction_failures,
-                "rejected": report.metrics.rejected,
-                "degraded": report.degraded,
-            }),
-        )
+        let mut record = report.to_details(&json!({}));
+        if let Some(obj) = record.as_object_mut() {
+            obj.insert("id".into(), json!(run_id));
+            obj.insert("status".into(), json!("ok"));
+            obj.insert("articles_seen".into(), json!(report.articles_seen));
+            obj.insert("articles_new".into(), json!(report.articles_new));
+            obj.insert("actions_upserted".into(), json!(report.actions_upserted));
+            obj.insert("llm_calls".into(), json!(report.metrics.total_calls()));
+        }
+        self.append(&self.runs_path(), &record)
     }
 
     pub fn fail_run(&self, run_id: i64, error: &str) -> AnyResult<()> {

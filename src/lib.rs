@@ -1,4 +1,5 @@
 pub mod config;
+pub mod context;
 pub mod db;
 pub mod domain;
 pub mod error;
@@ -10,10 +11,6 @@ pub mod report;
 pub mod rules;
 pub mod scrape;
 mod store;
-
-use std::time::Duration;
-
-use reqwest::Client;
 
 /// The single startup boundary for binaries.
 pub fn init() {
@@ -29,12 +26,4 @@ fn init_logging() {
         .with_writer(std::io::stderr)
         .with_target(false)
         .try_init();
-}
-
-pub(crate) fn http_client() -> Client {
-    Client::builder()
-        .user_agent(news::USER_AGENT)
-        .timeout(Duration::from_secs(60))
-        .build()
-        .expect("build shared reqwest client")
 }

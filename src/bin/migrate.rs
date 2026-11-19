@@ -8,7 +8,7 @@ async fn main() -> AnyResult<()> {
     fda_mumbai_tracker::init();
     let config = Config::from_env()?;
     let pool = db::pool(&config).await?;
-    sqlx::migrate!("./migrations").run(pool).await?;
+    sqlx::migrate!("./migrations").run(&pool).await?;
     info!("migrations applied");
     Ok(())
 }

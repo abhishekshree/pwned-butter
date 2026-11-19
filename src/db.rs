@@ -1,40 +1,26 @@
 use std::collections::HashSet;
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{Context, Result as AnyResult, bail};
 use chrono::{DateTime, Utc};
-use serde_json::{Value, json};
+use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
-use tokio::sync::Mutex;
 
 use crate::config::{Config, Persistence};
 use crate::domain::{Candidate, EventKey};
 use crate::report::{RunReport, StoreOutcome};
 
-static POOL: OnceLock<PgPool> = OnceLock::new();
-static POOL_LOCK: Mutex<()> = Mutex::const_new(());
-
-pub async fn pool(config: &Config) -> AnyResult<&'static PgPool> {
-    if let Some(pool) = POOL.get() {
-        return Ok(pool);
-    }
-    // Serialize the first connect so concurrent callers cannot each build one.
-    let _guard = POOL_LOCK.lock().await;
-    if let Some(pool) = POOL.get() {
-        return Ok(pool);
-    }
+pub async fn pool(config: &Config) -> AnyResult<PgPool> {
     let Persistence::Postgres { url } = &config.persistence else {
         bail!("pool requires Postgres persistence");
     };
-    let pool = PgPoolOptions::new()
+    PgPoolOptions::new()
         .max_connections(5)
         .acquire_timeout(Duration::from_secs(15))
-        .connect(url)
+        .connect(url.expose())
         .await
-        .context("connect to neon")?;
-    Ok(POOL.get_or_init(|| pool))
+        .context("connect to neon")
 }
 
 pub(crate) async fn seen_urls(pool: &PgPool, cutoff: DateTime<Utc>) -> AnyResult<HashSet<String>> {
@@ -153,20 +139,7 @@ pub(crate) async fn finish_run(
     report: &RunReport,
     details: &Value,
 ) -> AnyResult<()> {
-    let mut details_json = json!({
-        "triage_calls": report.metrics.triage_calls,
-        "extraction_calls": report.metrics.extraction_calls,
-        "triage_failures": report.metrics.triage_failures,
-        "extraction_failures": report.metrics.extraction_failures,
-        "rejected": report.metrics.rejected,
-        "degraded": report.degraded,
-    });
-    // Typed metrics win on collision, so only add caller keys we do not already have.
-    if let (Some(obj), Some(extra)) = (details_json.as_object_mut(), details.as_object()) {
-        for (key, value) in extra {
-            obj.entry(key.clone()).or_insert_with(|| value.clone());
-        }
-    }
+    let details_json = report.to_details(details);
 
     sqlx::query(
         "UPDATE fetch_runs SET finished_at = now(), status = 'ok',

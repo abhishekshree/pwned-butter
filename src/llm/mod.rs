@@ -83,7 +83,8 @@ async fn triage<'a>(
 }
 
 pub(crate) async fn extract(config: &Config, items: &[Article]) -> AnyResult<Extraction> {
-    let (articles, mut metrics) = triage(&config.gemini_key, &config.gemini_model, items).await?;
+    let (articles, mut metrics) =
+        triage(config.gemini_key.expose(), &config.gemini_model, items).await?;
     info!(relevant = articles.len(), total = items.len(), "llm triage");
     if articles.is_empty() {
         let degraded = metrics.triage_failures > 0;
@@ -95,7 +96,7 @@ pub(crate) async fn extract(config: &Config, items: &[Article]) -> AnyResult<Ext
     }
 
     let openrouter = config.openrouter.as_ref();
-    let openrouter_key = openrouter.map(|options| options.key.as_str());
+    let openrouter_key = openrouter.map(|options| options.key.expose());
     let openrouter_model = openrouter
         .map(|options| options.model.as_str())
         .unwrap_or(crate::config::DEFAULT_OPENROUTER_MODEL);
@@ -103,7 +104,7 @@ pub(crate) async fn extract(config: &Config, items: &[Article]) -> AnyResult<Ext
         Some(options) => options.fallbacks.as_slice(),
         None => &[],
     };
-    let client = genai::client(&config.gemini_key, openrouter_key)?;
+    let client = genai::client(config.gemini_key.expose(), openrouter_key)?;
     let opts = ExtractOptions {
         model: &config.gemini_model,
         openrouter_key,
@@ -190,14 +191,16 @@ fn strip_code_fences(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{BATCH_SIZE, extract, verdict_article};
-    use crate::config::{Config, Persistence};
+    use crate::config::{Config, Persistence, SecretString};
     use crate::domain::Article;
     use crate::llm::triage::Verdict;
 
     fn config() -> Config {
         Config {
-            persistence: Persistence::Postgres { url: String::new() },
-            gemini_key: "key".into(),
+            persistence: Persistence::Postgres {
+                url: SecretString::new(String::new()),
+            },
+            gemini_key: SecretString::new("key".into()),
             gemini_model: "model".into(),
             openrouter: None,
         }
