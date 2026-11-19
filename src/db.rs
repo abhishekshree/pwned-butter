@@ -73,13 +73,14 @@ async fn execute_insert(
     Ok(res.rows_affected())
 }
 
-/// `same_event` is the Rust dedup authority; the SQL EXCLUDE constraint is the backstop.
+/// `EventKey` is the dedup authority; the SQL EXCLUDE constraint is the backstop.
 pub(crate) async fn upsert_actions(pool: &PgPool, rows: &[Candidate]) -> AnyResult<StoreOutcome> {
     let mut tx = pool.begin().await?;
     let mut outcome = StoreOutcome::default();
     for r in rows {
         // One event per outlet AND action type, so a reopening is not swallowed.
         // ±10 pre-check vs SQL's ±5 daterange: a narrower check misses conflicts and aborts the tx.
+        let key = EventKey::from_candidate(r);
         let candidates: Vec<String> = sqlx::query(
             "SELECT establishment FROM actions
                  WHERE action_date BETWEEN $1 - 10 AND $1 + 10
@@ -94,7 +95,7 @@ pub(crate) async fn upsert_actions(pool: &PgPool, rows: &[Candidate]) -> AnyResu
         .collect();
         if candidates
             .iter()
-            .any(|name| same_event(name, &r.establishment))
+            .any(|name| key.matches(&EventKey::from_name(name)))
         {
             outcome.skipped += 1;
             continue;
@@ -114,16 +115,6 @@ pub(crate) async fn upsert_actions(pool: &PgPool, rows: &[Candidate]) -> AnyResu
     }
     tx.commit().await?;
     Ok(outcome)
-}
-
-/// Dedup identity lives in `domain::EventKey`; this keeps the store call sites terse.
-pub(crate) fn same_event(a: &str, b: &str) -> bool {
-    EventKey {
-        establishment: a.to_string(),
-    }
-    .same_event_as(&EventKey {
-        establishment: b.to_string(),
-    })
 }
 
 pub(crate) async fn begin_run(pool: &PgPool) -> AnyResult<i64> {
@@ -166,67 +157,4 @@ pub(crate) async fn fail_run(pool: &PgPool, run_id: i64, error: &str) -> AnyResu
     .execute(pool)
     .await?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::same_event;
-
-    #[test]
-    fn same_event_matches_case_and_containment() {
-        assert!(
-            same_event("Otters Club", "otters club"),
-            "case-insensitive exact"
-        );
-        assert!(
-            same_event("Otters Club", "Otters Club, Carter Road, Bandra West"),
-            "locality qualifier still matches"
-        );
-        assert!(
-            same_event(
-                "Blinkit Dark Store (Malad West)",
-                "Blinkit Dark Store Malad West"
-            ),
-            "punctuation-insensitive match"
-        );
-    }
-
-    #[test]
-    fn same_event_rejects_different_outlets() {
-        assert!(
-            !same_event(
-                "Domino's Pizza (Borivali West)",
-                "Domino's Pizza (Ghatkopar West)"
-            ),
-            "different localities are different events"
-        );
-        assert!(
-            !same_event("Domino's Pizza", "Pizza Hut Borivali"),
-            "different brands never match"
-        );
-    }
-
-    #[test]
-    fn same_event_short_names_match_exactly_only() {
-        assert!(
-            !same_event("KFC", "KFC Andheri"),
-            "short name containment is too loose"
-        );
-        assert!(same_event("KFC", "kfc"), "exact short names match");
-    }
-
-    #[test]
-    fn same_event_matches_acronym_and_venue_drift() {
-        assert!(
-            same_event("MCA BKC Club", "Mumbai Cricket Association (BKC Facility)"),
-            "acronym plus venue-word drift matches (Aug 2026 dupes)"
-        );
-        assert!(
-            !same_event(
-                "Cricket Club of India Canteen",
-                "Mumbai Cricket Association (BKC Facility)"
-            ),
-            "shared generic words alone do not match"
-        );
-    }
 }

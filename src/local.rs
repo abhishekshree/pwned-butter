@@ -7,8 +7,7 @@ use anyhow::{Context, Result as AnyResult};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 
-use crate::db::same_event;
-use crate::domain::Candidate;
+use crate::domain::{Candidate, EventKey};
 use crate::report::{RunReport, StoreOutcome};
 
 /// A file-backed stand-in for Postgres, so local runs never touch the live DB.
@@ -82,12 +81,13 @@ impl LocalWriter {
         let mut outcome = StoreOutcome::default();
         for row in rows {
             let date = row.action_date.to_string();
+            let key = EventKey::from_candidate(row);
             let duplicate = records.iter().any(|record| {
                 record.get("source_url").and_then(Value::as_str) == Some(row.source_url.as_str())
                     && record
                         .get("establishment")
                         .and_then(Value::as_str)
-                        .is_some_and(|name| same_event(name, &row.establishment))
+                        .is_some_and(|name| key.matches(&EventKey::from_name(name)))
                     && record.get("action_date").and_then(Value::as_str) == Some(date.as_str())
             });
             if duplicate {

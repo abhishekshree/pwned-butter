@@ -186,14 +186,18 @@ pub struct EventKey {
 }
 
 impl EventKey {
-    pub fn from_candidate(c: &Candidate) -> Self {
+    pub fn from_name(name: &str) -> Self {
         Self {
-            establishment: c.establishment.clone(),
+            establishment: name.to_string(),
         }
     }
 
+    pub fn from_candidate(c: &Candidate) -> Self {
+        Self::from_name(&c.establishment)
+    }
+
     /// Exact, containment for 6+ char names, or token/acronym match with a 3+ char word in common.
-    pub fn same_event_as(&self, other: &Self) -> bool {
+    pub fn matches(&self, other: &Self) -> bool {
         // Venue words that vary between reports of the same outlet.
         const GENERIC_WORDS: [&str; 7] = [
             "club",
@@ -256,6 +260,68 @@ mod tests {
     use crate::models::{ActionType, LlmAction, Sanitized};
 
     const FULL: &str = "licence suspended over cockroach infestation found during inspection";
+
+    fn same_event(a: &str, b: &str) -> bool {
+        EventKey::from_name(a).matches(&EventKey::from_name(b))
+    }
+
+    #[test]
+    fn same_event_matches_case_and_containment() {
+        assert!(
+            same_event("Otters Club", "otters club"),
+            "case-insensitive exact"
+        );
+        assert!(
+            same_event("Otters Club", "Otters Club, Carter Road, Bandra West"),
+            "locality qualifier still matches"
+        );
+        assert!(
+            same_event(
+                "Blinkit Dark Store (Malad West)",
+                "Blinkit Dark Store Malad West"
+            ),
+            "punctuation-insensitive match"
+        );
+    }
+
+    #[test]
+    fn same_event_rejects_different_outlets() {
+        assert!(
+            !same_event(
+                "Domino's Pizza (Borivali West)",
+                "Domino's Pizza (Ghatkopar West)"
+            ),
+            "different localities are different events"
+        );
+        assert!(
+            !same_event("Domino's Pizza", "Pizza Hut Borivali"),
+            "different brands never match"
+        );
+    }
+
+    #[test]
+    fn same_event_short_names_match_exactly_only() {
+        assert!(
+            !same_event("KFC", "KFC Andheri"),
+            "short name containment is too loose"
+        );
+        assert!(same_event("KFC", "kfc"), "exact short names match");
+    }
+
+    #[test]
+    fn same_event_matches_acronym_and_venue_drift() {
+        assert!(
+            same_event("MCA BKC Club", "Mumbai Cricket Association (BKC Facility)"),
+            "acronym plus venue-word drift matches (Aug 2026 dupes)"
+        );
+        assert!(
+            !same_event(
+                "Cricket Club of India Canteen",
+                "Mumbai Cricket Association (BKC Facility)"
+            ),
+            "shared generic words alone do not match"
+        );
+    }
 
     fn article() -> Article {
         Article {
