@@ -109,3 +109,14 @@ where
 {
     Ok(Option::<Vec<String>>::deserialize(de)?.unwrap_or_default())
 }
+
+/// Marks a value that has passed validation; construct only through `new`.
+pub struct Sanitized<T>(T);
+
+impl<T> Sanitized<T> {
+    // shortcut: unused until genai threads it through; expect fires once wired.
+    #[expect(dead_code)]
+    pub(crate) fn new(value: T) -> Self {
+        Self(value)
+    }
+}
