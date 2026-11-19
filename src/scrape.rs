@@ -2,7 +2,7 @@ use anyhow::Result as AnyResult;
 use chrono::{Duration as ChronoDuration, Utc};
 use serde_json::json;
 
-use crate::config::Config;
+use crate::config::{Config, Persistence};
 use crate::db;
 use crate::llm;
 use crate::local::LocalWriter;
@@ -22,12 +22,15 @@ pub async fn run_with_window(
     seen_days: i64,
     max_items: usize,
 ) -> AnyResult<RunReport> {
-    if let Some(path) = &config.local_writer {
-        let writer = LocalWriter::new(path.clone());
-        run(config, &writer, window, seen_days, max_items).await
-    } else {
-        let pool = db::pool(config).await?;
-        run(config, pool, window, seen_days, max_items).await
+    match &config.persistence {
+        Persistence::Local { path } => {
+            let writer = LocalWriter::new(path.clone());
+            run(config, &writer, window, seen_days, max_items).await
+        }
+        Persistence::Postgres { .. } => {
+            let pool = db::pool(config).await?;
+            run(config, pool, window, seen_days, max_items).await
+        }
     }
 }
 
@@ -68,10 +71,10 @@ async fn scrape_once(
     let client = crate::http_client();
     let seen = Utc::now() - ChronoDuration::days(seen_days);
 
-    let items = news::fetch_items(client, window).await?;
+    let items = news::fetch_items(&client, window).await?;
     let already_seen = store.seen_urls(seen).await?;
     let articles_seen = items.len();
-    let articles = news::enrich(client, items, &already_seen, max_items).await;
+    let articles = news::enrich(&client, items, &already_seen, max_items).await;
     let articles_new = articles.len();
 
     let mut metrics = RunMetrics::default();
