@@ -1,6 +1,7 @@
 use anyhow::Result as AnyResult;
 use chrono::{Duration as ChronoDuration, Utc};
 use serde_json::json;
+use tracing::instrument;
 
 use crate::config::Config;
 use crate::context::AppContext;
@@ -52,6 +53,7 @@ async fn run(
     }
 }
 
+#[instrument(skip_all, fields(window = %window, seen_days = seen_days, max_items = max_items))]
 async fn scrape_once(
     ctx: &AppContext,
     config: &Config,

@@ -10,7 +10,7 @@ use rss::Channel;
 use scraper::{Html, Selector};
 use tokio::sync::Semaphore;
 use tokio::time::sleep;
-use tracing::{error, info, warn};
+use tracing::{error, info, instrument, warn};
 use urlencoding::encode;
 
 use crate::domain::Article;
@@ -116,6 +116,7 @@ async fn fetch_feed_once(client: &reqwest::Client, url: &str) -> AnyResult<Vec<N
     Ok(items)
 }
 
+#[instrument(skip(client), fields(window = %window))]
 pub(crate) async fn fetch_items(
     client: &reqwest::Client,
     window: &str,
@@ -278,6 +279,7 @@ fn canonical(item: &NewsItem, fetched: Option<FetchedArticle>) -> (String, Optio
     }
 }
 
+#[instrument(skip(client, items, seen), fields(max_items = max_items, available = items.len()))]
 pub(crate) async fn enrich(
     client: &reqwest::Client,
     items: Vec<NewsItem>,

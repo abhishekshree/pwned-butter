@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use anyhow::{Result as AnyResult, anyhow};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::config::{Config, DEFAULT_OPENROUTER_MODEL};
 use crate::domain::{Article, Candidate};
@@ -32,6 +32,7 @@ fn verdict_article<'a>(chunk: &'a [Article], verdict: &Verdict) -> Option<&'a Ar
 }
 
 /// A failed batch passes its items through and is counted as degradation.
+#[instrument(skip_all, fields(total = items.len(), model = %model))]
 async fn triage<'a>(
     api_key: &str,
     model: &str,
@@ -82,6 +83,7 @@ async fn triage<'a>(
     Ok((kept, metrics))
 }
 
+#[instrument(skip_all, fields(total = items.len(), model = %config.gemini_model))]
 pub(crate) async fn extract(config: &Config, items: &[Article]) -> AnyResult<Extraction> {
     let (articles, mut metrics) =
         triage(config.gemini_key.expose(), &config.gemini_model, items).await?;
