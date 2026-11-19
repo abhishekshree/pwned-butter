@@ -57,7 +57,7 @@ impl Store for LocalWriter {
         LocalWriter::begin_run(self)
     }
 
-    async fn finish_run(&self, run_id: i64, report: &RunReport, _details: &Value) -> AnyResult<()> {
+    async fn finish_run(&self, run_id: i64, report: &RunReport, _: &Value) -> AnyResult<()> {
         LocalWriter::finish_run(self, run_id, report)
     }
 

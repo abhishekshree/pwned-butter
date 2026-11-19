@@ -33,15 +33,13 @@ impl LocalWriter {
         BufReader::new(file)
             .lines()
             .enumerate()
-            .filter_map(|(index, line)| match line {
-                Ok(line) if line.trim().is_empty() => None,
-                Ok(line) => Some(
-                    serde_json::from_str(&line)
-                        .with_context(|| format!("{} line {}", path.display(), index + 1)),
-                ),
-                Err(error) => Some(
-                    Err(error).with_context(|| format!("{} line {}", path.display(), index + 1)),
-                ),
+            .filter_map(|(index, line)| {
+                let context = || format!("{} line {}", path.display(), index + 1);
+                match line {
+                    Ok(line) if line.trim().is_empty() => None,
+                    Ok(line) => Some(serde_json::from_str(&line).with_context(context)),
+                    Err(error) => Some(Err(error).with_context(context)),
+                }
             })
             .collect()
     }
@@ -77,6 +75,7 @@ impl LocalWriter {
             .collect())
     }
 
+    // shortcut: no transactionality; debug backend only, upgrade if used for backfills.
     pub fn upsert_actions(&self, rows: &[Candidate]) -> AnyResult<StoreOutcome> {
         let mut records = Self::read_records(&self.path)?;
         let mut outcome = StoreOutcome::default();
@@ -84,8 +83,10 @@ impl LocalWriter {
             let date = row.action_date.to_string();
             let duplicate = records.iter().any(|record| {
                 record.get("source_url").and_then(Value::as_str) == Some(row.source_url.as_str())
-                    && record.get("establishment").and_then(Value::as_str)
-                        == Some(row.establishment.as_str())
+                    && record
+                        .get("establishment")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| crate::db::same_event(name, &row.establishment))
                     && record.get("action_date").and_then(Value::as_str) == Some(date.as_str())
             });
             if duplicate {
@@ -144,7 +145,6 @@ mod tests {
     use super::*;
     use crate::domain::Article;
     use crate::models::{ActionType, LlmAction};
-    use crate::report::RunReport;
 
     fn candidate(url: &str, establishment: &str) -> Candidate {
         let action = LlmAction {
@@ -171,13 +171,10 @@ mod tests {
     fn run_ids_increment_once_per_run() {
         let path =
             std::env::temp_dir().join(format!("fda-local-runs-{}.jsonl", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let writer = LocalWriter::new(path.with_extension("jsonl"));
+        let writer = LocalWriter::new(path);
+        let _ = std::fs::remove_file(writer.runs_path());
 
         let first = writer.begin_run().expect("first run");
-        writer
-            .finish_run(first, &RunReport::default())
-            .expect("finish");
         let second = writer.begin_run().expect("second run");
 
         assert_eq!((first, second), (1, 2));
@@ -198,8 +195,7 @@ mod tests {
             .seen_urls(Utc::now() - Duration::days(1))
             .expect("read back");
 
-        assert_eq!(first.inserted, 1);
-        assert_eq!(second.skipped, 1);
+        assert_eq!((first.inserted, second.skipped), (1, 1));
         assert!(seen.contains("https://example.test/1"));
 
         let _ = std::fs::remove_file(&path);
