@@ -143,6 +143,6 @@ export const getStats = unstable_cache(
         : null,
     };
   },
-  ["get-stats", "v3"],
+  ["get-stats", "v4"],
   CACHE,
 );

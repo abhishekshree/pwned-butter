@@ -1,27 +1,32 @@
-import type { Metadata } from "next";
-import { JetBrains_Mono, Plus_Jakarta_Sans } from "next/font/google";
+import type { Metadata, Viewport } from "next";
+import { Public_Sans, Source_Serif_4 } from "next/font/google";
 import { ThemeProvider } from "next-themes";
 
 import "./globals.css";
 
-const fontSans = Plus_Jakarta_Sans({
+const fontSans = Public_Sans({
   variable: "--font-sans",
   subsets: ["latin"],
-  weight: ["400", "500", "600", "700", "800"],
   display: "swap",
 });
 
-const fontMono = JetBrains_Mono({
-  variable: "--font-mono",
+const fontSerif = Source_Serif_4({
+  variable: "--font-serif",
   subsets: ["latin"],
-  weight: ["400", "500", "600", "700"],
   display: "swap",
 });
 
 export const metadata: Metadata = {
-  title: "Is the Mumbai Butter Real?",
+  title: "The Food Safety Record",
   description:
-    "Live FDA raids, suspensions & seizures across Maharashtra — you ask, the enforcement answers.",
+    "Maharashtra FDA enforcement actions — suspensions, seizures and reopenings, sourced from public reporting.",
+};
+
+export const viewport: Viewport = {
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#f4f6f5" },
+    { media: "(prefers-color-scheme: dark)", color: "#101715" },
+  ],
 };
 
 export default function RootLayout({
@@ -32,10 +37,13 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${fontSans.variable} ${fontMono.variable} h-full antialiased`}
+      className={`${fontSans.variable} ${fontSerif.variable} h-full antialiased`}
       suppressHydrationWarning
     >
-      <body className="min-h-full flex flex-col bg-background font-sans text-foreground selection:bg-primary/20 selection:text-primary">
+      <body className="flex min-h-full flex-col bg-background font-sans text-foreground selection:bg-primary/20 selection:text-primary">
+        <a href="#main" className="skip-link">
+          Skip to content
+        </a>
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
           {children}
         </ThemeProvider>
@@ -43,4 +51,3 @@ export default function RootLayout({
     </html>
   );
 }
-

@@ -38,11 +38,13 @@ export function SearchInput({
       <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
       <input
         type="search"
+        name="q"
+        autoComplete="off"
         value={q}
         onChange={(e) => onChange(e.target.value)}
-        placeholder="Search by name, area or brand… (e.g. Bandra, Domino's)"
-        aria-label="Search by name"
-        className="h-10 w-full rounded-lg border border-border bg-card pr-9 pl-9 text-xs sm:text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 hover:border-primary/50 focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring dark:bg-card/80"
+        placeholder="Search outlets, areas or brands…"
+        aria-label="Search enforcement records"
+        className="h-11 w-full rounded-lg border border-border bg-card pr-9 pl-9 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 hover:border-primary/50 focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
       />
       {q ? (
         <button

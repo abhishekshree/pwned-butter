@@ -24,43 +24,11 @@ export const OUTLET_TYPE_LABELS: Record<string, string> = {
 };
 
 // Mirrors domain::Status and the status CASE in migrations/0001_init.sql.
-export const STATUS_CONFIG: Record<
-  string,
-  { label: string; chipLabel: string; tone: string; dot: string; edge: string; glow: string }
-> = {
-  suspended: {
-    label: "SUSPENDED",
-    chipLabel: "Suspended",
-    tone: "text-red-600 dark:text-red-400 border-red-500/30 bg-red-500/10",
-    dot: "bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.6)]",
-    edge: "border-l-red-500 hover:border-l-red-400",
-    glow: "group-hover:shadow-[0_0_20px_-5px_rgba(239,68,68,0.2)]",
-  },
-  reopened: {
-    label: "REOPENED",
-    chipLabel: "Reopened",
-    tone: "text-emerald-600 dark:text-emerald-400 border-emerald-500/30 bg-emerald-500/10",
-    dot: "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]",
-    edge: "border-l-emerald-500 hover:border-l-emerald-400",
-    glow: "group-hover:shadow-[0_0_20px_-5px_rgba(16,185,129,0.2)]",
-  },
-  active: {
-    label: "NOTICE / RAID",
-    chipLabel: "Active / Notices",
-    tone: "text-amber-600 dark:text-amber-400 border-amber-500/30 bg-amber-500/10",
-    dot: "bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,0.6)]",
-    edge: "border-l-amber-500 hover:border-l-amber-400",
-    glow: "group-hover:shadow-[0_0_20px_-5px_rgba(245,158,11,0.2)]",
-  },
+export const STATUS_CONFIG: Record<string, { label: string; tone: string }> = {
+  suspended: { label: "Suspended", tone: "text-status-suspended" },
+  reopened: { label: "Reopened", tone: "text-status-reopened" },
+  active: { label: "Notice or raid", tone: "text-status-notice" },
 };
-
-export const CHART_COLORS = [
-  "var(--chart-1)",
-  "var(--chart-2)",
-  "var(--chart-3)",
-  "var(--chart-4)",
-  "var(--chart-5)",
-];
 
 export function actionTypeLabel(v: string | null): string {
   if (!v) return "Action Logged";
@@ -105,12 +73,9 @@ export function formatNumber(n: number | undefined | null): string {
   return new Intl.NumberFormat("en-IN").format(n);
 }
 
+// Scores are percentages (0–100), set by the extractor from the source article.
 export function complianceTone(score: number): string {
-  if (score >= 4) {
-    return "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400";
-  }
-  if (score >= 3) {
-    return "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400";
-  }
-  return "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-400";
+  if (score >= 75) return "text-status-reopened";
+  if (score >= 50) return "text-status-notice";
+  return "text-status-suspended";
 }
