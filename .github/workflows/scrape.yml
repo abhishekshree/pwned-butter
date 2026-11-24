@@ -21,6 +21,8 @@ jobs:
       - name: Apply migrations
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          LLM_PROVIDER: groq
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: cargo run --release --bin migrate
       - name: Scrape and enrich
         env:
