@@ -41,7 +41,7 @@ async fn run(
                 .finish_run(
                     run_id,
                     &report,
-                    &json!({"model": config.gemini_model, "window": window}),
+                    &json!({"model": config.llm.model(), "window": window}),
                 )
                 .await?;
             Ok(report)

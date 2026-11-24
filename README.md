@@ -30,7 +30,7 @@ combination is a shareable URL, e.g. `/?brand=Domino's&city=Mumbai&status=suspen
 ## Run locally
 
 ```bash
-cp .env.example .env                # fill DATABASE_URL + GEMINI_API_KEY
+cp .env.example .env                # fill GROQ_API_KEY and DATABASE_URL
 cargo run --bin migrate             # apply schema
 cargo run --release --bin local_scrape
 
@@ -38,9 +38,14 @@ cd web && pnpm install && pnpm dev
 ```
 
 To run the full pipeline without touching Postgres, set `LOCAL_WRITER_PATH` to
-a JSONL file (e.g. `/tmp/fda-actions.jsonl`). RSS and Gemini still run; records
+a JSONL file (e.g. `/tmp/fda-actions.jsonl`). RSS and the LLM still run; records
 and run summaries are appended to that file and its `.runs.jsonl` sibling
 instead of Neon.
+
+`LLM_PROVIDER` selects the vendor (`gemini`, `openrouter` or `groq`); only that
+vendor's key is required. Groq's free tier is the default in `.env.example`.
+Strict JSON-schema output is disabled for Groq because it rejects top-level
+array schemas.
 
 Tests (what CI runs) via [cargo-nextest](https://nexte.st):
 

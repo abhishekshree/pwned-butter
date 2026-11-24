@@ -1,11 +1,3 @@
-use super::SecretString;
-
-pub(crate) const DEFAULT_OPENROUTER_MODEL: &str = "openrouter/free";
-pub(crate) const DEFAULT_OPENROUTER_FALLBACKS: &[&str] = &["nvidia/nemotron-3.5-super-vl:free"];
-
-#[derive(Debug, Clone)]
-pub struct OpenRouterConfig {
-    pub key: SecretString,
-    pub model: String,
-    pub fallbacks: Vec<String>,
-}
+pub(crate) const DEFAULT_OPENROUTER_MODEL: &str = "nvidia/nemotron-3-ultra-550b-a55b:free";
+pub(crate) const DEFAULT_OPENROUTER_FALLBACKS: &[&str] =
+    &["nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"];

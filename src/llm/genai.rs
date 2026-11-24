@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result as AnyResult};
-use genai::Client;
+pub(crate) use genai::Client;
 use genai::adapter::AdapterKind;
 use genai::chat::{ChatMessage, ChatOptions, ChatRequest, JsonSpec};
 use genai::resolver::AuthData;
@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use tokio::time::sleep;
 use tracing::warn;
 
+use crate::config::Llm;
 use crate::domain::Article;
 use crate::models::{LlmAction, Sanitized};
 
@@ -16,29 +17,34 @@ use super::triage::{TRIAGE_PROMPT, Verdict, parse_verdicts, triage_schema};
 use super::{SYSTEM_PROMPT, strip_code_fences, truncate};
 
 const MAX_ATTEMPTS: usize = 3;
+/// A 429 is a tokens-per-minute window, so a short retry just burns more tokens.
+const RATE_LIMIT_PAUSE: Duration = Duration::from_secs(60);
 
-pub(crate) fn client(api_key: &str, openrouter_key: Option<&str>) -> AnyResult<Client> {
-    let mut builder = Client::builder()
-        .append_provider_config(AdapterKind::Gemini, AuthData::from_single(api_key));
-    if let Some(key) = openrouter_key {
-        builder =
-            builder.append_provider_config(AdapterKind::OpenRouter, AuthData::from_single(key));
-    }
+pub(crate) fn client(llm: &Llm) -> AnyResult<Client> {
+    let mut builder = Client::builder();
+    let (adapter, key) = match llm {
+        Llm::Gemini { key, .. } => (AdapterKind::Gemini, key),
+        Llm::OpenRouter { key, .. } => (AdapterKind::OpenRouter, key),
+        Llm::Groq { key, .. } => (AdapterKind::Groq, key),
+    };
+    builder = builder.append_provider_config(adapter, AuthData::from_single(key.expose()));
     builder.build().context("build genai client")
 }
 
-fn json_options(max_tokens: u32, schema: Value) -> ChatOptions {
-    ChatOptions::default()
+fn json_options(max_tokens: u32, schema: Value, structured: bool) -> ChatOptions {
+    let options = ChatOptions::default()
         .with_temperature(0.0)
-        .with_max_tokens(max_tokens)
-        .with_response_format(JsonSpec::new("response", schema))
+        .with_max_tokens(max_tokens);
+    if structured {
+        options.with_response_format(JsonSpec::new("response", schema))
+    } else {
+        options
+    }
 }
 
 pub(crate) struct ExtractOptions<'a> {
-    pub(crate) model: &'a str,
-    pub(crate) openrouter_key: Option<&'a str>,
-    pub(crate) openrouter_model: &'a str,
-    pub(crate) openrouter_fallbacks: &'a [String],
+    pub(crate) models: &'a [String],
+    pub(crate) structured: bool,
 }
 
 // Attempts are returned as data so a fully failed batch still reports its calls.
@@ -64,36 +70,45 @@ async fn chat_text(
         if attempt + 1 == MAX_ATTEMPTS {
             return (Err(error), calls);
         }
-        sleep(Duration::from_secs(1 << attempt)).await;
+        let backoff = if format!("{error:#}").contains("429") {
+            RATE_LIMIT_PAUSE
+        } else {
+            Duration::from_secs(1 << attempt)
+        };
+        sleep(backoff).await;
     }
     unreachable!("MAX_ATTEMPTS is nonzero")
 }
 
-pub(crate) async fn triage_batch(
-    client: &Client,
-    model: &str,
-    chunk: &[Article],
-) -> (AnyResult<Vec<Verdict>>, usize) {
-    let items: Vec<Value> = chunk
+/// Titles plus a short snippet are enough to judge relevance. URLs cost ~30
+/// tokens each and the prompt forbids opening them, so they are not sent.
+fn triage_payload(items: &[Article]) -> AnyResult<String> {
+    let rows: Vec<Value> = items
         .iter()
         .enumerate()
         .map(|(index, item)| {
             json!({
                 "sourceIndex": index,
                 "title": item.title,
-                "publisher": item.source,
-                "published": item.published,
-                "url": item.url,
-                "text": item.snippet.as_deref().unwrap_or(""),
+                "text": truncate(item.snippet.as_deref().unwrap_or(""), 150),
             })
         })
         .collect();
-    let user = match serde_json::to_string(&json!({"items": items})) {
+    serde_json::to_string(&json!({"items": rows})).context("serialize triage batch")
+}
+
+pub(crate) async fn triage_batch(
+    client: &Client,
+    model: &str,
+    items: &[Article],
+    structured: bool,
+) -> (AnyResult<Vec<Verdict>>, usize) {
+    let user = match triage_payload(items) {
         Ok(user) => user,
-        Err(error) => return (Err(error.into()), 0),
+        Err(error) => return (Err(error), 0),
     };
     let request = ChatRequest::from_system(TRIAGE_PROMPT).append_message(ChatMessage::user(user));
-    let options = json_options(4096, triage_schema());
+    let options = json_options(2048, triage_schema(), structured);
     let (text, calls) = chat_text(client, model, request, &options).await;
     (text.and_then(|text| parse_verdicts(&text)), calls)
 }
@@ -109,10 +124,9 @@ pub(crate) async fn extract_batch<'a>(
         .map(|item| {
             json!({
                 "title": item.title,
-                "url": item.url,
                 "source": item.source,
                 "published": item.published,
-                "snippet": item.snippet,
+                "snippet": truncate(item.snippet.as_deref().unwrap_or(""), 2500),
             })
         })
         .collect();
@@ -121,56 +135,19 @@ pub(crate) async fn extract_batch<'a>(
         Err(error) => return (Err(error).context("serialize news batch"), 0),
     };
     let request = ChatRequest::from_system(SYSTEM_PROMPT).append_message(ChatMessage::user(user));
-    let options = json_options(16_384, json!({"type": "array"}));
+    let options = json_options(8192, json!({"type": "array"}), opts.structured);
     let mut calls = 0;
-
-    let (gemini_text, gemini_calls) =
-        chat_text(client, opts.model, request.clone(), &options).await;
-    calls += gemini_calls;
-    let gemini = gemini_text
-        .and_then(|text| parse_llm_text(&text))
-        .map(|actions| absolute(actions, chunk));
-    match gemini {
-        Ok(actions) => return (Ok(actions), calls),
-        Err(error) => warn!(
-            model = opts.model,
-            error = %format!("{error:#}"),
-            "gemini model failed"
-        ),
-    }
-
-    warn!("all gemini models failed; falling back to openrouter");
-    if opts.openrouter_key.is_none() {
-        return (
-            Err(anyhow::anyhow!(
-                "gemini API failed and no OPENROUTER_API_KEY fallback configured"
-            )),
-            calls,
-        );
-    }
-    let mut candidates = vec![opts.openrouter_model.to_string()];
-    candidates.extend(
-        opts.openrouter_fallbacks
-            .iter()
-            .filter(|fallback| *fallback != opts.openrouter_model)
-            .cloned(),
-    );
-    let mut last_error = anyhow::anyhow!("no OpenRouter model configured");
-    for candidate in &candidates {
-        let model = format!("open_router::{candidate}");
-        let (text, used) = chat_text(client, &model, request.clone(), &options).await;
+    let mut last_error = anyhow::anyhow!("no LLM models configured");
+    for model in opts.models {
+        let (text, used) = chat_text(client, model, request.clone(), &options).await;
         calls += used;
-        let outcome = text
+        match text
             .and_then(|text| parse_llm_text(&text))
-            .map(|actions| absolute(actions, chunk));
-        match outcome {
+            .map(|actions| absolute(actions, chunk))
+        {
             Ok(actions) => return (Ok(actions), calls),
             Err(error) => {
-                warn!(
-                    model = %candidate,
-                    error = %format!("{error:#}"),
-                    "openrouter model failed"
-                );
+                warn!(model = %model, error = %format!("{error:#}"), "extraction model failed");
                 last_error = error;
             }
         }
@@ -282,6 +259,29 @@ mod tests {
             published: None,
             snippet: None,
         }
+    }
+
+    #[test]
+    fn triage_payload_omits_urls_and_caps_snippets() {
+        let item = Article {
+            title: "FDA suspends licence".into(),
+            url: "https://example.test/a/long/path/that/wastes/tokens".into(),
+            source: Some("Times".into()),
+            published: None,
+            snippet: Some("x".repeat(1000)),
+        };
+        let payload = triage_payload(&[item]).expect("serialize compact triage payload");
+        assert!(
+            !payload.contains("example.test"),
+            "URLs cost tokens and the prompt forbids opening them"
+        );
+        let parsed: Value = serde_json::from_str(&payload).expect("valid JSON payload");
+        assert_eq!(parsed["items"][0]["sourceIndex"], 0);
+        assert_eq!(
+            parsed["items"][0]["text"].as_str().unwrap().chars().count(),
+            151,
+            "snippet is capped at 150 chars plus the truncation ellipsis"
+        );
     }
 
     #[test]

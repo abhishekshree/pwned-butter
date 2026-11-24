@@ -1,17 +1,21 @@
 use std::collections::HashSet;
+use std::time::Duration;
 
 use anyhow::{Result as AnyResult, anyhow};
+use tokio::time::sleep;
 use tracing::{debug, info, instrument, warn};
 
-use crate::config::{Config, DEFAULT_OPENROUTER_MODEL};
+use crate::config::{Config, Llm};
 use crate::domain::{Article, Candidate};
 use crate::report::RunMetrics;
 
 pub const SYSTEM_PROMPT: &str = include_str!("../prompts/system.txt");
 
-/// Large batches respect the ~5 requests/min free tier.
-const BATCH_SIZE: usize = 20;
-// ponytail: concurrent batches hit 429s together, so they run sequentially.
+/// Free models truncate long JSON output; keep extraction responses short.
+const EXTRACT_BATCH_SIZE: usize = 4;
+/// One window per call keeps both the input and output token limits clear.
+const TPM_PAUSE: Duration = Duration::from_secs(60);
+// ponytail: serial calls avoid concurrent bursts tripping the same window.
 
 mod genai;
 mod triage;
@@ -31,62 +35,108 @@ fn verdict_article<'a>(chunk: &'a [Article], verdict: &Verdict) -> Option<&'a Ar
     chunk.get(verdict.source_index)
 }
 
-/// A failed batch passes its items through and is counted as degradation.
-#[instrument(skip_all, fields(total = items.len(), model = %model))]
+/// Namespaced model IDs for the active vendor, primary first.
+fn models_for(llm: &Llm) -> Vec<String> {
+    match llm {
+        Llm::Gemini { model, .. } => vec![model.clone()],
+        Llm::OpenRouter {
+            model, fallbacks, ..
+        } => prefixed(model, fallbacks, "open_router"),
+        Llm::Groq {
+            model, fallbacks, ..
+        } => prefixed(model, fallbacks, "groq"),
+    }
+}
+
+fn prefixed(model: &str, fallbacks: &[String], namespace: &str) -> Vec<String> {
+    let mut names = vec![format!("{namespace}::{model}")];
+    names.extend(
+        fallbacks
+            .iter()
+            .filter(|fallback| *fallback != model)
+            .map(|fallback| format!("{namespace}::{fallback}")),
+    );
+    names
+}
+
+/// Extraction needs a large output budget, which Groq's reasoning model has;
+/// the smaller model stays first for the compact triage call.
+fn extraction_models(llm: &Llm) -> Vec<String> {
+    match llm {
+        Llm::Groq {
+            model, fallbacks, ..
+        } => {
+            let mut names = fallbacks.to_vec();
+            if !names.contains(model) {
+                names.push(model.clone());
+            }
+            names
+                .into_iter()
+                .map(|name| format!("groq::{name}"))
+                .collect()
+        }
+        _ => models_for(llm),
+    }
+}
+
+/// One compact call filters every article; no provider verdict drops the run.
+#[instrument(skip_all, fields(total = items.len()))]
 async fn triage<'a>(
-    api_key: &str,
-    model: &str,
+    client: &genai::Client,
+    models: &[String],
     items: &'a [Article],
+    structured: bool,
 ) -> AnyResult<(Vec<&'a Article>, RunMetrics)> {
     if items.is_empty() {
         return Ok((Vec::new(), RunMetrics::default()));
     }
-    let client = genai::client(api_key, None)?;
     let mut metrics = RunMetrics::default();
-    let mut kept = Vec::new();
-    let mut seen: HashSet<&str> = HashSet::new();
-
-    for (batch_no, chunk) in items.chunks(BATCH_SIZE).enumerate() {
-        let (result, calls) = genai::triage_batch(&client, model, chunk).await;
+    let mut verdicts = None;
+    for model in models {
+        let (result, calls) = genai::triage_batch(client, model, items, structured).await;
         metrics.triage_calls += calls;
         match result {
-            Ok(verdicts) => {
-                for verdict in verdicts {
-                    let Some(item) = verdict_article(chunk, &verdict) else {
-                        warn!(
-                            index = verdict.source_index,
-                            "triage verdict index out of range"
-                        );
-                        continue;
-                    };
-                    if seen.insert(item.url.as_str()) {
-                        debug!(url = %item.url, reason = ?verdict.reason, "triage kept item");
-                        kept.push(item);
-                    }
-                }
+            Ok(found) => {
+                verdicts = Some(found);
+                break;
             }
-            Err(error) => {
-                metrics.triage_failures += 1;
-                warn!(
-                    batch = batch_no,
-                    error = %format!("{error:#}"),
-                    "triage failed; passing all items through"
-                );
-                for item in chunk {
-                    if seen.insert(item.url.as_str()) {
-                        kept.push(item);
-                    }
-                }
-            }
+            Err(error) => warn!(
+                model = %model,
+                error = %format!("{error:#}"),
+                "triage model failed"
+            ),
+        }
+    }
+    let Some(verdicts) = verdicts else {
+        metrics.triage_failures += 1;
+        warn!("dropping triage after all providers failed");
+        return Ok((Vec::new(), metrics));
+    };
+
+    let mut kept = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    for verdict in verdicts {
+        let Some(item) = verdict_article(items, &verdict) else {
+            warn!(
+                index = verdict.source_index,
+                "triage verdict index out of range"
+            );
+            continue;
+        };
+        if seen.insert(item.url.as_str()) {
+            debug!(url = %item.url, reason = ?verdict.reason, "triage kept item");
+            kept.push(item);
         }
     }
     Ok((kept, metrics))
 }
 
-#[instrument(skip_all, fields(total = items.len(), model = %config.gemini_model))]
+#[instrument(skip_all, fields(total = items.len(), model = %config.llm.model()))]
 pub(crate) async fn extract(config: &Config, items: &[Article]) -> AnyResult<Extraction> {
+    let structured = config.llm.structured_output();
+    let client = genai::client(&config.llm)?;
     let (articles, mut metrics) =
-        triage(config.gemini_key.expose(), &config.gemini_model, items).await?;
+        triage(&client, &models_for(&config.llm), items, structured).await?;
     info!(relevant = articles.len(), total = items.len(), "llm triage");
     if articles.is_empty() {
         let degraded = metrics.triage_failures > 0;
@@ -97,26 +147,21 @@ pub(crate) async fn extract(config: &Config, items: &[Article]) -> AnyResult<Ext
         });
     }
 
-    let openrouter = config.openrouter.as_ref();
-    let openrouter_key = openrouter.map(|options| options.key.expose());
-    let openrouter_model = openrouter
-        .map(|options| options.model.as_str())
-        .unwrap_or(DEFAULT_OPENROUTER_MODEL);
-    let openrouter_fallbacks: &[String] = match openrouter {
-        Some(options) => options.fallbacks.as_slice(),
-        None => &[],
-    };
-    let client = genai::client(config.gemini_key.expose(), openrouter_key)?;
+    // Triage just spent the minute's token budget; let it reset before details.
+    sleep(TPM_PAUSE).await;
+
+    let models = extraction_models(&config.llm);
     let opts = ExtractOptions {
-        model: &config.gemini_model,
-        openrouter_key,
-        openrouter_model,
-        openrouter_fallbacks,
+        models: &models,
+        structured,
     };
 
     let mut candidates = Vec::new();
     let mut failed = 0;
-    for (batch_no, chunk) in articles.chunks(BATCH_SIZE).enumerate() {
+    for (batch_no, chunk) in articles.chunks(EXTRACT_BATCH_SIZE).enumerate() {
+        if batch_no > 0 {
+            sleep(TPM_PAUSE).await;
+        }
         let (result, calls) = genai::extract_batch(&client, chunk, &opts).await;
         metrics.extraction_calls += calls;
         match result {
@@ -143,7 +188,7 @@ pub(crate) async fn extract(config: &Config, items: &[Article]) -> AnyResult<Ext
             }
         }
     }
-    if failed > 0 && failed == articles.len().div_ceil(BATCH_SIZE) {
+    if failed > 0 && failed == articles.len().div_ceil(EXTRACT_BATCH_SIZE) {
         return Err(anyhow!("all llm batches failed"));
     }
 
@@ -192,8 +237,8 @@ fn strip_code_fences(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{BATCH_SIZE, extract, verdict_article};
-    use crate::config::{Config, Persistence, SecretString};
+    use super::{extract, extraction_models, models_for, verdict_article};
+    use crate::config::{Config, Llm, Persistence, SecretString};
     use crate::domain::Article;
     use crate::llm::triage::Verdict;
 
@@ -202,9 +247,10 @@ mod tests {
             persistence: Persistence::Postgres {
                 url: SecretString::new(String::new()),
             },
-            gemini_key: SecretString::new("key".into()),
-            gemini_model: "model".into(),
-            openrouter: None,
+            llm: Llm::Gemini {
+                key: SecretString::new("key".into()),
+                model: "model".into(),
+            },
         }
     }
 
@@ -219,28 +265,60 @@ mod tests {
     }
 
     #[test]
-    fn each_chunk_maps_local_index_zero_to_its_own_article() {
-        let items: Vec<Article> = (0..2 * BATCH_SIZE)
+    fn verdict_index_resolves_against_the_whole_item_list() {
+        let items: Vec<Article> = (0..6)
             .map(|index| article(&format!("item-{index}")))
             .collect();
-        let verdict = Verdict {
-            source_index: 0,
+        let last = Verdict {
+            source_index: 5,
             reason: None,
         };
-        let chunks: Vec<&[Article]> = items.chunks(BATCH_SIZE).collect();
 
-        assert_eq!(chunks.len(), 2, "two distinct chunks expected");
         assert_eq!(
-            verdict_article(chunks[0], &verdict).map(|item| item.title.as_str()),
-            Some("item-0"),
-            "first chunk's local index 0 is its own first item"
+            verdict_article(&items, &last).map(|item| item.title.as_str()),
+            Some("item-5"),
+            "a single triage call uses absolute indices"
         );
-        let expected = format!("item-{BATCH_SIZE}");
+        assert!(
+            verdict_article(
+                &items,
+                &Verdict {
+                    source_index: 6,
+                    reason: None,
+                }
+            )
+            .is_none()
+        );
+    }
+
+    fn groq() -> Llm {
+        Llm::Groq {
+            key: SecretString::new("key".into()),
+            model: "qwen/qwen3.8-27b".into(),
+            fallbacks: vec!["openai/gpt-oss-120b".into()],
+        }
+    }
+
+    #[test]
+    fn groq_models_use_the_groq_namespace() {
         assert_eq!(
-            verdict_article(chunks[1], &verdict).map(|item| item.title.as_str()),
-            Some(expected.as_str()),
-            "second chunk's local index 0 is its own first item"
+            models_for(&groq()),
+            ["groq::qwen/qwen3.8-27b", "groq::openai/gpt-oss-120b"]
         );
+    }
+
+    #[test]
+    fn groq_extraction_leads_with_the_high_output_model() {
+        assert_eq!(
+            extraction_models(&groq()),
+            ["groq::openai/gpt-oss-120b", "groq::qwen/qwen3.8-27b"]
+        );
+    }
+
+    #[test]
+    fn groq_disables_strict_json_schema() {
+        assert!(!groq().structured_output());
+        assert!(config().llm.structured_output());
     }
 
     #[tokio::test]

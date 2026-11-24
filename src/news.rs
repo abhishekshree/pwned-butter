@@ -26,15 +26,34 @@ const MAX_ARTICLE_BYTES: u64 = 5 * 1024 * 1024;
 // Google 503s when all queries hit from one IP at once.
 const RSS_CONCURRENCY: usize = 4;
 
-fn google_news_url(query: &str, window: Option<&str>) -> String {
-    let q = match window {
-        Some(w) if !w.is_empty() => format!("{query} {w}"),
-        _ => query.to_string(),
-    };
+fn news_url(query: &str) -> String {
     format!(
-        "https://news.google.com/rss/search?q={0}&hl=en-IN&gl=IN&ceid=IN:en",
-        encode(&q)
+        "https://www.bing.com/news/search?q={}&format=rss",
+        encode(query)
     )
+}
+
+// Bing wraps publisher links in apiclick.aspx; the real URL is its `url` param.
+fn article_url(link: &str) -> String {
+    let Ok(parsed) = reqwest::Url::parse(link) else {
+        return link.to_string();
+    };
+    if parsed.host_str() != Some("www.bing.com") || !parsed.path().ends_with("/apiclick.aspx") {
+        return link.to_string();
+    }
+    if let Some((_, target)) = parsed.query_pairs().find(|(key, _)| key == "url") {
+        return target.into_owned();
+    }
+    link.to_string()
+}
+
+fn description_snippet(raw: &str) -> Option<String> {
+    let text = Html::parse_fragment(raw)
+        .root_element()
+        .text()
+        .collect::<String>();
+    let text = text.trim().to_string();
+    (!text.is_empty()).then_some(text)
 }
 
 async fn fan_out<T, Fut>(concurrency: usize, jobs: Vec<Fut>) -> Vec<T>
@@ -107,26 +126,26 @@ async fn fetch_feed_once(client: &reqwest::Client, url: &str) -> AnyResult<Vec<N
             .map(|dt| dt.with_timezone(&Utc));
         items.push(NewsItem {
             title: title.to_string(),
-            url: link.to_string(),
+            url: article_url(link),
             source: it.source().and_then(|s| s.title().map(str::to_string)),
             published,
-            snippet: None,
+            snippet: it.description().and_then(description_snippet),
         });
     }
     Ok(items)
 }
 
-#[instrument(skip(client), fields(window = %window))]
+#[instrument(skip(client), fields(window = %_window))]
 pub(crate) async fn fetch_items(
     client: &reqwest::Client,
-    window: &str,
+    _window: &str,
 ) -> AnyResult<Vec<NewsItem>> {
     let jobs = rules()
         .news
         .queries
         .iter()
         .map(|query| {
-            let url = google_news_url(query, (!window.is_empty()).then_some(window));
+            let url = news_url(query);
             let client = (*client).clone();
             async move { fetch_feed(&client, &url).await }
         })
@@ -142,7 +161,7 @@ pub(crate) async fn fetch_items(
     let mut seen = HashSet::new();
     items.retain(|item| seen.insert(item.url.clone()));
     info!(
-        "rss: {fetched} hits from {} queries, {} distinct Google News URLs",
+        "rss: {fetched} hits from {} queries, {} distinct article URLs",
         rules().news.queries.len(),
         items.len()
     );
@@ -335,7 +354,10 @@ pub(crate) async fn enrich(
 
 #[cfg(test)]
 mod tests {
-    use super::{FetchedArticle, canonical, extract_snippet, select_for_enrichment};
+    use super::{
+        FetchedArticle, article_url, canonical, description_snippet, extract_snippet,
+        select_for_enrichment,
+    };
     use crate::models::NewsItem;
     use chrono::{Duration, Utc};
 
@@ -382,6 +404,25 @@ mod tests {
         };
         let selected = select_for_enrichment(vec![generic, action], 1);
         assert_eq!(selected[0].url, "https://example.test/action");
+    }
+
+    #[test]
+    fn bing_apiclick_link_resolves_to_publisher_url() {
+        let link = "https://www.bing.com/news/apiclick.aspx?ref=FexRss&url=https%3a%2f%2fwww.thehindu.com%2fnews%2ftest";
+        assert_eq!(
+            article_url(link),
+            "https://www.thehindu.com/news/test",
+            "publisher URL must be unwrapped before fetching"
+        );
+    }
+
+    #[test]
+    fn bing_description_strips_html_to_plain_text() {
+        assert_eq!(
+            description_snippet("<b>FDA</b> suspended the licence over &amp; pests.").as_deref(),
+            Some("FDA suspended the licence over & pests."),
+            "description supplies article text when the publisher page is blocked"
+        );
     }
 
     #[test]

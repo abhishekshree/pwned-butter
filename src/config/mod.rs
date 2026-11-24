@@ -2,7 +2,6 @@ mod openrouter;
 mod persistence;
 mod secret;
 
-pub use openrouter::OpenRouterConfig;
 pub(crate) use openrouter::{DEFAULT_OPENROUTER_FALLBACKS, DEFAULT_OPENROUTER_MODEL};
 pub use persistence::Persistence;
 pub use secret::SecretString;
@@ -13,14 +12,50 @@ use std::path::PathBuf;
 use anyhow::{Context, Result as AnyResult, bail};
 
 pub(crate) const DEFAULT_GEMINI_MODEL: &str = "gemini-3.8-flash";
+/// gpt-oss is a reasoning model: on Groq's free tier it spends its token budget
+/// thinking and returns no text, so the non-reasoning model leads.
+pub(crate) const DEFAULT_GROQ_MODEL: &str = "qwen/qwen3.8-27b";
+pub(crate) const DEFAULT_GROQ_FALLBACKS: &[&str] = &["openai/gpt-oss-120b"];
+
+/// The active LLM vendor. Only that vendor's key is read from the environment.
+#[derive(Debug, Clone)]
+pub enum Llm {
+    Gemini {
+        key: SecretString,
+        model: String,
+    },
+    OpenRouter {
+        key: SecretString,
+        model: String,
+        fallbacks: Vec<String>,
+    },
+    Groq {
+        key: SecretString,
+        model: String,
+        fallbacks: Vec<String>,
+    },
+}
+
+impl Llm {
+    pub fn model(&self) -> &str {
+        match self {
+            Self::Gemini { model, .. }
+            | Self::OpenRouter { model, .. }
+            | Self::Groq { model, .. } => model,
+        }
+    }
+
+    /// Groq rejects a top-level array schema, so it gets plain JSON output.
+    pub(crate) fn structured_output(&self) -> bool {
+        !matches!(self, Self::Groq { .. })
+    }
+}
 
 /// Every environment read in the crate happens here.
 #[derive(Debug, Clone)]
 pub struct Config {
     pub persistence: Persistence,
-    pub gemini_key: SecretString,
-    pub gemini_model: String,
-    pub openrouter: Option<OpenRouterConfig>,
+    pub llm: Llm,
 }
 
 impl Config {
@@ -36,40 +71,57 @@ impl Config {
                 )?),
             },
         };
-        let gemini_key = var("GEMINI_API_KEY").context("GEMINI_API_KEY is not set")?;
-        let gemini_model = var("GEMINI_MODEL").unwrap_or_else(|_| DEFAULT_GEMINI_MODEL.to_string());
-        let openrouter = match var("OPENROUTER_API_KEY") {
-            Ok(key) => Some(OpenRouterConfig {
-                key: SecretString::new(non_empty("OPENROUTER_API_KEY", key)?),
+        let provider = var("LLM_PROVIDER")
+            .unwrap_or_else(|_| "gemini".to_string())
+            .to_lowercase();
+        let llm = match provider.as_str() {
+            "gemini" => Llm::Gemini {
+                key: required_key("GEMINI_API_KEY")?,
+                model: non_empty(
+                    "GEMINI_MODEL",
+                    var("GEMINI_MODEL").unwrap_or_else(|_| DEFAULT_GEMINI_MODEL.to_string()),
+                )?,
+            },
+            "openrouter" => Llm::OpenRouter {
+                key: required_key("OPENROUTER_API_KEY")?,
                 model: non_empty(
                     "OPENROUTER_MODEL",
                     var("OPENROUTER_MODEL")
                         .unwrap_or_else(|_| DEFAULT_OPENROUTER_MODEL.to_string()),
                 )?,
-                fallbacks: var("OPENROUTER_FALLBACKS")
-                    .map(|raw| {
-                        raw.split(',')
-                            .map(str::trim)
-                            .filter(|model| !model.is_empty())
-                            .map(str::to_string)
-                            .collect()
-                    })
-                    .unwrap_or_else(|_| {
-                        DEFAULT_OPENROUTER_FALLBACKS
-                            .iter()
-                            .map(|model| model.to_string())
-                            .collect()
-                    }),
-            }),
-            Err(_) => None,
+                fallbacks: fallbacks("OPENROUTER_FALLBACKS", DEFAULT_OPENROUTER_FALLBACKS),
+            },
+            "groq" => Llm::Groq {
+                key: required_key("GROQ_API_KEY")?,
+                model: non_empty(
+                    "GROQ_MODEL",
+                    var("GROQ_MODEL").unwrap_or_else(|_| DEFAULT_GROQ_MODEL.to_string()),
+                )?,
+                fallbacks: fallbacks("GROQ_FALLBACKS", DEFAULT_GROQ_FALLBACKS),
+            },
+            other => bail!("unknown LLM_PROVIDER: {other}"),
         };
-        Ok(Self {
-            persistence,
-            gemini_key: SecretString::new(non_empty("GEMINI_API_KEY", gemini_key)?),
-            gemini_model: non_empty("GEMINI_MODEL", gemini_model)?,
-            openrouter,
-        })
+        Ok(Self { persistence, llm })
     }
+}
+
+fn required_key(name: &str) -> AnyResult<SecretString> {
+    Ok(SecretString::new(non_empty(
+        name,
+        var(name).with_context(|| format!("{name} is not set"))?,
+    )?))
+}
+
+fn fallbacks(name: &str, defaults: &[&str]) -> Vec<String> {
+    var(name)
+        .map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_else(|_| defaults.iter().map(|model| (*model).to_string()).collect())
 }
 
 fn non_empty(name: &str, value: String) -> AnyResult<String> {
