@@ -21,6 +21,7 @@ jobs:
       - name: Apply migrations
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: cargo run --release --bin migrate
       - name: Scrape and enrich
         env:
@@ -36,7 +37,7 @@ jobs:
         run: |
           {
             echo "### Daily scrape"
-            line="$(grep -o 'run ok: .*' /tmp/scrape.log | tail -1 || true)"
+            line="$(grep -o 'run ok: .*' /tmp/scrape.log 2>/dev/null | tail -1 || true)"
             if [ -n "$line" ]; then
               echo '```'
               echo "$line"
@@ -56,7 +57,7 @@ jobs:
             else
               echo "_No completion line emitted — scraper likely failed._"
             fi
-            if [ "${seen:-0}" -eq 0 ]; then
+            if [ -n "$line" ] && [ "${seen:-0}" -eq 0 ]; then
               echo "::error::No articles seen; news fetch returned nothing."
               exit 1
             fi
