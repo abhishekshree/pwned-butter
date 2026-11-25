@@ -259,23 +259,29 @@ fn select_for_enrichment(mut items: Vec<NewsItem>, max_items: usize) -> Vec<News
     items
 }
 
-/// Publisher redirects change the stored URL (source_url is the FINAL url),
-/// so compare a conservative fingerprint: scheme, `www.`, fragment, trailing
-/// slash and `/amp` are ignored, while host, path and query are preserved.
+/// Publisher redirects change the stored URL (source_url is the FINAL url), so
+/// compare a parsed fingerprint: scheme, `www.`, fragment, trailing slash and
+/// `/amp` are redirect noise. Host is case-insensitive; path and query are not,
+/// so they are left exactly as the URL parser returns them.
 fn url_fingerprint(url: &str) -> String {
-    let lower = url.trim().to_lowercase();
-    let without_scheme = lower
-        .split_once("://")
-        .map_or(lower.as_str(), |(_, rest)| rest);
-    let without_fragment = without_scheme.split('#').next().unwrap_or(without_scheme);
-    let without_www = without_fragment
-        .strip_prefix("www.")
-        .unwrap_or(without_fragment);
-    without_www
-        .strip_suffix("/amp")
-        .unwrap_or(without_www)
-        .trim_end_matches('/')
-        .to_string()
+    let Ok(mut parsed) = reqwest::Url::parse(url.trim()) else {
+        return format!("!{}", url.trim());
+    };
+    parsed.set_fragment(None);
+    let host = parsed.host_str().unwrap_or("").to_ascii_lowercase();
+    let host = host.strip_prefix("www.").unwrap_or(&host);
+    let path = parsed.path().trim_end_matches('/');
+    let path = path.strip_suffix("/amp").unwrap_or(path);
+    match parsed.query() {
+        Some(query) if !query.is_empty() => format!("{host}{path}?{query}"),
+        _ => format!("{host}{path}"),
+    }
+}
+
+/// One dedup decision for both the RSS candidate and the final redirected URL.
+fn keep_new_url(url: &str, seen_keys: &HashSet<String>, inserted: &mut HashSet<String>) -> bool {
+    let key = url_fingerprint(url);
+    !seen_keys.contains(&key) && inserted.insert(key)
 }
 
 /// Filter before ranking so already-seen articles never consume the max_items budget.
@@ -429,10 +435,9 @@ pub(crate) async fn enrich(
             }
         };
         let (url, snippet) = canonical(&item, fetched);
-        if urls.contains(&url) || seen.contains(&url) {
+        if !keep_new_url(&url, &seen_keys, &mut urls) {
             continue;
         }
-        urls.insert(url.clone());
         out.push(Article::new(item, url, snippet));
     }
     out.sort_by(|a, b| {
@@ -447,8 +452,8 @@ pub(crate) async fn enrich(
 mod tests {
     use super::{
         FetchedArticle, MAX_ARTICLE_BYTES, article_url, canonical, check_body_growth,
-        collect_feeds, description_snippet, extract_snippet, select_for_enrichment, select_unseen,
-        url_fingerprint,
+        collect_feeds, description_snippet, extract_snippet, keep_new_url, select_for_enrichment,
+        select_unseen, url_fingerprint,
     };
     use std::collections::HashSet;
 
@@ -575,6 +580,47 @@ mod tests {
             url_fingerprint("https://thehindu.com/news/story-a"),
             url_fingerprint("https://thehindu.com/news/story-b"),
             "different stories must never share a fingerprint"
+        );
+        assert_ne!(
+            url_fingerprint("https://thehindu.com/news/Story"),
+            url_fingerprint("https://thehindu.com/news/story"),
+            "path case is significant"
+        );
+        assert_ne!(
+            url_fingerprint("https://thehindu.com/news/story?tag=A"),
+            url_fingerprint("https://thehindu.com/news/story?tag=a"),
+            "query case is significant"
+        );
+        assert_eq!(
+            url_fingerprint("https://EXAMPLE.test/Story"),
+            url_fingerprint("https://example.test/Story"),
+            "host case is not significant"
+        );
+    }
+
+    #[test]
+    fn final_redirect_url_uses_the_same_fingerprint_as_the_seen_set() {
+        let seen_keys = HashSet::from([url_fingerprint("http://thehindu.com/news/action/")]);
+        let mut inserted = HashSet::new();
+        assert!(
+            !keep_new_url(
+                "https://www.thehindu.com/news/action",
+                &seen_keys,
+                &mut inserted
+            ),
+            "a redirected final URL must be recognised as seen"
+        );
+        assert!(
+            keep_new_url(
+                "https://www.thehindu.com/news/other",
+                &seen_keys,
+                &mut inserted
+            ),
+            "a genuinely new final URL must survive"
+        );
+        assert!(
+            !keep_new_url("https://thehindu.com/news/other", &seen_keys, &mut inserted),
+            "two final URLs for one article are deduped together"
         );
     }
 

@@ -2,12 +2,13 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use anyhow::{Context, Result as AnyResult, anyhow};
+use serde::Deserialize;
 use serde_json::Value;
 use tokio::time::sleep;
 use tracing::{debug, info, instrument, warn};
 
 use crate::config::{Config, Llm, Provider};
-use crate::domain::{Article, Candidate, area_in_name};
+use crate::domain::{Article, Candidate, EventKey, area_in_name};
 use crate::report::RunMetrics;
 
 pub const SYSTEM_PROMPT: &str = include_str!("../prompts/system.txt");
@@ -229,35 +230,41 @@ pub(crate) struct CollapseGroup {
     pub canonical: String,
 }
 
+/// The two top-level shapes free models actually return.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CollapsePayload {
+    Wrapped { groups: Vec<Value> },
+    Bare(Vec<Value>),
+}
+
+/// A single group is deserialized on its own so one malformed group cannot
+/// invalidate every other group in the response.
+#[derive(Deserialize)]
+struct RawCollapseGroup {
+    ids: Vec<Value>,
+    canonical: String,
+}
+
 /// Duplicate ids and singleton groups are dropped; range and shape are checked at apply time.
 fn parse_collapse(text: &str) -> AnyResult<Vec<CollapseGroup>> {
     let text = strip_code_fences(text);
-    let parsed: Value = serde_json::from_str(&text).context("parse collapse response")?;
-    let raw = match &parsed {
-        Value::Array(items) => items,
-        Value::Object(map) => map
-            .get("groups")
-            .and_then(Value::as_array)
-            .ok_or_else(|| anyhow!("collapse response missing \"groups\" array"))?,
-        _ => return Err(anyhow!("unexpected collapse response shape")),
+    let parsed: CollapsePayload = serde_json::from_str(&text).context("parse collapse response")?;
+    let raw = match parsed {
+        CollapsePayload::Wrapped { groups } => groups,
+        CollapsePayload::Bare(items) => items,
     };
     let mut groups = Vec::new();
     for value in raw {
-        let Some(object) = value.as_object() else {
-            continue;
-        };
-        let Some(canonical) = object.get("canonical").and_then(Value::as_str) else {
+        let Ok(RawCollapseGroup { ids, canonical }) = serde_json::from_value(value) else {
             continue;
         };
         let canonical = canonical.trim();
         if canonical.is_empty() || canonical.chars().count() > 200 {
             continue;
         }
-        let mut ids: Vec<usize> = object
-            .get("ids")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
+        let mut ids: Vec<usize> = ids
+            .iter()
             .filter_map(|id| id.as_u64().and_then(|id| usize::try_from(id).ok()))
             .collect();
         let mut seen = HashSet::new();
@@ -319,6 +326,17 @@ fn valid_collapse(
                 (None, Some(y)) if !area_in_name(y, a.establishment()) => return false,
                 _ => {}
             }
+        }
+    }
+    // The model proposes aliases; the domain matcher independently confirms
+    // they are the same establishment before any name is rewritten.
+    let keys: Vec<EventKey> = members
+        .iter()
+        .map(|c| EventKey::from_candidate(c))
+        .collect();
+    for (index, a) in keys.iter().enumerate() {
+        if keys.iter().skip(index + 1).any(|b| !a.matches(b)) {
+            return false;
         }
     }
     true
@@ -559,7 +577,7 @@ mod tests {
                 Some("Worli"),
             ),
             candidate(
-                "National Sports Club",
+                "National Sports Club of India",
                 "Mumbai",
                 ActionType::LicenceSuspension,
                 "2026-11-30",
@@ -591,7 +609,7 @@ mod tests {
                 None,
             ),
             candidate(
-                "National Sports Club",
+                "National Sports Club of India",
                 "Mumbai",
                 ActionType::LicenceSuspension,
                 "2026-11-23",
@@ -601,13 +619,13 @@ mod tests {
 
         apply_collapse(
             &mut candidates,
-            &[group(&[0, 1, 99], "National Sports Club of India")],
+            &[group(&[0, 1, 99], "Renamed NSCI Outlet")],
         );
 
         assert!(
             candidates
                 .iter()
-                .all(|c| c.establishment() != "National Sports Club of India"),
+                .all(|c| c.establishment() != "Renamed NSCI Outlet"),
             "one bad id rejects the whole group, not just that id"
         );
     }
@@ -719,7 +737,7 @@ mod tests {
                 None,
             ),
             candidate(
-                "National Sports Club",
+                "National Sports Club of India",
                 "Mumbai",
                 ActionType::LicenceSuspension,
                 "2026-12-03",
@@ -781,7 +799,7 @@ mod tests {
                 None,
             ),
             candidate(
-                "National Sports Club",
+                "National Sports Club of India",
                 "Mumbai",
                 ActionType::LicenceSuspension,
                 "2026-11-23",
@@ -796,6 +814,48 @@ mod tests {
                 .iter()
                 .all(|c| c.establishment() != "'Quoted Outlet"),
             "the canonical must pass Candidate::set_establishment"
+        );
+    }
+
+    #[test]
+    fn collapse_parser_accepts_bare_arrays_and_skips_malformed_groups() {
+        let groups = parse_collapse(
+            r#"[{"ids":[0,1],"canonical":" A B "},{"ids":[2],"canonical":"single"},{"ids":[3,4],"canonical":42},{"bogus":true}]"#,
+        )
+        .expect("parse bare collapse array");
+        assert_eq!(
+            parsed(&groups),
+            vec![(vec![0, 1], "A B".to_string())],
+            "one malformed group must not drop the valid one"
+        );
+    }
+
+    #[test]
+    fn collapse_rejects_unrelated_establishments_with_matching_locality() {
+        let mut candidates = vec![
+            candidate(
+                "Domino's Pizza",
+                "Mumbai",
+                ActionType::LicenceSuspension,
+                "2026-11-23",
+                Some("Worli"),
+            ),
+            candidate(
+                "Pizza Hut",
+                "Mumbai",
+                ActionType::LicenceSuspension,
+                "2026-11-23",
+                Some("Worli"),
+            ),
+        ];
+
+        apply_collapse(&mut candidates, &[group(&[0, 1], "United Pizza Outlet")]);
+
+        assert!(
+            candidates
+                .iter()
+                .all(|c| c.establishment() != "United Pizza Outlet"),
+            "same city, date and area are not evidence of the same establishment"
         );
     }
 

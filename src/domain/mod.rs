@@ -79,9 +79,8 @@ impl Article {
     }
 }
 
-/// A validated record ready for persistence — also the insert DTO.
-// #[non_exhaustive] only seals against other crates; this field seals within the crate too.
-#[allow(clippy::manual_non_exhaustive)]
+/// A validated record ready for persistence — also the insert DTO. Private
+/// fields are the construction boundary: only `try_new` can build one.
 #[derive(Debug, Clone, Serialize)]
 pub struct Candidate {
     establishment: String,
@@ -101,8 +100,6 @@ pub struct Candidate {
     source_publisher: Option<String>,
     source_headline: Option<String>,
     published_at: Option<DateTime<Utc>>,
-    #[serde(skip)]
-    _sealed: (),
 }
 
 impl Candidate {
@@ -228,7 +225,6 @@ impl Candidate {
             source_publisher: nonempty(article.source.as_deref()),
             source_headline: Some(article.title.clone()),
             published_at: article.published,
-            _sealed: (),
         })
     }
 }
@@ -265,35 +261,66 @@ fn check_establishment(name: &str, details: Option<&str>) -> Result<(), Rejectio
     Ok(())
 }
 
+/// Venue words that vary between reports of the same outlet.
+const GENERIC_VENUE_WORDS: [&str; 7] = [
+    "club",
+    "facility",
+    "canteen",
+    "restaurant",
+    "hotel",
+    "outlet",
+    "kitchen",
+];
+
+fn words(s: &str) -> Vec<String> {
+    s.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn distinctive(s: &str) -> Vec<String> {
+    words(s)
+        .into_iter()
+        .filter(|t| !GENERIC_VENUE_WORDS.contains(&t.as_str()))
+        .collect()
+}
+
+/// "NSCI" from "National Sports Club of India": initials in order, with
+/// skipped and trailing words allowed. This is the positive identity evidence
+/// the consecutive-acronym rule below cannot express.
+fn is_initials(acro: &str, name: &str) -> bool {
+    let mut chars = acro.chars();
+    let Some(mut wanted) = chars.next() else {
+        return false;
+    };
+    let mut matched_all = false;
+    for word in words(name) {
+        if word.starts_with(wanted) {
+            match chars.next() {
+                Some(next) => wanted = next,
+                None => {
+                    matched_all = true;
+                    break;
+                }
+            }
+        }
+    }
+    matched_all
+}
+
 /// A missing area is uncertainty; a named one must be corroborated by the
 /// other report's establishment name (directly or via an acronym like "BKC").
 pub(crate) fn area_in_name(area: &str, name: &str) -> bool {
-    const GENERIC_WORDS: [&str; 7] = [
-        "club",
-        "facility",
-        "canteen",
-        "restaurant",
-        "hotel",
-        "outlet",
-        "kitchen",
-    ];
-    let tokens = |s: &str| -> Vec<String> {
-        s.to_lowercase()
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|t| !t.is_empty() && !GENERIC_WORDS.contains(t))
-            .map(str::to_string)
-            .collect()
-    };
-    let area = tokens(area);
+    let area = distinctive(area);
     if area.is_empty() {
         return true;
     }
-    let name = tokens(name);
+    let name = distinctive(name);
     area.iter().all(|t| name.contains(t))
         || name.iter().any(|t| {
-            !t.is_empty()
-                && t.chars().count() <= area.len()
-                && t.chars().zip(&area).all(|(c, w)| w.starts_with(c))
+            t.chars().count() <= area.len() && t.chars().zip(&area).all(|(c, w)| w.starts_with(c))
         })
 }
 
@@ -330,44 +357,11 @@ impl EventKey {
         }
     }
 
-    /// Exact, containment for 6+ char names, or token/acronym match with a 3+ char word in common.
+    /// Positive name evidence: exact/containment, a consecutive acronym, or
+    /// every distinctive token corroborated by the other name (including
+    /// non-consecutive initials like NSCI). City and area must agree first.
     pub fn matches(&self, other: &Self) -> bool {
-        // Venue words that vary between reports of the same outlet.
-        const GENERIC_WORDS: [&str; 7] = [
-            "club",
-            "facility",
-            "canteen",
-            "restaurant",
-            "hotel",
-            "outlet",
-            "kitchen",
-        ];
-
-        fn tokens(s: &str) -> Vec<&str> {
-            s.split(|c: char| !c.is_alphanumeric())
-                .filter(|t| !t.is_empty() && !GENERIC_WORDS.contains(t))
-                .collect()
-        }
-
-        // "mca" = initials of the consecutive run "mumbai cricket association".
-        fn is_acronym_of(acro: &str, words: &[&str]) -> bool {
-            !acro.is_empty()
-                && acro.len() <= words.len()
-                && acro.chars().zip(words).all(|(c, w)| w.starts_with(c))
-        }
-
-        fn token_matches(t: &str, words: &[&str]) -> bool {
-            words.contains(&t)
-                || (0..=words.len().saturating_sub(t.len())).any(|i| is_acronym_of(t, &words[i..]))
-        }
-
-        let norm = |s: &str| -> String {
-            s.to_lowercase()
-                .split(|c: char| !c.is_alphanumeric())
-                .filter(|t| !t.is_empty())
-                .collect::<Vec<_>>()
-                .join(" ")
-        };
+        let norm = |s: &str| -> String { words(s).join(" ") };
 
         // Both-known or one-known: a city mismatch is hard evidence against a
         // match. Both-unknown stays compatible for legacy rows and test helpers.
@@ -404,13 +398,27 @@ impl EventKey {
         if a.len().min(b.len()) >= 6 && (a.contains(&b) || b.contains(&a)) {
             return true;
         }
-        let side_matches = |from: &[&str], to: &[&str]| {
-            from.iter().map(|t| t.len()).sum::<usize>() >= 6
-                && from.iter().all(|t| token_matches(t, to))
-                && from.iter().any(|t| t.len() >= 3 && to.contains(t))
+        let is_acronym_of = |acro: &str, words: &[String]| -> bool {
+            !acro.is_empty()
+                && acro.len() <= words.len()
+                && acro.chars().zip(words).all(|(c, w)| w.starts_with(c))
         };
-        let (ta, tb) = (tokens(&a), tokens(&b));
-        side_matches(&ta, &tb) || side_matches(&tb, &ta)
+        // Three-letter initials are too ambiguous (MCA could name two orgs);
+        // the consecutive-acronym rule above still covers those aliases.
+        let initials_match = |t: &str, raw: &str| t.chars().count() >= 4 && is_initials(t, raw);
+        let token_matches = |t: &str, to: &[String], raw: &str| -> bool {
+            to.iter().any(|w| w == t)
+                || (0..=to.len().saturating_sub(t.len())).any(|i| is_acronym_of(t, &to[i..]))
+                || initials_match(t, raw)
+        };
+        let side_matches = |from: &[String], to: &[String], raw: &str| {
+            let initials = from.iter().all(|t| initials_match(t, raw));
+            (from.iter().map(String::len).sum::<usize>() >= 6 || initials)
+                && from.iter().all(|t| token_matches(t, to, raw))
+                && (from.iter().any(|t| t.len() >= 3 && to.contains(t)) || initials)
+        };
+        let (ta, tb) = (distinctive(&a), distinctive(&b));
+        side_matches(&ta, &tb, &b) || side_matches(&tb, &ta, &a)
     }
 }
 
@@ -468,6 +476,18 @@ mod tests {
             "short name containment is too loose"
         );
         assert!(same_event("KFC", "kfc"), "exact short names match");
+    }
+
+    #[test]
+    fn same_event_matches_non_consecutive_initials() {
+        assert!(
+            same_event("NSCI", "National Sports Club of India"),
+            "NSCI is the initials of the full name, not a consecutive acronym"
+        );
+        assert!(
+            !same_event("NSCI", "National Sports Club of Pune"),
+            "a shared prefix must not hide a different establishment"
+        );
     }
 
     #[test]

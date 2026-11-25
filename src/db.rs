@@ -33,26 +33,31 @@ pub(crate) async fn seen_urls(pool: &PgPool, cutoff: DateTime<Utc>) -> AnyResult
     )
 }
 
-const INSERT_TAIL: &str = "establishment, area, city, brand, operator, outlet_type, action_type,
-                action_date, violations, compliance_score, fssai_number, details,
-                platforms, source_url, source_publisher, source_headline, published_at";
-
-const INSERT_CONFLICT_TAIL: &str = "DO UPDATE SET
-                area = EXCLUDED.area,
-                city = EXCLUDED.city,
-                brand = EXCLUDED.brand,
-                operator = EXCLUDED.operator,
-                outlet_type = EXCLUDED.outlet_type,
-                action_type = EXCLUDED.action_type,
-                violations = EXCLUDED.violations,
-                compliance_score = EXCLUDED.compliance_score,
-                fssai_number = EXCLUDED.fssai_number,
-                details = EXCLUDED.details,
-                platforms = EXCLUDED.platforms,
-                source_publisher = EXCLUDED.source_publisher,
-                source_headline = EXCLUDED.source_headline,
-                published_at = EXCLUDED.published_at,
-                updated_at = now()";
+/// Static statement: no fragments, no runtime SQL assembly. The conflict key
+/// mirrors `actions_source_identity` in migration 0004.
+const INSERT_SQL: &str = "INSERT INTO actions (
+                 establishment, area, city, brand, operator, outlet_type, action_type,
+                 action_date, violations, compliance_score, fssai_number, details,
+                 platforms, source_url, source_publisher, source_headline, published_at
+                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+                 ON CONFLICT (source_url, establishment, action_date,
+                              (coalesce(city, '')), (coalesce(area, '')))
+                 DO UPDATE SET
+                 area = EXCLUDED.area,
+                 city = EXCLUDED.city,
+                 brand = EXCLUDED.brand,
+                 operator = EXCLUDED.operator,
+                 outlet_type = EXCLUDED.outlet_type,
+                 action_type = EXCLUDED.action_type,
+                 violations = EXCLUDED.violations,
+                 compliance_score = EXCLUDED.compliance_score,
+                 fssai_number = EXCLUDED.fssai_number,
+                 details = EXCLUDED.details,
+                 platforms = EXCLUDED.platforms,
+                 source_publisher = EXCLUDED.source_publisher,
+                 source_headline = EXCLUDED.source_headline,
+                 published_at = EXCLUDED.published_at,
+                 updated_at = now()";
 
 const UPDATE_BY_ID: &str = "UPDATE actions SET
                 establishment=$1, area=$2, city=$3, brand=$4, operator=$5,
@@ -85,25 +90,15 @@ fn bind_candidate<'q>(query: BoundCandidate<'q>, r: &'q Candidate) -> BoundCandi
         .bind(r.published_at())
 }
 
-async fn execute_insert(
-    conn: &mut sqlx::PgConnection,
-    r: &Candidate,
-    conflict_tail: &str,
-) -> AnyResult<u64> {
-    let sql = format!(
-        "INSERT INTO actions ({INSERT_TAIL}) VALUES \
-         ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) \
-         ON CONFLICT (source_url, establishment, action_date) {conflict_tail}"
-    );
-    // conflict_tail is a compile-time constant, not user input.
-    let res = bind_candidate(sqlx::query(sqlx::AssertSqlSafe(sql)), r)
+async fn execute_insert(conn: &mut sqlx::PgConnection, r: &Candidate) -> AnyResult<u64> {
+    let res = bind_candidate(sqlx::query(INSERT_SQL), r)
         .execute(conn)
         .await?;
     Ok(res.rows_affected())
 }
 
 async fn execute_update(conn: &mut sqlx::PgConnection, r: &Candidate, id: i64) -> AnyResult<()> {
-    bind_candidate(sqlx::query(sqlx::AssertSqlSafe(UPDATE_BY_ID)), r)
+    bind_candidate(sqlx::query(UPDATE_BY_ID), r)
         .bind(id)
         .execute(conn)
         .await?;
@@ -142,46 +137,47 @@ fn pick_target(r: &Candidate, stored: &[StoredRow]) -> Option<i64> {
         .map(|row| row.id)
 }
 
-/// Check the two database constraints before writing, so a collision skips one
-/// row instead of aborting the whole transaction.
+/// Mirrors both constraints in migration 0004: the city/area/type ±10 day
+/// exclusion and the per-source identity unique key. `exclude_id` lets an
+/// update ignore the row it is about to rewrite.
 async fn collision_exists(
     conn: &mut sqlx::PgConnection,
     r: &Candidate,
     exclude_id: Option<i64>,
 ) -> AnyResult<bool> {
-    let type_name = r.action_type().to_string();
-    let exclude = |ids: Vec<i64>| ids.into_iter().any(|id| Some(id) != exclude_id);
-
-    // actions_no_dupe_events uses daterange(d-5, d+5, '[]'), which Postgres
-    // canonicalizes to [d-5, d+6); two such ranges overlap up to 10 days apart.
-    let same_event: Vec<i64> = sqlx::query_scalar(
-        "SELECT id FROM actions
-         WHERE lower(establishment) = lower($1)
-           AND coalesce(lower(city), '') = lower($2)
-           AND action_type = $3
-           AND action_date BETWEEN $4 - 10 AND $4 + 10",
+    // daterange(d-5, d+5, '[]') canonicalizes to [d-5, d+6), so two rows can
+    // conflict up to 10 days apart — the window checked here.
+    let collision: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM actions
+             WHERE lower(establishment) = lower($1)
+               AND coalesce(lower(city), '') = lower($2)
+               AND coalesce(lower(area), '') = lower($3)
+               AND action_type = $4
+               AND action_date BETWEEN $5 - 10 AND $5 + 10
+               AND ($6::bigint IS NULL OR id <> $6)
+         ) OR EXISTS (
+             SELECT 1 FROM actions
+             WHERE source_url = $7
+               AND establishment = $8
+               AND action_date = $9
+               AND lower(coalesce(city, '')) = lower($2)
+               AND lower(coalesce(area, '')) = lower($3)
+               AND ($6::bigint IS NULL OR id <> $6)
+         )",
     )
     .bind(r.establishment())
     .bind(r.city().as_str())
-    .bind(type_name)
+    .bind(r.area().unwrap_or(""))
+    .bind(r.action_type().to_string())
     .bind(r.action_date())
-    .fetch_all(&mut *conn)
-    .await?;
-    if exclude(same_event) {
-        return Ok(true);
-    }
-
-    // UNIQUE (source_url, establishment, action_date).
-    let same_identity: Vec<i64> = sqlx::query_scalar(
-        "SELECT id FROM actions
-         WHERE source_url = $1 AND establishment = $2 AND action_date = $3",
-    )
+    .bind(exclude_id)
     .bind(r.source_url())
     .bind(r.establishment())
     .bind(r.action_date())
-    .fetch_all(&mut *conn)
+    .fetch_one(&mut *conn)
     .await?;
-    Ok(exclude(same_identity))
+    Ok(collision)
 }
 
 /// `EventKey` is the dedup authority; the SQL constraints are the backstop.
@@ -245,8 +241,7 @@ pub(crate) async fn upsert_actions(pool: &PgPool, rows: &[Candidate]) -> AnyResu
             continue;
         }
 
-        outcome.inserted +=
-            usize::try_from(execute_insert(&mut tx, r, INSERT_CONFLICT_TAIL).await?)?;
+        outcome.inserted += usize::try_from(execute_insert(&mut tx, r).await?)?;
     }
     tx.commit().await?;
     Ok(outcome)
@@ -363,5 +358,198 @@ mod tests {
             Some(4),
             "with no exact name, the lowest matching alias wins"
         );
+    }
+
+    fn db_candidate(
+        name: &str,
+        city: &str,
+        area: Option<&str>,
+        date: &str,
+        url: &str,
+        details: &str,
+    ) -> Candidate {
+        let action = LlmAction {
+            establishment: name.into(),
+            city: Some(city.into()),
+            area: area.map(str::to_string),
+            action_type: ActionType::LicenceSuspension,
+            action_date: Some(date.into()),
+            details: Some(details.into()),
+            ..Default::default()
+        };
+        let article = Article {
+            title: "source headline".into(),
+            url: url.into(),
+            source: None,
+            published: None,
+            snippet: None,
+        };
+        Candidate::try_new(SanitizedAction::new(action), &article).expect("valid candidate")
+    }
+
+    async fn row_count(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM actions")
+            .fetch_one(pool)
+            .await
+            .expect("count rows")
+    }
+
+    /// Real Postgres coverage for the identity policy. Skipped by default so
+    /// the ordinary unit suite stays offline; run with RUN_DB_TESTS=1.
+    #[tokio::test]
+    #[ignore = "requires RUN_DB_TESTS=1 and DATABASE_URL"]
+    async fn postgres_enforces_the_identity_policy() {
+        if std::env::var("RUN_DB_TESTS").ok().as_deref() != Some("1") {
+            return;
+        }
+        let raw_url = std::env::var("DATABASE_URL").expect("DATABASE_URL for db tests");
+        let schema = format!("it_{}", std::process::id());
+        let schema_for_pool = schema.clone();
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .after_connect(move |conn, _| {
+                let schema = schema_for_pool.clone();
+                Box::pin(async move {
+                    sqlx::query("SELECT set_config('search_path', $1, false)")
+                        .bind(schema)
+                        .execute(conn)
+                        .await
+                        .map(|_| ())
+                })
+            })
+            .connect(SecretString::new(raw_url.clone()).expose())
+            .await
+            .expect("connect to test database");
+        // The identifier is generated from the process id, never user input.
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA \"{schema}\"")))
+            .execute(&pool)
+            .await
+            .expect("create isolated schema");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("apply migrations in test schema");
+
+        const DETAILS: &str =
+            "licence suspended over cockroach infestation found during inspection";
+        let borivali = db_candidate(
+            "Domino's Pizza",
+            "Mumbai",
+            Some("Borivali West"),
+            "2026-11-23",
+            "https://news.test/a",
+            DETAILS,
+        );
+        let ghatkopar = db_candidate(
+            "Domino's Pizza",
+            "Mumbai",
+            Some("Ghatkopar West"),
+            "2026-11-23",
+            "https://news.test/b",
+            DETAILS,
+        );
+        let out = upsert_actions(&pool, &[borivali, ghatkopar])
+            .await
+            .expect("upsert two branches");
+        assert_eq!(
+            (out.inserted, out.updated, out.skipped),
+            (2, 0, 0),
+            "two branches of one name in one city are distinct events"
+        );
+        assert_eq!(row_count(&pool).await, 2);
+
+        let pune = db_candidate(
+            "Domino's Pizza",
+            "Pune",
+            Some("Borivali West"),
+            "2026-11-23",
+            "https://news.test/c",
+            DETAILS,
+        );
+        let out = upsert_actions(&pool, &[pune])
+            .await
+            .expect("upsert other city");
+        assert_eq!(
+            (out.inserted, out.updated, out.skipped),
+            (1, 0, 0),
+            "the same outlet in a different city is a distinct event"
+        );
+        assert_eq!(row_count(&pool).await, 3);
+
+        let revised = db_candidate(
+            "Domino's Pizza",
+            "Mumbai",
+            Some("Borivali West"),
+            "2026-11-23",
+            "https://news.test/a",
+            "licence suspended after a fresh inspection found cockroach infestation",
+        );
+        let out = upsert_actions(&pool, &[revised])
+            .await
+            .expect("re-store same source URL");
+        assert_eq!(
+            (out.inserted, out.updated, out.skipped),
+            (0, 1, 0),
+            "a second copy from one URL updates the row instead of inserting"
+        );
+        assert_eq!(row_count(&pool).await, 3);
+        let details: String = sqlx::query_scalar(
+            "SELECT details FROM actions WHERE source_url = 'https://news.test/a'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("stored details");
+        assert!(
+            details.contains("fresh inspection"),
+            "the re-store refreshed the details column"
+        );
+
+        let re_report = db_candidate(
+            "Domino's Pizza",
+            "Mumbai",
+            Some("Borivali West"),
+            "2026-11-26",
+            "https://news.test/d",
+            DETAILS,
+        );
+        let out = upsert_actions(&pool, &[re_report])
+            .await
+            .expect("re-report inside the window");
+        assert_eq!(
+            (out.inserted, out.updated, out.skipped),
+            (0, 0, 1),
+            "a re-report three days later is one event"
+        );
+        assert_eq!(row_count(&pool).await, 3);
+
+        let later = db_candidate(
+            "Domino's Pizza",
+            "Mumbai",
+            Some("Borivali West"),
+            "2026-12-04",
+            "https://news.test/e",
+            DETAILS,
+        );
+        let out = upsert_actions(&pool, &[later])
+            .await
+            .expect("event outside the window");
+        assert_eq!(
+            (out.inserted, out.updated, out.skipped),
+            (1, 0, 0),
+            "eleven days later is outside the ±10 day window"
+        );
+        assert_eq!(row_count(&pool).await, 4);
+
+        pool.close().await;
+        let admin = super::pool(&SecretString::new(raw_url))
+            .await
+            .expect("admin pool");
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"
+        )))
+        .execute(&admin)
+        .await
+        .expect("drop isolated schema");
+        admin.close().await;
     }
 }
