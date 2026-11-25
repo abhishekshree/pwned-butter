@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use anyhow::{Context, Result as AnyResult};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::Value;
 use sqlx::postgres::{PgArguments, PgPoolOptions};
 use sqlx::query::Query;
@@ -105,12 +105,15 @@ async fn execute_update(conn: &mut sqlx::PgConnection, r: &Candidate, id: i64) -
     Ok(())
 }
 
+#[derive(Clone)]
 struct StoredRow {
     id: i64,
+    source_url: String,
     name: String,
     city: Option<String>,
     area: Option<String>,
     action_type: String,
+    action_date: NaiveDate,
 }
 
 /// Same-source rows are disambiguated by exact name, then action type, then
@@ -137,81 +140,89 @@ fn pick_target(r: &Candidate, stored: &[StoredRow]) -> Option<i64> {
         .map(|row| row.id)
 }
 
-/// Mirrors both constraints in migration 0004: the city/area/type ±10 day
-/// exclusion and the per-source identity unique key. `exclude_id` lets an
-/// update ignore the row it is about to rewrite.
-async fn collision_exists(
-    conn: &mut sqlx::PgConnection,
-    r: &Candidate,
-    exclude_id: Option<i64>,
-) -> AnyResult<bool> {
-    // daterange(d-5, d+5, '[]') canonicalizes to [d-5, d+6), so two rows can
-    // conflict up to 10 days apart — the window checked here.
-    let collision: bool = sqlx::query_scalar(
-        "SELECT EXISTS (
-             SELECT 1 FROM actions
-             WHERE lower(establishment) = lower($1)
-               AND coalesce(lower(city), '') = lower($2)
-               AND coalesce(lower(area), '') = lower($3)
-               AND action_type = $4
-               AND action_date BETWEEN $5 - 10 AND $5 + 10
-               AND ($6::bigint IS NULL OR id <> $6)
-         ) OR EXISTS (
-             SELECT 1 FROM actions
-             WHERE source_url = $7
-               AND establishment = $8
-               AND action_date = $9
-               AND lower(coalesce(city, '')) = lower($2)
-               AND lower(coalesce(area, '')) = lower($3)
-               AND ($6::bigint IS NULL OR id <> $6)
-         )",
-    )
-    .bind(r.establishment())
-    .bind(r.city().as_str())
-    .bind(r.area().unwrap_or(""))
-    .bind(r.action_type().to_string())
-    .bind(r.action_date())
-    .bind(exclude_id)
-    .bind(r.source_url())
-    .bind(r.establishment())
-    .bind(r.action_date())
-    .fetch_one(&mut *conn)
-    .await?;
-    Ok(collision)
+/// Mirrors both migration 0004 keys for a row already fetched in the ±10 day
+/// window: the lower(name)/city/area/type exclusion and the per-source key.
+/// `daterange(d-5, d+5, '[]')` canonicalizes to [d-5, d+6), hence ±10 days.
+fn collides(row: &StoredRow, r: &Candidate, type_name: &str) -> bool {
+    let city = row
+        .city
+        .as_deref()
+        .unwrap_or("")
+        .eq_ignore_ascii_case(r.city().as_str());
+    let area = row
+        .area
+        .as_deref()
+        .unwrap_or("")
+        .eq_ignore_ascii_case(r.area().unwrap_or(""));
+    let same_event = row.name.eq_ignore_ascii_case(r.establishment())
+        && city
+        && area
+        && row.action_type == type_name
+        && (row.action_date - r.action_date()).num_days().abs() <= 10;
+    let same_source = row.source_url == r.source_url()
+        && row.name == r.establishment()
+        && row.action_date == r.action_date()
+        && city
+        && area;
+    same_event || same_source
 }
 
 /// `EventKey` is the dedup authority; the SQL constraints are the backstop.
+/// One fetch per candidate is classified in Rust instead of issuing separate
+/// same-source, cross-source and collision queries.
 pub(crate) async fn upsert_actions(pool: &PgPool, rows: &[Candidate]) -> AnyResult<StoreOutcome> {
     let mut tx = pool.begin().await?;
     let mut outcome = StoreOutcome::default();
     for r in rows {
-        // Same source + same event = updated representation (every column refreshed).
-        // Different source + same event + same action type = one event, skipped.
         let key = EventKey::from_row(r.establishment(), Some(r.city().as_str()), r.area());
+        let type_name = r.action_type().to_string();
 
-        // Exact date: a second event from the same article on a nearby date is
-        // a different row, never an update target.
-        let stored: Vec<StoredRow> =
-            sqlx::query_as::<_, (i64, String, Option<String>, Option<String>, String)>(
-                "SELECT id, establishment, city, area, action_type FROM actions
-             WHERE source_url = $1 AND action_date = $2 ORDER BY id",
-            )
-            .bind(r.source_url())
-            .bind(r.action_date())
-            .fetch_all(&mut *tx)
-            .await?
-            .into_iter()
-            .map(|(id, name, city, area, action_type)| StoredRow {
+        let nearby: Vec<StoredRow> = sqlx::query_as::<
+            _,
+            (
+                i64,
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+                String,
+                NaiveDate,
+            ),
+        >(
+            "SELECT id, source_url, establishment, city, area, action_type, action_date
+             FROM actions
+             WHERE action_date BETWEEN $1 - 10 AND $1 + 10
+             ORDER BY id",
+        )
+        .bind(r.action_date())
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .map(
+            |(id, source_url, name, city, area, action_type, action_date)| StoredRow {
                 id,
+                source_url,
                 name,
                 city,
                 area,
                 action_type,
-            })
-            .collect();
+                action_date,
+            },
+        )
+        .collect();
 
-        if let Some(id) = pick_target(r, &stored) {
-            if collision_exists(&mut tx, r, Some(id)).await? {
+        // Same source + exact date = an updated representation; a nearby date
+        // is a different event, never an update target.
+        let same_source: Vec<StoredRow> = nearby
+            .iter()
+            .filter(|row| row.source_url == r.source_url() && row.action_date == r.action_date())
+            .cloned()
+            .collect();
+        if let Some(id) = pick_target(r, &same_source) {
+            if nearby
+                .iter()
+                .any(|row| row.id != id && collides(row, r, &type_name))
+            {
                 outcome.skipped += 1;
                 continue;
             }
@@ -221,22 +232,16 @@ pub(crate) async fn upsert_actions(pool: &PgPool, rows: &[Candidate]) -> AnyResu
         }
 
         // Another outlet reporting the same event is not a new card.
-        let others: Vec<(String, Option<String>, Option<String>)> =
-            sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
-                "SELECT establishment, city, area FROM actions
-                 WHERE action_date BETWEEN $1 - 10 AND $1 + 10
-                   AND action_type = $2
-                   AND source_url <> $3",
-            )
-            .bind(r.action_date())
-            .bind(r.action_type().to_string())
-            .bind(r.source_url())
-            .fetch_all(&mut *tx)
-            .await?;
-        if others.iter().any(|(name, city, area)| {
-            key.matches(&EventKey::from_row(name, city.as_deref(), area.as_deref()))
-        }) || collision_exists(&mut tx, r, None).await?
-        {
+        let reported_elsewhere = nearby.iter().any(|row| {
+            row.source_url != r.source_url()
+                && row.action_type == type_name
+                && key.matches(&EventKey::from_row(
+                    &row.name,
+                    row.city.as_deref(),
+                    row.area.as_deref(),
+                ))
+        });
+        if reported_elsewhere || nearby.iter().any(|row| collides(row, r, &type_name)) {
             outcome.skipped += 1;
             continue;
         }
@@ -319,10 +324,12 @@ mod tests {
     fn stored(id: i64, name: &str, action_type: &str) -> StoredRow {
         StoredRow {
             id,
+            source_url: "https://example.test/1".into(),
             name: name.into(),
             city: Some("Mumbai".into()),
             area: None,
             action_type: action_type.into(),
+            action_date: NaiveDate::from_ymd_opt(2026, 11, 23).expect("date"),
         }
     }
 

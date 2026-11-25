@@ -4,10 +4,10 @@ use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result as AnyResult};
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 
-use crate::domain::{Candidate, EventKey};
+use crate::domain::Candidate;
 use crate::report::{RunReport, StoreOutcome};
 
 /// A file-backed stand-in for Postgres, so local runs never touch the live DB.
@@ -82,61 +82,18 @@ impl LocalWriter {
             .collect())
     }
 
-    fn near_event(record: &Value, date: NaiveDate, key: &EventKey) -> bool {
-        record
-            .get("action_date")
-            .and_then(Value::as_str)
-            .and_then(|raw| NaiveDate::parse_from_str(raw, "%Y-%m-%d").ok())
-            .is_some_and(|stored| (stored - date).num_days().abs() <= 10)
-            && record
-                .get("establishment")
-                .and_then(Value::as_str)
-                .is_some_and(|name| {
-                    key.matches(&EventKey::from_row(
-                        name,
-                        record.get("city").and_then(Value::as_str),
-                        record.get("area").and_then(Value::as_str),
-                    ))
-                })
-    }
-
-    // shortcut: no transactionality, O(N*M) full-file scan per batch, same-source re-stores append a newest row; debug backend only, upgrade if used for backfills.
+    // shortcut: append-only debug backend with no dedup or update semantics.
+    // Postgres is the only store that enforces identity; upgrade if this is
+    // ever used for a backfill.
     pub fn upsert_actions(&self, rows: &[Candidate]) -> AnyResult<StoreOutcome> {
-        let mut records = Self::read_records(&self.path)?;
         let mut outcome = StoreOutcome::default();
         for row in rows {
-            let key =
-                EventKey::from_row(row.establishment(), Some(row.city().as_str()), row.area());
-            let action_type = row.action_type().to_string();
-            let mut same_source = false;
-            let mut other_source = false;
-            for record in &records {
-                if !Self::near_event(record, row.action_date(), &key) {
-                    continue;
-                }
-                if record.get("source_url").and_then(Value::as_str) == Some(row.source_url()) {
-                    same_source = true;
-                } else if record.get("action_type").and_then(Value::as_str)
-                    == Some(action_type.as_str())
-                {
-                    other_source = true;
-                }
-            }
-            if !same_source && other_source {
-                outcome.skipped += 1;
-                continue;
-            }
             let mut record = serde_json::to_value(row).context("serialize candidate")?;
             if let Some(obj) = record.as_object_mut() {
                 obj.insert("created_at".into(), json!(Utc::now().to_rfc3339()));
             }
             self.append(&self.path, &record)?;
-            records.push(record);
-            if same_source {
-                outcome.updated += 1;
-            } else {
-                outcome.inserted += 1;
-            }
+            outcome.inserted += 1;
         }
         Ok(outcome)
     }
@@ -237,7 +194,7 @@ mod tests {
     }
 
     #[test]
-    fn same_source_restore_appends_newest_record() {
+    fn restores_always_append_without_dedup() {
         let path = temp_dir().join(format!("fda-local-same-source-{}.jsonl", id()));
         let _ = remove_file(&path);
         let writer = LocalWriter::new(path.clone());
@@ -258,8 +215,8 @@ mod tests {
             .seen_urls(Utc::now() - Duration::days(1))
             .expect("read back");
 
-        assert_eq!((first.inserted, second.updated), (1, 1));
-        assert_eq!(records.len(), 2, "append-only: the old row stays");
+        assert_eq!((first.inserted, second.inserted), (1, 1));
+        assert_eq!(records.len(), 2, "append-only: every copy stays");
         assert_eq!(
             records
                 .first()
@@ -278,35 +235,6 @@ mod tests {
         assert!(records.iter().all(|r| r.get("created_at").is_some()));
         assert!(seen.contains("https://example.test/1"));
 
-        let _ = remove_file(&path);
-    }
-
-    #[test]
-    fn dedups_one_event_across_urls_and_nearby_dates() {
-        let path = temp_dir().join(format!("fda-local-cross-{}.jsonl", id()));
-        let _ = remove_file(&path);
-        let writer = LocalWriter::new(path.clone());
-
-        let first = writer
-            .upsert_actions(&[candidate_on(
-                "https://example.test/1",
-                "National Sports Club of India",
-                "2026-08-11",
-            )])
-            .expect("first write");
-        let second = writer
-            .upsert_actions(&[candidate_on(
-                "https://example.test/2",
-                "National Sports Club of India (NSCI)",
-                "2026-08-13",
-            )])
-            .expect("second write");
-
-        assert_eq!(
-            (first.inserted, second.skipped),
-            (1, 1),
-            "a re-report by another outlet is one event, as in the Postgres store"
-        );
         let _ = remove_file(&path);
     }
 

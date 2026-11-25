@@ -242,7 +242,7 @@ enum CollapsePayload {
 /// invalidate every other group in the response.
 #[derive(Deserialize)]
 struct RawCollapseGroup {
-    ids: Vec<Value>,
+    ids: Vec<usize>,
     canonical: String,
 }
 
@@ -256,17 +256,13 @@ fn parse_collapse(text: &str) -> AnyResult<Vec<CollapseGroup>> {
     };
     let mut groups = Vec::new();
     for value in raw {
-        let Ok(RawCollapseGroup { ids, canonical }) = serde_json::from_value(value) else {
+        let Ok(RawCollapseGroup { mut ids, canonical }) = serde_json::from_value(value) else {
             continue;
         };
         let canonical = canonical.trim();
         if canonical.is_empty() || canonical.chars().count() > 200 {
             continue;
         }
-        let mut ids: Vec<usize> = ids
-            .iter()
-            .filter_map(|id| id.as_u64().and_then(|id| usize::try_from(id).ok()))
-            .collect();
         let mut seen = HashSet::new();
         ids.retain(|id| seen.insert(*id));
         if ids.len() >= 2 {
