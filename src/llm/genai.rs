@@ -10,11 +10,11 @@ use tokio::time::sleep;
 use tracing::warn;
 
 use crate::config::Llm;
-use crate::domain::Article;
+use crate::domain::{Article, Candidate};
 use crate::models::{LlmAction, Sanitized};
 
 use super::triage::{TRIAGE_PROMPT, Verdict, parse_verdicts, triage_schema};
-use super::{SYSTEM_PROMPT, strip_code_fences, truncate};
+use super::{COLLAPSE_PROMPT, SYSTEM_PROMPT, strip_code_fences, truncate};
 
 const MAX_ATTEMPTS: usize = 3;
 /// A 429 is a tokens-per-minute window, so a short retry just burns more tokens.
@@ -111,6 +111,34 @@ pub(crate) async fn triage_batch(
     let options = json_options(2048, triage_schema(), structured);
     let (text, calls) = chat_text(client, model, request, &options).await;
     (text.and_then(|text| parse_verdicts(&text)), calls)
+}
+
+/// Names and dates only: the model needs no article text to spot alias variants.
+pub(crate) async fn collapse_batch(
+    client: &Client,
+    model: &str,
+    candidates: &[Candidate],
+) -> (AnyResult<String>, usize) {
+    let records: Vec<Value> = candidates
+        .iter()
+        .enumerate()
+        .map(|(id, c)| {
+            json!({
+                "id": id,
+                "name": c.establishment,
+                "date": c.action_date,
+                "type": c.action_type.to_string(),
+            })
+        })
+        .collect();
+    let user = match serde_json::to_string(&json!({"records": records})) {
+        Ok(user) => user,
+        Err(error) => return (Err(error).context("serialize collapse batch"), 0),
+    };
+    let request = ChatRequest::from_system(COLLAPSE_PROMPT).append_message(ChatMessage::user(user));
+    // Groq rejects top-level array schemas; the response is parsed by hand anyway.
+    let options = json_options(1024, json!({}), false);
+    chat_text(client, model, request, &options).await
 }
 
 /// The model returns chunk-local indices; `absolute` resolves them and drops out-of-range values.

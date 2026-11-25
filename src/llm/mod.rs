@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use anyhow::{Result as AnyResult, anyhow};
+use anyhow::{Context, Result as AnyResult, anyhow};
+use serde_json::Value;
 use tokio::time::sleep;
 use tracing::{debug, info, instrument, warn};
 
@@ -10,6 +11,8 @@ use crate::domain::{Article, Candidate};
 use crate::report::RunMetrics;
 
 pub const SYSTEM_PROMPT: &str = include_str!("../prompts/system.txt");
+/// Best-effort alias resolution: the Rust matcher only knows consecutive initials.
+pub(crate) const COLLAPSE_PROMPT: &str = include_str!("../prompts/collapse.txt");
 
 /// Free models truncate long JSON output; keep extraction responses short.
 const EXTRACT_BATCH_SIZE: usize = 4;
@@ -135,8 +138,8 @@ async fn triage<'a>(
 pub(crate) async fn extract(config: &Config, items: &[Article]) -> AnyResult<Extraction> {
     let structured = config.llm.structured_output();
     let client = genai::client(&config.llm)?;
-    let (articles, mut metrics) =
-        triage(&client, &models_for(&config.llm), items, structured).await?;
+    let triage_models = models_for(&config.llm);
+    let (articles, mut metrics) = triage(&client, &triage_models, items, structured).await?;
     info!(relevant = articles.len(), total = items.len(), "llm triage");
     if articles.is_empty() {
         let degraded = metrics.triage_failures > 0;
@@ -192,6 +195,20 @@ pub(crate) async fn extract(config: &Config, items: &[Article]) -> AnyResult<Ext
         return Err(anyhow!("all llm batches failed"));
     }
 
+    if candidates.len() > 1
+        && let Some(model) = triage_models.first()
+    {
+        let (text, calls) = genai::collapse_batch(&client, model, &candidates).await;
+        metrics.extraction_calls += calls;
+        match text.and_then(|text| parse_collapse(&text)) {
+            Ok(groups) => apply_collapse(&mut candidates, &groups),
+            Err(error) => {
+                metrics.extraction_failures += 1;
+                warn!(error = %format!("{error:#}"), "collapse failed; keeping extracted names");
+            }
+        }
+    }
+
     info!(
         candidates = candidates.len(),
         failed_batches = failed,
@@ -212,6 +229,54 @@ pub(crate) async fn extract(config: &Config, items: &[Article]) -> AnyResult<Ext
         metrics,
         degraded,
     })
+}
+
+/// Candidate indices are batch-local; unknown ids and singleton groups are ignored.
+fn parse_collapse(text: &str) -> AnyResult<Vec<(Vec<usize>, String)>> {
+    let text = strip_code_fences(text);
+    let parsed: Value = serde_json::from_str(&text).context("parse collapse response")?;
+    let raw = match &parsed {
+        Value::Array(items) => items,
+        Value::Object(map) => map
+            .get("groups")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("collapse response missing \"groups\" array"))?,
+        _ => return Err(anyhow!("unexpected collapse response shape")),
+    };
+    let mut groups = Vec::new();
+    for value in raw {
+        let Some(object) = value.as_object() else {
+            continue;
+        };
+        let Some(canonical) = object.get("canonical").and_then(Value::as_str) else {
+            continue;
+        };
+        let canonical = canonical.trim();
+        if canonical.is_empty() || canonical.chars().count() > 200 {
+            continue;
+        }
+        let ids: Vec<usize> = object
+            .get("ids")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| id.as_u64().and_then(|id| usize::try_from(id).ok()))
+            .collect();
+        if ids.len() > 1 {
+            groups.push((ids, canonical.to_string()));
+        }
+    }
+    Ok(groups)
+}
+
+fn apply_collapse(candidates: &mut [Candidate], groups: &[(Vec<usize>, String)]) {
+    for (ids, canonical) in groups {
+        for &id in ids {
+            if let Some(candidate) = candidates.get_mut(id) {
+                candidate.establishment = canonical.clone();
+            }
+        }
+    }
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -237,10 +302,13 @@ fn strip_code_fences(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract, extraction_models, models_for, verdict_article};
+    use super::{
+        apply_collapse, extract, extraction_models, models_for, parse_collapse, verdict_article,
+    };
     use crate::config::{Config, Llm, Persistence, SecretString};
     use crate::domain::Article;
     use crate::llm::triage::Verdict;
+    use crate::models::{ActionType, LlmAction, Sanitized};
 
     fn config() -> Config {
         Config {
@@ -319,6 +387,62 @@ mod tests {
     fn groq_disables_strict_json_schema() {
         assert!(!groq().structured_output());
         assert!(config().llm.structured_output());
+    }
+
+    #[test]
+    fn collapse_ignores_bad_and_singleton_groups() {
+        let groups = parse_collapse(
+            r#"{"groups":[
+                {"ids":[0,2],"canonical":" National Sports Club of India "},
+                {"ids":[4],"canonical":"singleton"},
+                {"ids":[99,100],"canonical":"out of range"},
+                {"ids":[-1],"canonical":"negative"}
+            ]}"#,
+        )
+        .expect("parse collapse response");
+        assert_eq!(
+            groups,
+            vec![
+                (vec![0, 2], "National Sports Club of India".to_string()),
+                (vec![99, 100], "out of range".to_string()),
+            ],
+            "singletons and negative ids are dropped; range is checked at apply time"
+        );
+        assert!(parse_collapse("not json").is_err());
+    }
+
+    #[test]
+    fn collapse_renames_every_record_in_a_group() {
+        let action = LlmAction {
+            establishment: "NSCI".into(),
+            city: Some("Mumbai".into()),
+            action_type: ActionType::LicenceSuspension,
+            action_date: Some("2026-11-23".into()),
+            details: Some(
+                "licence suspended over cockroach infestation found during inspection".into(),
+            ),
+            ..Default::default()
+        };
+        let article = article("headline");
+        let mut candidates: Vec<_> = (0..2)
+            .map(|_| {
+                crate::domain::Candidate::try_new(Sanitized::new(action.clone()), &article)
+                    .expect("valid candidate")
+            })
+            .collect();
+
+        apply_collapse(
+            &mut candidates,
+            &[(vec![0, 1, 99], "National Sports Club of India".into())],
+        );
+
+        assert!(
+            candidates
+                .iter()
+                .all(|c| c.establishment == "National Sports Club of India"),
+            "both aliases become the canonical name so the store can dedup them; \
+             an out-of-range id is ignored"
+        );
     }
 
     #[tokio::test]

@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result as AnyResult};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::{Value, json};
 
 use crate::domain::{Candidate, EventKey};
@@ -80,15 +80,23 @@ impl LocalWriter {
         let mut records = Self::read_records(&self.path)?;
         let mut outcome = StoreOutcome::default();
         for row in rows {
-            let date = row.action_date.to_string();
             let key = EventKey::from_candidate(row);
+            let action_type = row.action_type.to_string();
             let duplicate = records.iter().any(|record| {
-                record.get("source_url").and_then(Value::as_str) == Some(row.source_url.as_str())
+                let Some(date) = record
+                    .get("action_date")
+                    .and_then(Value::as_str)
+                    .and_then(|raw| NaiveDate::parse_from_str(raw, "%Y-%m-%d").ok())
+                else {
+                    return false;
+                };
+                (date - row.action_date).num_days().abs() <= 10
+                    && record.get("action_type").and_then(Value::as_str)
+                        == Some(action_type.as_str())
                     && record
                         .get("establishment")
                         .and_then(Value::as_str)
                         .is_some_and(|name| key.matches(&EventKey::from_name(name)))
-                    && record.get("action_date").and_then(Value::as_str) == Some(date.as_str())
             });
             if duplicate {
                 outcome.skipped += 1;
@@ -147,12 +155,12 @@ mod tests {
     use crate::domain::Article;
     use crate::models::{ActionType, LlmAction, Sanitized};
 
-    fn candidate(url: &str, establishment: &str) -> Candidate {
+    fn candidate_on(url: &str, establishment: &str, date: &str) -> Candidate {
         let action = LlmAction {
             establishment: establishment.into(),
             city: Some("Mumbai".into()),
             action_type: ActionType::Inspection,
-            action_date: Some("2026-08-11".into()),
+            action_date: Some(date.into()),
             details: Some(
                 "licence suspended over cockroach infestation found during inspection".into(),
             ),
@@ -166,6 +174,10 @@ mod tests {
             snippet: None,
         };
         Candidate::try_new(Sanitized::new(action), &article).expect("valid candidate")
+    }
+
+    fn candidate(url: &str, establishment: &str) -> Candidate {
+        candidate_on(url, establishment, "2026-08-11")
     }
 
     #[test]
@@ -197,6 +209,35 @@ mod tests {
         assert_eq!((first.inserted, second.skipped), (1, 1));
         assert!(seen.contains("https://example.test/1"));
 
+        let _ = remove_file(&path);
+    }
+
+    #[test]
+    fn dedups_one_event_across_urls_and_nearby_dates() {
+        let path = temp_dir().join(format!("fda-local-cross-{}.jsonl", id()));
+        let _ = remove_file(&path);
+        let writer = LocalWriter::new(path.clone());
+
+        let first = writer
+            .upsert_actions(&[candidate_on(
+                "https://example.test/1",
+                "National Sports Club of India",
+                "2026-08-11",
+            )])
+            .expect("first write");
+        let second = writer
+            .upsert_actions(&[candidate_on(
+                "https://example.test/2",
+                "National Sports Club of India (NSCI)",
+                "2026-08-13",
+            )])
+            .expect("second write");
+
+        assert_eq!(
+            (first.inserted, second.skipped),
+            (1, 1),
+            "a re-report by another outlet is one event, as in the Postgres store"
+        );
         let _ = remove_file(&path);
     }
 }
