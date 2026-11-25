@@ -5,7 +5,7 @@ use serde::Serialize;
 use strum::{EnumIter, IntoEnumIterator};
 
 use crate::error::Rejection;
-use crate::models::{ActionType, LlmAction, NewsItem, OutletType, Sanitized};
+use crate::models::{ActionType, NewsItem, OutletType, SanitizedAction, haystack};
 use crate::rules::rules;
 
 /// The only cities this tracker covers.
@@ -14,20 +14,30 @@ pub enum CoveredCity {
     Mumbai,
     Pune,
     Thane,
+    #[serde(rename = "Navi Mumbai")]
     NaviMumbai,
     Lonavala,
 }
 
 impl CoveredCity {
-    /// Accepts locality qualifiers ("Mumbai Suburban") but not prefix lookalikes ("Mumbaiwadi").
+    /// Accepts locality qualifiers ("Mumbai Suburban"), punctuation variants
+    /// ("Mumbai.", "Navi-Mumbai") and legacy local JSON ("NaviMumbai"), but
+    /// not prefix lookalikes ("Mumbaiwadi").
     pub fn parse(raw: &str) -> Option<Self> {
-        let value = raw.trim().to_lowercase();
+        let compact = |value: &str| {
+            value
+                .to_lowercase()
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .collect::<String>()
+        };
+        let value = compact(raw);
         Self::iter()
             .filter(|city| {
-                let name = city.as_str().to_lowercase();
+                let name = compact(city.as_str());
                 value
                     .strip_prefix(&name)
-                    .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+                    .is_some_and(|rest| rest.is_empty() || rest == "suburban")
             })
             .max_by_key(|city| city.as_str().len())
     }
@@ -65,13 +75,7 @@ impl Article {
     }
 
     pub fn haystack(&self) -> String {
-        format!(
-            "{} {} {}",
-            self.title,
-            self.snippet.as_deref().unwrap_or(""),
-            self.source.as_deref().unwrap_or("")
-        )
-        .to_lowercase()
+        haystack(&self.title, self.snippet.as_deref(), self.source.as_deref())
     }
 }
 
@@ -80,30 +84,106 @@ impl Article {
 #[allow(clippy::manual_non_exhaustive)]
 #[derive(Debug, Clone, Serialize)]
 pub struct Candidate {
-    pub establishment: String,
-    pub area: Option<String>,
-    pub city: CoveredCity,
-    pub brand: Option<String>,
-    pub operator: Option<String>,
-    pub outlet_type: Option<OutletType>,
-    pub action_type: ActionType,
-    pub action_date: NaiveDate,
-    pub violations: Vec<String>,
-    pub compliance_score: Option<i32>,
-    pub fssai_number: Option<String>,
-    pub details: Option<String>,
-    pub platforms: Vec<String>,
-    pub source_url: String,
-    pub source_publisher: Option<String>,
-    pub source_headline: Option<String>,
-    pub published_at: Option<DateTime<Utc>>,
+    establishment: String,
+    area: Option<String>,
+    city: CoveredCity,
+    brand: Option<String>,
+    operator: Option<String>,
+    outlet_type: Option<OutletType>,
+    action_type: ActionType,
+    action_date: NaiveDate,
+    violations: Vec<String>,
+    compliance_score: Option<i32>,
+    fssai_number: Option<String>,
+    details: Option<String>,
+    platforms: Vec<String>,
+    source_url: String,
+    source_publisher: Option<String>,
+    source_headline: Option<String>,
+    published_at: Option<DateTime<Utc>>,
     #[serde(skip)]
     _sealed: (),
 }
 
 impl Candidate {
+    pub fn establishment(&self) -> &str {
+        &self.establishment
+    }
+
+    pub fn area(&self) -> Option<&str> {
+        self.area.as_deref()
+    }
+
+    pub fn city(&self) -> CoveredCity {
+        self.city
+    }
+
+    pub fn brand(&self) -> Option<&str> {
+        self.brand.as_deref()
+    }
+
+    pub fn operator(&self) -> Option<&str> {
+        self.operator.as_deref()
+    }
+
+    pub fn outlet_type(&self) -> Option<OutletType> {
+        self.outlet_type
+    }
+
+    pub fn action_type(&self) -> ActionType {
+        self.action_type
+    }
+
+    pub fn action_date(&self) -> NaiveDate {
+        self.action_date
+    }
+
+    pub fn violations(&self) -> &[String] {
+        &self.violations
+    }
+
+    pub fn compliance_score(&self) -> Option<i32> {
+        self.compliance_score
+    }
+
+    pub fn fssai_number(&self) -> Option<&str> {
+        self.fssai_number.as_deref()
+    }
+
+    pub fn details(&self) -> Option<&str> {
+        self.details.as_deref()
+    }
+
+    pub fn platforms(&self) -> &[String] {
+        &self.platforms
+    }
+
+    pub fn source_url(&self) -> &str {
+        &self.source_url
+    }
+
+    pub fn source_publisher(&self) -> Option<&str> {
+        self.source_publisher.as_deref()
+    }
+
+    pub fn source_headline(&self) -> Option<&str> {
+        self.source_headline.as_deref()
+    }
+
+    pub fn published_at(&self) -> Option<DateTime<Utc>> {
+        self.published_at
+    }
+
+    /// Re-validates an LLM-supplied canonical name before replacing the outlet name.
+    pub(crate) fn set_establishment(&mut self, name: String) -> Result<(), Rejection> {
+        let name = nonempty(Some(name.as_str())).ok_or(Rejection::NoEstablishment)?;
+        check_establishment(&name, self.details())?;
+        self.establishment = name;
+        Ok(())
+    }
+
     /// Unknown outlet codes become `None` because the DB column is nullable.
-    pub fn try_new(action: Sanitized<LlmAction>, article: &Article) -> Result<Self, Rejection> {
+    pub fn try_new(action: SanitizedAction, article: &Article) -> Result<Self, Rejection> {
         let action = action.into_inner();
         let establishment =
             nonempty(Some(action.establishment.as_str())).ok_or(Rejection::NoEstablishment)?;
@@ -117,30 +197,10 @@ impl Candidate {
             .ok_or(Rejection::NoActionDate)?;
         let details = nonempty(action.details.as_deref());
 
-        let config = &rules().quality;
-        let lower = establishment.to_lowercase();
-        let hay = format!(
-            "{lower} {}",
-            details.as_deref().unwrap_or("").to_lowercase()
-        );
-        if lower.starts_with(['\'', '"', '‘', '“']) {
-            return Err(Rejection::QuoteLedEstablishment);
-        }
-        if config.no_action_yet.iter().any(|w| hay.contains(w)) {
-            return Err(Rejection::PendingAction);
-        }
-        if config.product_words.iter().any(|w| lower.contains(w)) {
-            return Err(Rejection::ProductNotOutlet);
-        }
-        if config.regulator_words.iter().any(|w| lower.contains(w)) {
-            return Err(Rejection::RegulatorNotOutlet);
-        }
-        if establishment.split_whitespace().count() > config.max_establishment_words {
-            return Err(Rejection::HeadlineFragment);
-        }
+        check_establishment(&establishment, details.as_deref())?;
         if details
             .as_deref()
-            .is_none_or(|d| d.chars().count() < config.min_details_chars)
+            .is_none_or(|d| d.chars().count() < rules().quality.min_details_chars)
         {
             return Err(Rejection::NoSubstantiveDetails);
         }
@@ -179,21 +239,95 @@ fn nonempty(v: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Shared by first extraction and the LLM alias-collapse rewrite, so a
+/// canonical name cannot bypass the gates that guard the original name.
+fn check_establishment(name: &str, details: Option<&str>) -> Result<(), Rejection> {
+    let config = &rules().quality;
+    let lower = name.to_lowercase();
+    let hay = format!("{lower} {}", details.unwrap_or("").to_lowercase());
+    if name.starts_with(['\'', '"', '‘', '“']) {
+        return Err(Rejection::QuoteLedEstablishment);
+    }
+    if config.no_action_yet.iter().any(|w| hay.contains(w)) {
+        return Err(Rejection::PendingAction);
+    }
+    if config.product_words.iter().any(|w| lower.contains(w)) {
+        return Err(Rejection::ProductNotOutlet);
+    }
+    if config.regulator_words.iter().any(|w| lower.contains(w)) {
+        return Err(Rejection::RegulatorNotOutlet);
+    }
+    if name.chars().count() > 200
+        || name.split_whitespace().count() > config.max_establishment_words
+    {
+        return Err(Rejection::HeadlineFragment);
+    }
+    Ok(())
+}
+
+/// A missing area is uncertainty; a named one must be corroborated by the
+/// other report's establishment name (directly or via an acronym like "BKC").
+pub(crate) fn area_in_name(area: &str, name: &str) -> bool {
+    const GENERIC_WORDS: [&str; 7] = [
+        "club",
+        "facility",
+        "canteen",
+        "restaurant",
+        "hotel",
+        "outlet",
+        "kitchen",
+    ];
+    let tokens = |s: &str| -> Vec<String> {
+        s.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|t| !t.is_empty() && !GENERIC_WORDS.contains(t))
+            .map(str::to_string)
+            .collect()
+    };
+    let area = tokens(area);
+    if area.is_empty() {
+        return true;
+    }
+    let name = tokens(name);
+    area.iter().all(|t| name.contains(t))
+        || name.iter().any(|t| {
+            !t.is_empty()
+                && t.chars().count() <= area.len()
+                && t.chars().zip(&area).all(|(c, w)| w.starts_with(c))
+        })
+}
+
 /// Outlet identity used to detect the same action across reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventKey {
     pub establishment: String,
+    pub city: Option<CoveredCity>,
+    pub area: Option<String>,
 }
 
 impl EventKey {
     pub fn from_name(name: &str) -> Self {
         Self {
             establishment: name.to_string(),
+            city: None,
+            area: None,
+        }
+    }
+
+    pub fn from_row(name: &str, city: Option<&str>, area: Option<&str>) -> Self {
+        Self {
+            establishment: name.to_string(),
+            city: city.and_then(CoveredCity::parse),
+            area: nonempty(area),
         }
     }
 
     pub fn from_candidate(c: &Candidate) -> Self {
-        Self::from_name(&c.establishment)
+        Self {
+            establishment: c.establishment().to_string(),
+            city: Some(c.city()),
+            area: c.area().map(str::to_string),
+        }
     }
 
     /// Exact, containment for 6+ char names, or token/acronym match with a 3+ char word in common.
@@ -234,6 +368,34 @@ impl EventKey {
                 .collect::<Vec<_>>()
                 .join(" ")
         };
+
+        // Both-known or one-known: a city mismatch is hard evidence against a
+        // match. Both-unknown stays compatible for legacy rows and test helpers.
+        if self.city != other.city {
+            return false;
+        }
+        // Locality is only used to REJECT a match. Appending it to the name
+        // would break acronym matching ("BKC" vs "Bandra Kurla Complex").
+        match (self.area.as_deref(), other.area.as_deref()) {
+            (Some(a), Some(b)) => {
+                let (a, b) = (norm(a), norm(b));
+                if a != b && !a.contains(&b) && !b.contains(&a) {
+                    return false;
+                }
+            }
+            (Some(area), None) => {
+                if !area_in_name(area, &other.establishment) {
+                    return false;
+                }
+            }
+            (None, Some(area)) => {
+                if !area_in_name(area, &self.establishment) {
+                    return false;
+                }
+            }
+            (None, None) => {}
+        }
+
         let (a, b) = (norm(&self.establishment), norm(&other.establishment));
         if a == b {
             return true;
@@ -257,7 +419,7 @@ mod tests {
     use test_case::test_case;
 
     use super::*;
-    use crate::models::{ActionType, LlmAction, Sanitized};
+    use crate::models::{ActionType, LlmAction, SanitizedAction};
 
     const FULL: &str = "licence suspended over cockroach infestation found during inspection";
 
@@ -323,6 +485,123 @@ mod tests {
         );
     }
 
+    #[test]
+    fn matching_rejects_same_brand_in_different_areas() {
+        let borivali = EventKey::from_row("Domino's Pizza", Some("Mumbai"), Some("Borivali West"));
+        let ghatkopar =
+            EventKey::from_row("Domino's Pizza", Some("Mumbai"), Some("Ghatkopar West"));
+        assert!(
+            !borivali.matches(&ghatkopar),
+            "area fields name different branches"
+        );
+    }
+
+    #[test]
+    fn matching_uses_area_when_the_name_lacks_it() {
+        let with_area = EventKey::from_row("Domino's", Some("Mumbai"), Some("Ghatkopar West"));
+        let in_name = EventKey::from_row("Domino's Pizza, Ghatkopar West", Some("Mumbai"), None);
+        assert!(
+            with_area.matches(&in_name),
+            "locality in the name is as good as an area field"
+        );
+    }
+
+    #[test]
+    fn matching_rejects_different_cities() {
+        let mumbai = EventKey::from_row("Domino's Pizza", Some("Mumbai"), Some("Bandra West"));
+        let pune = EventKey::from_row("Domino's Pizza", Some("Pune"), Some("Bandra West"));
+        assert!(
+            !mumbai.matches(&pune),
+            "identical outlets in different cities are different events"
+        );
+        let unknown = EventKey::from_row("Domino's Pizza", None, Some("Bandra West"));
+        assert!(
+            !unknown.matches(&mumbai),
+            "a legacy row with no city must not merge into a known city"
+        );
+    }
+
+    #[test]
+    fn matching_survives_acronym_drift_with_locality() {
+        let short = EventKey::from_row("MCA BKC Club", Some("Mumbai"), None);
+        let full = EventKey::from_row(
+            "Mumbai Cricket Association (BKC Facility)",
+            Some("Mumbai Suburban"),
+            None,
+        );
+        assert!(
+            short.matches(&full),
+            "acronym and venue drift still match with city evidence"
+        );
+    }
+
+    #[test]
+    fn matching_survives_acronym_when_area_expands_it() {
+        let short =
+            EventKey::from_row("MCA BKC Club", Some("Mumbai"), Some("Bandra Kurla Complex"));
+        let full = EventKey::from_row(
+            "Mumbai Cricket Association (BKC Facility)",
+            Some("Mumbai Suburban"),
+            None,
+        );
+        assert!(
+            short.matches(&full),
+            "a multi-word area must not break the BKC acronym match"
+        );
+    }
+
+    #[test]
+    fn matching_rejects_conflicting_area_fields() {
+        let borivali = EventKey::from_row(
+            "Domino's Pizza Borivali West",
+            Some("Mumbai"),
+            Some("Borivali West"),
+        );
+        let ghatkopar = EventKey::from_row(
+            "Domino's Pizza Borivali West",
+            Some("Mumbai"),
+            Some("Ghatkopar West"),
+        );
+        assert!(
+            !borivali.matches(&ghatkopar),
+            "contradictory area fields are different branches"
+        );
+    }
+
+    #[test]
+    fn matching_rejects_area_contradicted_by_the_other_name() {
+        let with_area = EventKey::from_row("Domino's Pizza", Some("Mumbai"), Some("Borivali West"));
+        let other_branch =
+            EventKey::from_row("Domino's Pizza Ghatkopar West", Some("Mumbai"), None);
+        assert!(
+            !with_area.matches(&other_branch),
+            "a named locality must appear in an area-less report"
+        );
+    }
+
+    #[test]
+    fn city_parse_accepts_punctuation_and_legacy_local_values() {
+        for raw in ["Mumbai.", "Navi-Mumbai", "NaviMumbai", "Mumbai Suburban"] {
+            assert!(
+                CoveredCity::parse(raw).is_some(),
+                "{raw} is a known city spelling"
+            );
+        }
+        assert!(CoveredCity::parse("Mumbaiwadi").is_none());
+    }
+
+    #[test]
+    fn set_establishment_reruns_the_content_gates() {
+        let mut candidate = candidate("Domino's Vile Parle", Some(FULL)).expect("valid candidate");
+        assert!(
+            candidate
+                .set_establishment("Ayurvedic Tablet".into())
+                .is_err(),
+            "the product-name gate applies to LLM canonical names too"
+        );
+        assert_eq!(candidate.establishment(), "Domino's Vile Parle");
+    }
+
     fn article() -> Article {
         Article {
             title: "source headline".into(),
@@ -341,7 +620,7 @@ mod tests {
             details: details.map(str::to_string),
             ..Default::default()
         };
-        Candidate::try_new(Sanitized::new(action), &article())
+        Candidate::try_new(SanitizedAction::new(action), &article())
     }
 
     #[test_case("Domino's Vile Parle", Some(FULL), Ok(()); "complete record")]
@@ -374,6 +653,53 @@ mod tests {
             ),
             ..Default::default()
         };
-        assert!(Candidate::try_new(Sanitized::new(action), &article()).is_ok());
+        assert!(Candidate::try_new(SanitizedAction::new(action), &article()).is_ok());
+    }
+
+    #[test]
+    fn covered_city_serializes_navi_mumbai_with_space() {
+        assert_eq!(
+            serde_json::to_string(&CoveredCity::NaviMumbai).expect("serialize city"),
+            "\"Navi Mumbai\""
+        );
+    }
+
+    #[test]
+    fn event_key_from_candidate_keeps_locality() {
+        let action = LlmAction {
+            establishment: "Domino's".into(),
+            area: Some("Ghatkopar West".into()),
+            city: Some("Navi Mumbai".into()),
+            action_date: Some("2026-08-11".into()),
+            details: Some(FULL.into()),
+            ..Default::default()
+        };
+        let c =
+            Candidate::try_new(SanitizedAction::new(action), &article()).expect("valid candidate");
+        let key = EventKey::from_candidate(&c);
+        assert_eq!(key.establishment, "Domino's");
+        assert_eq!(key.city, Some(CoveredCity::NaviMumbai));
+        assert_eq!(key.area.as_deref(), Some("Ghatkopar West"));
+    }
+
+    #[test_case("  Domino's Vile Parle  ", Ok(()); "trims")]
+    #[test_case("   ", Err(Rejection::NoEstablishment); "blank")]
+    #[test_case("\"Quoted outlet\"", Err(Rejection::QuoteLedEstablishment); "leading quote")]
+    #[test_case("one two three four five six seven eight nine ten", Err(Rejection::HeadlineFragment); "too many words")]
+    fn set_establishment_revalidates(name: &str, expected: Result<(), Rejection>) {
+        let mut c = candidate("Domino's Vile Parle", Some(FULL)).expect("valid candidate");
+        assert_eq!(c.set_establishment(name.to_string()), expected, "{name}");
+        if expected.is_ok() {
+            assert_eq!(c.establishment(), name.trim());
+        }
+    }
+
+    #[test]
+    fn set_establishment_rejects_overlong_name() {
+        let mut c = candidate("Domino's Vile Parle", Some(FULL)).expect("valid candidate");
+        assert_eq!(
+            c.set_establishment("x".repeat(201)),
+            Err(Rejection::HeadlineFragment)
+        );
     }
 }

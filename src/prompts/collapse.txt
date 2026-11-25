@@ -1,8 +1,10 @@
 You group food-safety enforcement records that describe the SAME real-world event at the SAME outlet.
 
-Input JSON: {"records":[{"id":0,"name":"...","date":"YYYY-MM-DD","type":"licence_suspension"}, ...]}
+Input JSON: {"records":[{"id":0,"name":"...","area":"...","city":"Mumbai","date":"YYYY-MM-DD","type":"licence_suspension"}, ...]}
 
-One outlet is often named differently across reports: an acronym ("NSCI") vs the full name ("National Sports Club of India"), a locality suffix ("NSCI Worli"), a venue word ("Club" / "Facility" / "Canteen"), or punctuation. Group those when the dates are within a few days and the action types match.
+"area" and "city" are the recorded locality of each outlet. Use them as evidence: never group records from different cities, and never group records with conflicting areas/localities. An empty or missing area means uncertainty — only group such a record when the other record's name itself names that locality (or its acronym, e.g. "BKC" for "Bandra Kurla Complex").
+
+One outlet is often named differently across reports: an acronym ("NSCI") vs the full name ("National Sports Club of India"), a locality suffix ("NSCI Worli"), a venue word ("Club" / "Facility" / "Canteen"), or punctuation. Group those when the dates are within 10 days and the action types match.
 
 Never group different branches of a chain, unrelated outlets that share a word, or the same outlet acted against months apart. When unsure whether two records are the same outlet, do not group them.
 

@@ -4,7 +4,7 @@ use std::future::Future;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use anyhow::{Context, Result as AnyResult};
+use anyhow::{Context, Result as AnyResult, bail};
 use chrono::{DateTime, Utc};
 use rss::Channel;
 use scraper::{Html, Selector};
@@ -56,7 +56,9 @@ fn description_snippet(raw: &str) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
-async fn fan_out<T, Fut>(concurrency: usize, jobs: Vec<Fut>) -> Vec<T>
+/// Returns successful outputs and the number of tasks that panicked, so a
+/// dropped query still counts as a failure instead of vanishing from the run.
+async fn fan_out<T, Fut>(concurrency: usize, jobs: Vec<Fut>) -> (Vec<T>, usize)
 where
     Fut: Future<Output = T> + Send + 'static,
     T: Send + 'static,
@@ -71,13 +73,46 @@ where
         }));
     }
     let mut out = Vec::with_capacity(handles.len());
+    let mut dropped = 0;
     for h in handles {
         match h.await {
             Ok(v) => out.push(v),
-            Err(e) => error!("fan-out task failed: {e}"),
+            Err(e) => {
+                error!("fan-out task failed: {e}");
+                dropped += 1;
+            }
         }
     }
-    out
+    (out, dropped)
+}
+
+/// Reject a chunk that would push the accumulated body past MAX_ARTICLE_BYTES.
+fn check_body_growth(accumulated: u64, chunk_len: usize) -> AnyResult<()> {
+    let chunk_len = u64::try_from(chunk_len).context("chunk length overflow")?;
+    let total = accumulated
+        .checked_add(chunk_len)
+        .context("body length overflow")?;
+    if total > MAX_ARTICLE_BYTES {
+        bail!("body too large");
+    }
+    Ok(())
+}
+
+/// Read incrementally: Content-Length is advisory and a missing/large value must not OOM the run.
+async fn read_body(mut resp: reqwest::Response) -> AnyResult<Vec<u8>> {
+    if resp.content_length().is_some_and(|n| n > MAX_ARTICLE_BYTES) {
+        bail!("response too large");
+    }
+    let mut bytes = Vec::new();
+    loop {
+        let Some(chunk) = resp.chunk().await.context("read body chunk")? else {
+            break;
+        };
+        let accumulated = u64::try_from(bytes.len()).context("body length overflow")?;
+        check_body_growth(accumulated, chunk.len())?;
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }
 
 /// One retry covers transient 503 storms; a sustained block shows up as seen=0.
@@ -100,13 +135,9 @@ async fn fetch_feed_once(client: &reqwest::Client, url: &str) -> AnyResult<Vec<N
         .await
         .context("rss get")?
         .error_for_status()?;
-    if resp.content_length().is_some_and(|n| n > MAX_ARTICLE_BYTES) {
-        anyhow::bail!("rss feed too large: {url}");
-    }
-    let bytes = resp.bytes().await.context("rss bytes")?;
-    if u64::try_from(bytes.len()).is_ok_and(|len| len > MAX_ARTICLE_BYTES) {
-        anyhow::bail!("rss feed too large: {url}");
-    }
+    let bytes = read_body(resp)
+        .await
+        .with_context(|| format!("rss feed: {url}"))?;
     let channel = Channel::read_from(&bytes[..]).context("rss parse")?;
     let mut items = Vec::new();
     for it in channel.into_items() {
@@ -135,8 +166,34 @@ async fn fetch_feed_once(client: &reqwest::Client, url: &str) -> AnyResult<Vec<N
     Ok(items)
 }
 
+#[derive(Debug)]
+pub(crate) struct FetchReport {
+    pub items: Vec<NewsItem>,
+    pub successful_queries: usize,
+    pub failed_queries: usize,
+}
+
+/// Split fan-out results into items and errors, counting only completed successes.
+fn collect_feeds<T>(
+    results: impl IntoIterator<Item = AnyResult<Vec<T>>>,
+) -> (Vec<T>, usize, Vec<anyhow::Error>) {
+    let mut items = Vec::new();
+    let mut successful = 0;
+    let mut errors = Vec::new();
+    for result in results {
+        match result {
+            Ok(found) => {
+                successful += 1;
+                items.extend(found);
+            }
+            Err(e) => errors.push(e),
+        }
+    }
+    (items, successful, errors)
+}
+
 #[instrument(skip(client))]
-pub(crate) async fn fetch_items(client: &reqwest::Client) -> AnyResult<Vec<NewsItem>> {
+pub(crate) async fn fetch_items(client: &reqwest::Client) -> AnyResult<FetchReport> {
     let jobs = rules()
         .news
         .queries
@@ -147,22 +204,27 @@ pub(crate) async fn fetch_items(client: &reqwest::Client) -> AnyResult<Vec<NewsI
             async move { fetch_feed(&client, &url).await }
         })
         .collect();
-    let mut items: Vec<NewsItem> = Vec::new();
-    for res in fan_out(RSS_CONCURRENCY, jobs).await {
-        match res {
-            Ok(found) => items.extend(found),
-            Err(e) => warn!("rss query failed: {e}"),
-        }
+    let (results, dropped) = fan_out(RSS_CONCURRENCY, jobs).await;
+    let (mut items, successful_queries, errors) = collect_feeds(results);
+    let failed_queries = errors.len() + dropped;
+    for e in errors {
+        warn!("rss query failed: {e}");
     }
     let fetched = items.len();
     let mut seen = HashSet::new();
     items.retain(|item| seen.insert(item.url.clone()));
     info!(
-        "rss: {fetched} hits from {} queries, {} distinct article URLs",
+        "rss: {fetched} hits from {} queries ({} ok, {} failed), {} distinct article URLs",
         rules().news.queries.len(),
+        successful_queries,
+        failed_queries,
         items.len()
     );
-    Ok(items)
+    Ok(FetchReport {
+        items,
+        successful_queries,
+        failed_queries,
+    })
 }
 
 fn enforcement_score(item: &NewsItem) -> u32 {
@@ -195,6 +257,35 @@ fn select_for_enrichment(mut items: Vec<NewsItem>, max_items: usize) -> Vec<News
     });
     items.truncate(max_items);
     items
+}
+
+/// Publisher redirects change the stored URL (source_url is the FINAL url),
+/// so compare a conservative fingerprint: scheme, `www.`, fragment, trailing
+/// slash and `/amp` are ignored, while host, path and query are preserved.
+fn url_fingerprint(url: &str) -> String {
+    let lower = url.trim().to_lowercase();
+    let without_scheme = lower
+        .split_once("://")
+        .map_or(lower.as_str(), |(_, rest)| rest);
+    let without_fragment = without_scheme.split('#').next().unwrap_or(without_scheme);
+    let without_www = without_fragment
+        .strip_prefix("www.")
+        .unwrap_or(without_fragment);
+    without_www
+        .strip_suffix("/amp")
+        .unwrap_or(without_www)
+        .trim_end_matches('/')
+        .to_string()
+}
+
+/// Filter before ranking so already-seen articles never consume the max_items budget.
+fn select_unseen(items: Vec<NewsItem>, seen: &HashSet<String>, max_items: usize) -> Vec<NewsItem> {
+    let seen_keys: HashSet<String> = seen.iter().map(|url| url_fingerprint(url)).collect();
+    let fresh = items
+        .into_iter()
+        .filter(|item| !seen_keys.contains(&url_fingerprint(&item.url)))
+        .collect();
+    select_for_enrichment(fresh, max_items)
 }
 
 static OG_TITLE_SEL: OnceLock<Selector> = OnceLock::new();
@@ -270,14 +361,9 @@ async fn fetch_article(client: &reqwest::Client, url: &str) -> AnyResult<Fetched
         .with_context(|| format!("article get: {url}"))?
         .error_for_status()?;
     let final_url = resp.url().to_string();
-    if resp.content_length().is_some_and(|n| n > MAX_ARTICLE_BYTES) {
-        anyhow::bail!("article too large: {url}");
-    }
-    let bytes = resp.bytes().await.context("article body")?;
-    // Content-Length is advisory; reject an oversized body after the read too.
-    if u64::try_from(bytes.len()).is_ok_and(|len| len > MAX_ARTICLE_BYTES) {
-        anyhow::bail!("article too large: {url}");
-    }
+    let bytes = read_body(resp)
+        .await
+        .with_context(|| format!("article: {url}"))?;
     let text = String::from_utf8_lossy(&bytes);
     Ok(FetchedArticle {
         final_url,
@@ -301,13 +387,19 @@ pub(crate) async fn enrich(
     items: Vec<NewsItem>,
     seen: &HashSet<String>,
     max_items: usize,
-) -> Vec<Article> {
+) -> (Vec<Article>, usize) {
     let available = items.len();
-    let items = select_for_enrichment(items, max_items);
+    let seen_keys: HashSet<String> = seen.iter().map(|url| url_fingerprint(url)).collect();
+    let already_seen = items
+        .iter()
+        .filter(|item| seen_keys.contains(&url_fingerprint(&item.url)))
+        .count();
+    let items = select_unseen(items, seen, max_items);
     info!(
-        "article enrichment: selected {}/{} highest-signal RSS items",
+        "article enrichment: selected {}/{} highest-signal RSS items ({} already seen)",
         items.len(),
-        available
+        available,
+        already_seen
     );
     let jobs = items
         .into_iter()
@@ -321,15 +413,17 @@ pub(crate) async fn enrich(
             }
         })
         .collect();
-    let mut results = fan_out(FETCH_CONCURRENCY, jobs).await;
+    let (mut results, dropped) = fan_out(FETCH_CONCURRENCY, jobs).await;
     results.sort_by_key(|(i, _, _)| *i);
 
+    let mut failures = dropped;
     let mut out: Vec<Article> = Vec::with_capacity(results.len());
     let mut urls: HashSet<String> = HashSet::new();
     for (_, item, res) in results {
         let fetched = match res {
             Ok(fetched) => Some(fetched),
             Err(e) => {
+                failures += 1;
                 warn!("article fetch failed ({}): {e}", item.url);
                 None
             }
@@ -346,17 +440,22 @@ pub(crate) async fn enrich(
             .unwrap_or(DateTime::<Utc>::MIN_UTC)
             .cmp(&a.published.unwrap_or(DateTime::<Utc>::MIN_UTC))
     });
-    out
+    (out, failures)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        FetchedArticle, article_url, canonical, description_snippet, extract_snippet,
-        select_for_enrichment,
+        FetchedArticle, MAX_ARTICLE_BYTES, article_url, canonical, check_body_growth,
+        collect_feeds, description_snippet, extract_snippet, select_for_enrichment, select_unseen,
+        url_fingerprint,
     };
-    use crate::models::NewsItem;
+    use std::collections::HashSet;
+
+    use anyhow::anyhow;
     use chrono::{Duration, Utc};
+
+    use crate::models::NewsItem;
 
     #[test]
     fn extract_snippet_leads_with_title_then_paragraphs() {
@@ -401,6 +500,82 @@ mod tests {
         };
         let selected = select_for_enrichment(vec![generic, action], 1);
         assert_eq!(selected[0].url, "https://example.test/action");
+    }
+
+    #[test]
+    fn body_growth_stops_at_the_byte_cap_and_on_overflow() {
+        assert!(
+            check_body_growth(MAX_ARTICLE_BYTES - 1, 1).is_ok(),
+            "a body exactly at the cap is allowed"
+        );
+        assert!(
+            check_body_growth(MAX_ARTICLE_BYTES, 1).is_err(),
+            "one byte past the cap is rejected"
+        );
+        assert!(
+            check_body_growth(u64::MAX, 1).is_err(),
+            "length overflow is rejected"
+        );
+    }
+
+    #[test]
+    fn collect_feeds_counts_partial_rss_failures() {
+        let (items, successful, errors) = collect_feeds(vec![
+            Ok(vec!["first"]),
+            Err(anyhow!("503")),
+            Ok(vec![]),
+            Err(anyhow!("timeout")),
+        ]);
+
+        assert_eq!(
+            items,
+            vec!["first"],
+            "only successful feeds contribute items"
+        );
+        assert_eq!(successful, 2, "empty successes still count as successful");
+        assert_eq!(errors.len(), 2, "each failed query is counted once");
+    }
+
+    #[test]
+    fn seen_items_do_not_consume_the_enrichment_budget() {
+        let now = Utc::now();
+        let generic = NewsItem {
+            title: "Maharashtra food trends this Diwali".into(),
+            url: "https://example.test/generic".into(),
+            source: None,
+            published: Some(now),
+            snippet: None,
+        };
+        let action = NewsItem {
+            title: "Maharashtra FDA orders restaurant to cease business after raid".into(),
+            url: "http://thehindu.com/news/action/".into(),
+            source: None,
+            published: Some(now - Duration::hours(2)),
+            snippet: None,
+        };
+        // Stored source_url is the final redirected URL; the RSS item is not.
+        let seen = HashSet::from(["https://www.thehindu.com/news/action".to_string()]);
+
+        let selected = select_unseen(vec![generic, action], &seen, 1);
+
+        assert_eq!(
+            selected[0].url, "https://example.test/generic",
+            "a redirected, already-seen item must not take the only slot"
+        );
+    }
+
+    #[test]
+    fn url_fingerprint_ignores_common_redirects_only() {
+        assert_eq!(
+            url_fingerprint("http://www.thehindu.com/news/story/?utm=1#top"),
+            url_fingerprint("https://thehindu.com/news/story/?utm=1"),
+            "scheme, www and fragment are redirect noise"
+        );
+        assert_ne!(
+            url_fingerprint("https://thehindu.com/news/story-a"),
+            url_fingerprint("https://thehindu.com/news/story-b"),
+            "different stories must never share a fingerprint"
+        );
     }
 
     #[test]

@@ -23,7 +23,7 @@ impl AppContext {
             .build()
             .context("build http client")?;
         let store: Box<dyn Store> = match &config.persistence {
-            Persistence::Postgres { .. } => Box::new(db::pool(config).await?),
+            Persistence::Postgres { url } => Box::new(db::pool(url).await?),
             Persistence::Local { path } => Box::new(LocalWriter::new(path.clone())),
         };
         Ok(Self { http, store })

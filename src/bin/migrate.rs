@@ -1,5 +1,7 @@
-use anyhow::Result as AnyResult;
-use fda_mumbai_tracker::config::Config;
+use std::env::var;
+
+use anyhow::{Context, Result as AnyResult, bail};
+use fda_mumbai_tracker::config::SecretString;
 use fda_mumbai_tracker::db;
 use fda_mumbai_tracker::init;
 use tracing::info;
@@ -7,8 +9,12 @@ use tracing::info;
 #[tokio::main]
 async fn main() -> AnyResult<()> {
     init();
-    let config = Config::from_env()?;
-    let pool = db::pool(&config).await?;
+    let raw = var("DATABASE_URL").context("DATABASE_URL is not set")?;
+    if raw.trim().is_empty() {
+        bail!("DATABASE_URL must not be empty");
+    }
+    let url = SecretString::new(raw);
+    let pool = db::pool(&url).await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
     info!("migrations applied");
     Ok(())

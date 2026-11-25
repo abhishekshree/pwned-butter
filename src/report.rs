@@ -6,6 +6,8 @@ pub struct RunMetrics {
     pub extraction_calls: usize,
     pub triage_failures: usize,
     pub extraction_failures: usize,
+    pub rss_failures: usize,
+    pub article_failures: usize,
     pub rejected: usize,
 }
 
@@ -32,6 +34,8 @@ impl RunReport {
             "extraction_calls": self.metrics.extraction_calls,
             "triage_failures": self.metrics.triage_failures,
             "extraction_failures": self.metrics.extraction_failures,
+            "rss_failures": self.metrics.rss_failures,
+            "article_failures": self.metrics.article_failures,
             "rejected": self.metrics.rejected,
             "degraded": self.degraded,
         });
@@ -47,5 +51,6 @@ impl RunReport {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct StoreOutcome {
     pub inserted: usize,
+    pub updated: usize,
     pub skipped: usize,
 }

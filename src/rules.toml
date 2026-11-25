@@ -18,7 +18,7 @@ max_establishment_words = 9
 min_details_chars = 20
 
 [news]
-# Google News search queries. A press note can name dozens of outlets, so
+# Bing News search queries. A press note can name dozens of outlets, so
 # missing a roundup costs more than fetching a few extra articles.
 queries = [
     "\"Maharashtra FDA\"",

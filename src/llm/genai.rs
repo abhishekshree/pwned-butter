@@ -11,7 +11,7 @@ use tracing::warn;
 
 use crate::config::{Llm, Provider};
 use crate::domain::{Article, Candidate};
-use crate::models::{LlmAction, Sanitized};
+use crate::models::{LlmAction, SanitizedAction};
 
 use super::triage::{TRIAGE_PROMPT, Verdict, parse_verdicts, triage_schema};
 use super::{COLLAPSE_PROMPT, SYSTEM_PROMPT, strip_code_fences, truncate};
@@ -68,17 +68,32 @@ async fn chat_text(
             },
             Err(error) => anyhow::anyhow!("genai request failed: {error}"),
         };
-        if attempt + 1 == MAX_ATTEMPTS {
+        let message = format!("{error:#}");
+        if !is_retryable(&message) || attempt + 1 == MAX_ATTEMPTS {
             return (Err(error), calls);
         }
-        let backoff = if format!("{error:#}").contains("429") {
+        let backoff = if message.contains("429") {
             RATE_LIMIT_PAUSE
         } else {
             Duration::from_secs(1 << attempt)
         };
         sleep(backoff).await;
     }
-    unreachable!("MAX_ATTEMPTS is nonzero")
+    (
+        Err(anyhow::anyhow!("genai request exhausted retries")),
+        calls,
+    )
+}
+
+/// Best-effort: genai errors are unstructured strings, not typed variants.
+fn is_retryable(message: &str) -> bool {
+    message.contains("429")
+        || message.contains("500")
+        || message.contains("502")
+        || message.contains("503")
+        || message.contains("504")
+        || message.to_lowercase().contains("timeout")
+        || message.to_lowercase().contains("timed out")
 }
 
 /// Titles plus a short snippet are enough to judge relevance. URLs cost ~30
@@ -114,25 +129,31 @@ pub(crate) async fn triage_batch(
     (text.and_then(|text| parse_verdicts(&text)), calls)
 }
 
-/// Names and dates only: the model needs no article text to spot alias variants.
-pub(crate) async fn collapse_batch(
-    client: &Client,
-    model: &str,
-    candidates: &[Candidate],
-) -> (AnyResult<String>, usize) {
+/// Names, dates and localities: the model needs no article text to spot aliases.
+fn collapse_payload(candidates: &[Candidate]) -> Value {
     let records: Vec<Value> = candidates
         .iter()
         .enumerate()
         .map(|(id, c)| {
             json!({
                 "id": id,
-                "name": c.establishment,
-                "date": c.action_date,
-                "type": c.action_type.to_string(),
+                "name": c.establishment(),
+                "city": c.city().as_str(),
+                "area": c.area(),
+                "date": c.action_date(),
+                "type": c.action_type().to_string(),
             })
         })
         .collect();
-    let user = match serde_json::to_string(&json!({"records": records})) {
+    json!({"records": records})
+}
+
+pub(crate) async fn collapse_batch(
+    client: &Client,
+    model: &str,
+    candidates: &[Candidate],
+) -> (AnyResult<String>, usize) {
+    let user = match serde_json::to_string(&collapse_payload(candidates)) {
         Ok(user) => user,
         Err(error) => return (Err(error).context("serialize collapse batch"), 0),
     };
@@ -233,44 +254,8 @@ pub(crate) fn parse_llm_text(text: &str) -> AnyResult<Vec<LlmAction>> {
     Ok(actions)
 }
 
-pub(crate) fn sanitize_action(mut action: LlmAction) -> Sanitized<LlmAction> {
-    action.establishment = clamp(action.establishment, 200);
-    clamp_opt(&mut action.area, 120);
-    clamp_opt(&mut action.city, 120);
-    clamp_opt(&mut action.brand, 120);
-    clamp_opt(&mut action.operator, 200);
-    clamp_opt(&mut action.fssai_number, 64);
-    clamp_opt(&mut action.details, 2000);
-    action.violations = action
-        .violations
-        .into_iter()
-        .map(|value| clamp(value, 300))
-        .filter(|value| !value.is_empty())
-        .collect();
-    action.violations.truncate(5);
-    action.platforms = action
-        .platforms
-        .into_iter()
-        .map(|platform| platform.trim().to_lowercase())
-        .filter(|platform| !platform.is_empty())
-        .collect();
-    action.platforms.truncate(6);
-    Sanitized::new(action)
-}
-
-fn clamp(value: String, max: usize) -> String {
-    let value = value.trim().to_string();
-    if value.chars().count() > max {
-        value.chars().take(max).collect()
-    } else {
-        value
-    }
-}
-
-fn clamp_opt(field: &mut Option<String>, max: usize) {
-    if let Some(value) = field.take() {
-        *field = Some(clamp(value, max));
-    }
+pub(crate) fn sanitize_action(action: LlmAction) -> SanitizedAction {
+    SanitizedAction::new(action)
 }
 
 #[cfg(test)]
@@ -278,7 +263,28 @@ mod tests {
     use std::ptr::eq;
 
     use super::*;
-    use crate::models::ActionType;
+    use crate::domain::Candidate;
+    use crate::models::{ActionType, LlmAction, SanitizedAction};
+
+    #[test]
+    fn collapse_payload_carries_locality_for_branch_checks() {
+        let action = LlmAction {
+            establishment: "NSCI".into(),
+            city: Some("Mumbai".into()),
+            area: Some("Worli".into()),
+            action_date: Some("2026-11-23".into()),
+            details: Some(
+                "licence suspended over cockroach infestation found during inspection".into(),
+            ),
+            ..Default::default()
+        };
+        let candidate = Candidate::try_new(SanitizedAction::new(action), &article("headline"))
+            .expect("valid candidate");
+        let payload = collapse_payload(&[candidate]);
+        assert_eq!(payload["records"][0]["city"], "Mumbai");
+        assert_eq!(payload["records"][0]["area"], "Worli");
+        assert_eq!(payload["records"][0]["name"], "NSCI");
+    }
 
     fn article(title: &str) -> Article {
         Article {
@@ -310,6 +316,18 @@ mod tests {
             parsed["items"][0]["text"].as_str().unwrap().chars().count(),
             151,
             "snippet is capped at 150 chars plus the truncation ellipsis"
+        );
+    }
+
+    #[test]
+    fn retries_only_rate_limits_and_transient_errors() {
+        assert!(is_retryable("429 too many requests"));
+        assert!(is_retryable("HTTP 503 service unavailable"));
+        assert!(is_retryable("request timeout"));
+        assert!(!is_retryable("400 bad request"), "client errors are final");
+        assert!(
+            !is_retryable("genai response had no text"),
+            "an empty response is not transient"
         );
     }
 

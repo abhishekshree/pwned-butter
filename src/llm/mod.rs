@@ -7,7 +7,7 @@ use tokio::time::sleep;
 use tracing::{debug, info, instrument, warn};
 
 use crate::config::{Config, Llm, Provider};
-use crate::domain::{Article, Candidate};
+use crate::domain::{Article, Candidate, area_in_name};
 use crate::report::RunMetrics;
 
 pub const SYSTEM_PROMPT: &str = include_str!("../prompts/system.txt");
@@ -208,10 +208,10 @@ pub(crate) async fn extract(config: &Config, items: &[Article]) -> AnyResult<Ext
     );
     for candidate in &candidates {
         debug!(
-            establishment = %candidate.establishment,
-            city = candidate.city.as_str(),
-            action_type = %candidate.action_type,
-            action_date = %candidate.action_date,
+            establishment = %candidate.establishment(),
+            city = candidate.city().as_str(),
+            action_type = %candidate.action_type(),
+            action_date = %candidate.action_date(),
             "record"
         );
     }
@@ -223,8 +223,14 @@ pub(crate) async fn extract(config: &Config, items: &[Article]) -> AnyResult<Ext
     })
 }
 
-/// Candidate indices are batch-local; unknown ids and singleton groups are ignored.
-fn parse_collapse(text: &str) -> AnyResult<Vec<(Vec<usize>, String)>> {
+/// A proposed rename; ids are candidate indices validated before use.
+pub(crate) struct CollapseGroup {
+    pub ids: Vec<usize>,
+    pub canonical: String,
+}
+
+/// Duplicate ids and singleton groups are dropped; range and shape are checked at apply time.
+fn parse_collapse(text: &str) -> AnyResult<Vec<CollapseGroup>> {
     let text = strip_code_fences(text);
     let parsed: Value = serde_json::from_str(&text).context("parse collapse response")?;
     let raw = match &parsed {
@@ -247,25 +253,108 @@ fn parse_collapse(text: &str) -> AnyResult<Vec<(Vec<usize>, String)>> {
         if canonical.is_empty() || canonical.chars().count() > 200 {
             continue;
         }
-        let ids: Vec<usize> = object
+        let mut ids: Vec<usize> = object
             .get("ids")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
             .filter_map(|id| id.as_u64().and_then(|id| usize::try_from(id).ok()))
             .collect();
-        if ids.len() > 1 {
-            groups.push((ids, canonical.to_string()));
+        let mut seen = HashSet::new();
+        ids.retain(|id| seen.insert(*id));
+        if ids.len() >= 2 {
+            groups.push(CollapseGroup {
+                ids,
+                canonical: canonical.to_string(),
+            });
         }
     }
     Ok(groups)
 }
 
-fn apply_collapse(candidates: &mut [Candidate], groups: &[(Vec<usize>, String)]) {
-    for (ids, canonical) in groups {
-        for &id in ids {
-            if let Some(candidate) = candidates.get_mut(id) {
-                candidate.establishment = canonical.clone();
+/// Rejects groups that are ambiguous or span different real-world events.
+fn valid_collapse(
+    candidates: &[Candidate],
+    group: &CollapseGroup,
+    shared: &HashSet<usize>,
+) -> bool {
+    if group.ids.is_empty()
+        || group
+            .ids
+            .iter()
+            .any(|&id| id >= candidates.len() || shared.contains(&id))
+    {
+        return false;
+    }
+    let Some(members) = group
+        .ids
+        .iter()
+        .map(|&id| candidates.get(id))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    let Some(first) = members.first() else {
+        return false;
+    };
+    if members
+        .iter()
+        .any(|c| c.action_type() != first.action_type() || c.city() != first.city())
+    {
+        return false;
+    }
+    let (mut earliest, mut latest) = (first.action_date(), first.action_date());
+    for candidate in &members {
+        earliest = earliest.min(candidate.action_date());
+        latest = latest.max(candidate.action_date());
+    }
+    if latest.signed_duration_since(earliest).num_days() > 10 {
+        return false;
+    }
+    for (index, a) in members.iter().enumerate() {
+        for b in members.iter().skip(index + 1) {
+            match (a.area(), b.area()) {
+                (Some(x), Some(y)) if x != y && !x.contains(y) && !y.contains(x) => return false,
+                (Some(x), None) if !area_in_name(x, b.establishment()) => return false,
+                (None, Some(y)) if !area_in_name(y, a.establishment()) => return false,
+                _ => {}
+            }
+        }
+    }
+    true
+}
+
+fn apply_collapse(candidates: &mut [Candidate], groups: &[CollapseGroup]) {
+    // An index claimed by two groups is ambiguous, so neither group is applied.
+    let mut seen = HashSet::new();
+    let mut shared = HashSet::new();
+    for id in groups.iter().flat_map(|group| group.ids.iter()) {
+        if !seen.insert(*id) {
+            shared.insert(*id);
+        }
+    }
+
+    for group in groups {
+        if !valid_collapse(candidates, group, &shared) {
+            warn!(ids = ?group.ids, "skipping invalid collapse group");
+            continue;
+        }
+        // Stage on clones so a rejected canonical cannot partially rename a group.
+        let mut staged: Vec<(usize, Candidate)> = group
+            .ids
+            .iter()
+            .filter_map(|&id| candidates.get(id).cloned().map(|c| (id, c)))
+            .collect();
+        if staged
+            .iter_mut()
+            .any(|(_, c)| c.set_establishment(group.canonical.clone()).is_err())
+        {
+            warn!(ids = ?group.ids, "collapse canonical rejected; keeping original names");
+            continue;
+        }
+        for (id, candidate) in staged {
+            if let Some(slot) = candidates.get_mut(id) {
+                *slot = candidate;
             }
         }
     }
@@ -295,12 +384,13 @@ fn strip_code_fences(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_collapse, extract, extraction_models, models_for, parse_collapse, verdict_article,
+        CollapseGroup, apply_collapse, extract, extraction_models, models_for, parse_collapse,
+        verdict_article,
     };
     use crate::config::{Config, Llm, Persistence, Provider, SecretString};
-    use crate::domain::Article;
+    use crate::domain::{Article, Candidate};
     use crate::llm::triage::Verdict;
-    use crate::models::{ActionType, LlmAction, Sanitized};
+    use crate::models::{ActionType, LlmAction, SanitizedAction};
 
     fn config() -> Config {
         Config {
@@ -384,6 +474,42 @@ mod tests {
         assert!(config().llm.structured_output());
     }
 
+    const DETAILS: &str = "licence suspended over cockroach infestation found during inspection";
+
+    fn candidate(
+        name: &str,
+        city: &str,
+        action_type: ActionType,
+        date: &str,
+        area: Option<&str>,
+    ) -> Candidate {
+        let action = LlmAction {
+            establishment: name.into(),
+            city: Some(city.into()),
+            area: area.map(str::to_string),
+            action_type,
+            action_date: Some(date.into()),
+            details: Some(DETAILS.into()),
+            ..Default::default()
+        };
+        Candidate::try_new(SanitizedAction::new(action), &article("headline"))
+            .expect("valid candidate")
+    }
+
+    fn group(ids: &[usize], canonical: &str) -> CollapseGroup {
+        CollapseGroup {
+            ids: ids.to_vec(),
+            canonical: canonical.into(),
+        }
+    }
+
+    fn parsed(groups: &[CollapseGroup]) -> Vec<(Vec<usize>, String)> {
+        groups
+            .iter()
+            .map(|g| (g.ids.clone(), g.canonical.clone()))
+            .collect()
+    }
+
     #[test]
     fn collapse_ignores_bad_and_singleton_groups() {
         let groups = parse_collapse(
@@ -396,7 +522,7 @@ mod tests {
         )
         .expect("parse collapse response");
         assert_eq!(
-            groups,
+            parsed(&groups),
             vec![
                 (vec![0, 2], "National Sports Club of India".to_string()),
                 (vec![99, 100], "out of range".to_string()),
@@ -407,36 +533,269 @@ mod tests {
     }
 
     #[test]
+    fn collapse_deduplicates_ids_and_needs_two_distinct_members() {
+        let groups = parse_collapse(
+            r#"{"groups":[
+                {"ids":[0,0],"canonical":"repeated only"},
+                {"ids":[1,1,2],"canonical":"deduped group"}
+            ]}"#,
+        )
+        .expect("parse collapse response");
+        assert_eq!(
+            parsed(&groups),
+            vec![(vec![1, 2], "deduped group".to_string())],
+            "[0,0] is not a group of two distinct records"
+        );
+    }
+
+    #[test]
     fn collapse_renames_every_record_in_a_group() {
-        let action = LlmAction {
-            establishment: "NSCI".into(),
-            city: Some("Mumbai".into()),
-            action_type: ActionType::LicenceSuspension,
-            action_date: Some("2026-11-23".into()),
-            details: Some(
-                "licence suspended over cockroach infestation found during inspection".into(),
+        let mut candidates = vec![
+            candidate(
+                "NSCI",
+                "Mumbai",
+                ActionType::LicenceSuspension,
+                "2026-11-23",
+                Some("Worli"),
             ),
-            ..Default::default()
-        };
-        let article = article("headline");
-        let mut candidates: Vec<_> = (0..2)
-            .map(|_| {
-                crate::domain::Candidate::try_new(Sanitized::new(action.clone()), &article)
-                    .expect("valid candidate")
-            })
-            .collect();
+            candidate(
+                "National Sports Club",
+                "Mumbai",
+                ActionType::LicenceSuspension,
+                "2026-11-30",
+                Some("NSCI Worli"),
+            ),
+        ];
 
         apply_collapse(
             &mut candidates,
-            &[(vec![0, 1, 99], "National Sports Club of India".into())],
+            &[group(&[0, 1], "National Sports Club of India")],
         );
 
         assert!(
             candidates
                 .iter()
-                .all(|c| c.establishment == "National Sports Club of India"),
-            "both aliases become the canonical name so the store can dedup them; \
-             an out-of-range id is ignored"
+                .all(|c| c.establishment() == "National Sports Club of India"),
+            "both aliases become the canonical name so the store can dedup them"
+        );
+    }
+
+    #[test]
+    fn collapse_skips_a_group_with_an_out_of_range_id() {
+        let mut candidates = vec![
+            candidate(
+                "NSCI",
+                "Mumbai",
+                ActionType::LicenceSuspension,
+                "2026-11-23",
+                None,
+            ),
+            candidate(
+                "National Sports Club",
+                "Mumbai",
+                ActionType::LicenceSuspension,
+                "2026-11-23",
+                None,
+            ),
+        ];
+
+        apply_collapse(
+            &mut candidates,
+            &[group(&[0, 1, 99], "National Sports Club of India")],
+        );
+
+        assert!(
+            candidates
+                .iter()
+                .all(|c| c.establishment() != "National Sports Club of India"),
+            "one bad id rejects the whole group, not just that id"
+        );
+    }
+
+    #[test]
+    fn collapse_rejects_overlapping_groups() {
+        let mut candidates: Vec<Candidate> = (0..3)
+            .map(|_| {
+                candidate(
+                    "NSCI",
+                    "Mumbai",
+                    ActionType::LicenceSuspension,
+                    "2026-11-23",
+                    None,
+                )
+            })
+            .collect();
+
+        apply_collapse(
+            &mut candidates,
+            &[
+                group(&[0, 1], "First Canonical"),
+                group(&[1, 2], "Second Canonical"),
+            ],
+        );
+
+        assert!(
+            candidates.iter().all(|c| c.establishment() == "NSCI"),
+            "an id claimed twice is ambiguous, so neither group is applied"
+        );
+    }
+
+    #[test]
+    fn collapse_requires_same_type_city_and_nearby_dates() {
+        let cases: Vec<(&str, Vec<Candidate>)> = vec![
+            (
+                "mixed action types",
+                vec![
+                    candidate(
+                        "NSCI",
+                        "Mumbai",
+                        ActionType::LicenceSuspension,
+                        "2026-11-23",
+                        None,
+                    ),
+                    candidate("NSCI", "Mumbai", ActionType::Inspection, "2026-11-23", None),
+                ],
+            ),
+            (
+                "mixed cities",
+                vec![
+                    candidate(
+                        "NSCI",
+                        "Mumbai",
+                        ActionType::LicenceSuspension,
+                        "2026-11-23",
+                        None,
+                    ),
+                    candidate(
+                        "NSCI",
+                        "Pune",
+                        ActionType::LicenceSuspension,
+                        "2026-11-23",
+                        None,
+                    ),
+                ],
+            ),
+            (
+                "dates more than ten days apart",
+                vec![
+                    candidate(
+                        "NSCI",
+                        "Mumbai",
+                        ActionType::LicenceSuspension,
+                        "2026-11-23",
+                        None,
+                    ),
+                    candidate(
+                        "NSCI",
+                        "Mumbai",
+                        ActionType::LicenceSuspension,
+                        "2026-12-04",
+                        None,
+                    ),
+                ],
+            ),
+        ];
+
+        for (label, mut rows) in cases {
+            apply_collapse(
+                &mut rows,
+                &[group(&[0, 1], "National Sports Club of India")],
+            );
+            assert!(
+                rows.iter().all(|c| c.establishment() == "NSCI"),
+                "{label} must not be collapsed"
+            );
+        }
+    }
+
+    #[test]
+    fn collapse_accepts_exactly_ten_days_between_dates() {
+        let mut candidates = vec![
+            candidate(
+                "NSCI",
+                "Mumbai",
+                ActionType::LicenceSuspension,
+                "2026-11-23",
+                None,
+            ),
+            candidate(
+                "National Sports Club",
+                "Mumbai",
+                ActionType::LicenceSuspension,
+                "2026-12-03",
+                None,
+            ),
+        ];
+
+        apply_collapse(
+            &mut candidates,
+            &[group(&[0, 1], "National Sports Club of India")],
+        );
+
+        assert!(
+            candidates
+                .iter()
+                .all(|c| c.establishment() == "National Sports Club of India"),
+            "ten days is within the window"
+        );
+    }
+
+    #[test]
+    fn collapse_rejects_conflicting_areas() {
+        let mut candidates = vec![
+            candidate(
+                "NSCI",
+                "Mumbai",
+                ActionType::LicenceSuspension,
+                "2026-11-23",
+                Some("Worli"),
+            ),
+            candidate(
+                "NSCI",
+                "Mumbai",
+                ActionType::LicenceSuspension,
+                "2026-11-23",
+                Some("Bandra"),
+            ),
+        ];
+
+        apply_collapse(
+            &mut candidates,
+            &[group(&[0, 1], "National Sports Club of India")],
+        );
+
+        assert!(
+            candidates.iter().all(|c| c.establishment() == "NSCI"),
+            "unrelated localities are different events"
+        );
+    }
+
+    #[test]
+    fn collapse_rejects_an_invalid_canonical() {
+        let mut candidates = vec![
+            candidate(
+                "NSCI",
+                "Mumbai",
+                ActionType::LicenceSuspension,
+                "2026-11-23",
+                None,
+            ),
+            candidate(
+                "National Sports Club",
+                "Mumbai",
+                ActionType::LicenceSuspension,
+                "2026-11-23",
+                None,
+            ),
+        ];
+
+        apply_collapse(&mut candidates, &[group(&[0, 1], "'Quoted Outlet")]);
+
+        assert!(
+            candidates
+                .iter()
+                .all(|c| c.establishment() != "'Quoted Outlet"),
+            "the canonical must pass Candidate::set_establishment"
         );
     }
 

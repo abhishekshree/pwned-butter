@@ -11,15 +11,20 @@ pub struct NewsItem {
     pub snippet: Option<String>,
 }
 
+/// Lowercase search text shared by RSS items and enriched articles.
+pub fn haystack(title: &str, snippet: Option<&str>, source: Option<&str>) -> String {
+    format!(
+        "{} {} {}",
+        title,
+        snippet.unwrap_or(""),
+        source.unwrap_or("")
+    )
+    .to_lowercase()
+}
+
 impl NewsItem {
     pub fn haystack(&self) -> String {
-        format!(
-            "{} {} {}",
-            self.title,
-            self.snippet.as_deref().unwrap_or(""),
-            self.source.as_deref().unwrap_or("")
-        )
-        .to_lowercase()
+        haystack(&self.title, self.snippet.as_deref(), self.source.as_deref())
     }
 }
 
@@ -60,7 +65,6 @@ pub enum OutletType {
     Restaurant,
     CloudKitchen,
     QuickCommerce,
-    Warehouse,
     Dhaba,
     Hotel,
     Bakery,
@@ -110,15 +114,52 @@ where
     Ok(Option::<Vec<String>>::deserialize(de)?.unwrap_or_default())
 }
 
-/// Marks a value that has passed validation; construct only through `new`.
-pub struct Sanitized<T>(T);
+/// An LLM action whose strings and lists have been bounded. The bounds live in
+/// the constructor so no module can wrap raw model output and claim it is clean.
+pub struct SanitizedAction(LlmAction);
 
-impl<T> Sanitized<T> {
-    pub(crate) fn new(value: T) -> Self {
+impl SanitizedAction {
+    pub(crate) fn new(mut value: LlmAction) -> Self {
+        value.establishment = clamp(value.establishment, 200);
+        clamp_opt(&mut value.area, 120);
+        clamp_opt(&mut value.city, 120);
+        clamp_opt(&mut value.brand, 120);
+        clamp_opt(&mut value.operator, 200);
+        clamp_opt(&mut value.fssai_number, 64);
+        clamp_opt(&mut value.details, 2000);
+        value.violations = value
+            .violations
+            .into_iter()
+            .map(|v| clamp(v, 300))
+            .filter(|v| !v.is_empty())
+            .take(5)
+            .collect();
+        value.platforms = value
+            .platforms
+            .into_iter()
+            .map(|p| p.trim().to_lowercase())
+            .filter(|p| !p.is_empty())
+            .take(6)
+            .collect();
         Self(value)
     }
 
-    pub(crate) fn into_inner(self) -> T {
+    pub(crate) fn into_inner(self) -> LlmAction {
         self.0
+    }
+}
+
+fn clamp(value: String, max: usize) -> String {
+    let value = value.trim();
+    if value.chars().count() > max {
+        value.chars().take(max).collect()
+    } else {
+        value.to_string()
+    }
+}
+
+fn clamp_opt(field: &mut Option<String>, max: usize) {
+    if let Some(value) = field.take() {
+        *field = Some(clamp(value, max));
     }
 }

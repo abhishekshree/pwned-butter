@@ -10,19 +10,21 @@ enforcement: licence suspensions, stop-business orders, seals, seizures and
 re-openings at restaurants, hotels, dhabas and dark stores.
 
 The FDA publishes no machine-readable list, so a scheduled job builds the
-records daily from Google News RSS. Gemini Flash pulls structured entries out
-of the articles and stores each one in Postgres with a link to its source.
+records daily from Bing News RSS. The configured LLM provider (Gemini,
+OpenRouter or Groq) pulls structured entries out of the articles and stores
+each one in Postgres with a link to its source.
 
 ## How it works
 
 Every day at 06:00 UTC a GitHub Action runs a Rust job that reads targeted
-Google News RSS searches over an overlapping 72-hour window, prioritises
-explicit enforcement reports, extracts the article text, and has Gemini Flash
-turn it into structured records (establishment, action, date). A second Gemini
-pass groups records describing the same real-world event (re-reports by other
-outlets with name variants) and keeps one. Records are upserted into Neon,
-deduplicated on source article, establishment, event window and name heuristics.
-Each run is logged, so the pipeline stays auditable.
+Bing News RSS searches, prioritises explicit enforcement reports, extracts the
+article text, and has the configured LLM turn it into structured records
+(establishment, action, date). A best-effort collapse pass groups aliases that
+describe the same real-world event (re-reports by other outlets with name
+variants); a group is applied only when its action type, city, dates and areas
+agree. Records are upserted into Neon, deduplicated on source article,
+establishment, event window and name heuristics. Each run is logged, so the
+pipeline stays auditable.
 
 The Next.js dashboard reads straight from Neon over HTTP. Every filter
 combination is a shareable URL, e.g. `/?brand=Domino's&city=Mumbai&status=suspended`.

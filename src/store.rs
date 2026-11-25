@@ -46,22 +46,31 @@ impl Store for PgPool {
 #[async_trait]
 impl Store for LocalWriter {
     async fn seen_urls(&self, cutoff: DateTime<Utc>) -> AnyResult<HashSet<String>> {
-        LocalWriter::seen_urls(self, cutoff)
+        let writer = self.clone();
+        tokio::task::spawn_blocking(move || writer.seen_urls(cutoff)).await?
     }
 
     async fn upsert_actions(&self, rows: &[Candidate]) -> AnyResult<StoreOutcome> {
-        LocalWriter::upsert_actions(self, rows)
+        let writer = self.clone();
+        let rows = rows.to_vec();
+        tokio::task::spawn_blocking(move || writer.upsert_actions(&rows)).await?
     }
 
     async fn begin_run(&self) -> AnyResult<i64> {
-        LocalWriter::begin_run(self)
+        let writer = self.clone();
+        tokio::task::spawn_blocking(move || writer.begin_run()).await?
     }
 
-    async fn finish_run(&self, run_id: i64, report: &RunReport, _: &Value) -> AnyResult<()> {
-        LocalWriter::finish_run(self, run_id, report)
+    async fn finish_run(&self, run_id: i64, report: &RunReport, details: &Value) -> AnyResult<()> {
+        let writer = self.clone();
+        let report = report.clone();
+        let details = details.clone();
+        tokio::task::spawn_blocking(move || writer.finish_run(run_id, &report, &details)).await?
     }
 
     async fn fail_run(&self, run_id: i64, error: &str) -> AnyResult<()> {
-        LocalWriter::fail_run(self, run_id, error)
+        let writer = self.clone();
+        let error = error.to_string();
+        tokio::task::spawn_blocking(move || writer.fail_run(run_id, &error)).await?
     }
 }

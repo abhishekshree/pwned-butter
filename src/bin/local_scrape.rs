@@ -13,13 +13,16 @@ async fn main() -> AnyResult<()> {
     let ctx = AppContext::from_config(&config).await?;
     let report = run_scrape(&config, &ctx).await?;
     info!(
-        "run ok: seen={} new={} upserted={} llm_calls={} triage_failures={} extraction_failures={} rejected={}",
+        "run ok: seen={} new={} upserted={} degraded={} llm_calls={} triage_failures={} extraction_failures={} rss_failures={} article_failures={} rejected={}",
         report.articles_seen,
         report.articles_new,
         report.actions_upserted,
+        report.degraded,
         report.metrics.total_calls(),
         report.metrics.triage_failures,
         report.metrics.extraction_failures,
+        report.metrics.rss_failures,
+        report.metrics.article_failures,
         report.metrics.rejected,
     );
     Ok(())
