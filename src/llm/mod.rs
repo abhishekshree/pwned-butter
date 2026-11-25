@@ -6,7 +6,7 @@ use serde_json::Value;
 use tokio::time::sleep;
 use tracing::{debug, info, instrument, warn};
 
-use crate::config::{Config, Llm};
+use crate::config::{Config, Llm, Provider};
 use crate::domain::{Article, Candidate};
 use crate::report::RunMetrics;
 
@@ -40,14 +40,10 @@ fn verdict_article<'a>(chunk: &'a [Article], verdict: &Verdict) -> Option<&'a Ar
 
 /// Namespaced model IDs for the active vendor, primary first.
 fn models_for(llm: &Llm) -> Vec<String> {
-    match llm {
-        Llm::Gemini { model, .. } => vec![model.clone()],
-        Llm::OpenRouter {
-            model, fallbacks, ..
-        } => prefixed(model, fallbacks, "open_router"),
-        Llm::Groq {
-            model, fallbacks, ..
-        } => prefixed(model, fallbacks, "groq"),
+    match llm.provider {
+        Provider::Gemini => vec![llm.model.clone()],
+        Provider::OpenRouter => prefixed(&llm.model, &llm.fallbacks, "open_router"),
+        Provider::Groq => prefixed(&llm.model, &llm.fallbacks, "groq"),
     }
 }
 
@@ -65,21 +61,17 @@ fn prefixed(model: &str, fallbacks: &[String], namespace: &str) -> Vec<String> {
 /// Extraction needs a large output budget, which Groq's reasoning model has;
 /// the smaller model stays first for the compact triage call.
 fn extraction_models(llm: &Llm) -> Vec<String> {
-    match llm {
-        Llm::Groq {
-            model, fallbacks, ..
-        } => {
-            let mut names = fallbacks.to_vec();
-            if !names.contains(model) {
-                names.push(model.clone());
-            }
-            names
-                .into_iter()
-                .map(|name| format!("groq::{name}"))
-                .collect()
-        }
-        _ => models_for(llm),
+    if llm.provider != Provider::Groq {
+        return models_for(llm);
     }
+    let mut names = llm.fallbacks.clone();
+    if !names.contains(&llm.model) {
+        names.push(llm.model.clone());
+    }
+    names
+        .into_iter()
+        .map(|name| format!("groq::{name}"))
+        .collect()
 }
 
 /// One compact call filters every article; no provider verdict drops the run.
@@ -134,7 +126,7 @@ async fn triage<'a>(
     Ok((kept, metrics))
 }
 
-#[instrument(skip_all, fields(total = items.len(), model = %config.llm.model()))]
+#[instrument(skip_all, fields(total = items.len(), model = %config.llm.model))]
 pub(crate) async fn extract(config: &Config, items: &[Article]) -> AnyResult<Extraction> {
     let structured = config.llm.structured_output();
     let client = genai::client(&config.llm)?;
@@ -305,7 +297,7 @@ mod tests {
     use super::{
         apply_collapse, extract, extraction_models, models_for, parse_collapse, verdict_article,
     };
-    use crate::config::{Config, Llm, Persistence, SecretString};
+    use crate::config::{Config, Llm, Persistence, Provider, SecretString};
     use crate::domain::Article;
     use crate::llm::triage::Verdict;
     use crate::models::{ActionType, LlmAction, Sanitized};
@@ -315,9 +307,11 @@ mod tests {
             persistence: Persistence::Postgres {
                 url: SecretString::new(String::new()),
             },
-            llm: Llm::Gemini {
+            llm: Llm {
+                provider: Provider::Gemini,
                 key: SecretString::new("key".into()),
                 model: "model".into(),
+                fallbacks: Vec::new(),
             },
         }
     }
@@ -360,7 +354,8 @@ mod tests {
     }
 
     fn groq() -> Llm {
-        Llm::Groq {
+        Llm {
+            provider: Provider::Groq,
             key: SecretString::new("key".into()),
             model: "qwen/qwen3.8-27b".into(),
             fallbacks: vec!["openai/gpt-oss-120b".into()],

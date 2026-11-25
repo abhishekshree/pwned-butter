@@ -1,8 +1,6 @@
-mod openrouter;
 mod persistence;
 mod secret;
 
-pub(crate) use openrouter::{DEFAULT_OPENROUTER_FALLBACKS, DEFAULT_OPENROUTER_MODEL};
 pub use persistence::Persistence;
 pub use secret::SecretString;
 
@@ -12,42 +10,34 @@ use std::path::PathBuf;
 use anyhow::{Context, Result as AnyResult, bail};
 
 pub(crate) const DEFAULT_GEMINI_MODEL: &str = "gemini-3.8-flash";
+pub(crate) const DEFAULT_OPENROUTER_MODEL: &str = "nvidia/nemotron-3-ultra-550b-a55b:free";
+pub(crate) const DEFAULT_OPENROUTER_FALLBACKS: &[&str] =
+    &["nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"];
 /// gpt-oss is a reasoning model: on Groq's free tier it spends its token budget
 /// thinking and returns no text, so the non-reasoning model leads.
 pub(crate) const DEFAULT_GROQ_MODEL: &str = "qwen/qwen3.8-27b";
 pub(crate) const DEFAULT_GROQ_FALLBACKS: &[&str] = &["openai/gpt-oss-120b"];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provider {
+    Gemini,
+    OpenRouter,
+    Groq,
+}
+
 /// The active LLM vendor. Only that vendor's key is read from the environment.
 #[derive(Debug, Clone)]
-pub enum Llm {
-    Gemini {
-        key: SecretString,
-        model: String,
-    },
-    OpenRouter {
-        key: SecretString,
-        model: String,
-        fallbacks: Vec<String>,
-    },
-    Groq {
-        key: SecretString,
-        model: String,
-        fallbacks: Vec<String>,
-    },
+pub struct Llm {
+    pub provider: Provider,
+    pub key: SecretString,
+    pub model: String,
+    pub fallbacks: Vec<String>,
 }
 
 impl Llm {
-    pub fn model(&self) -> &str {
-        match self {
-            Self::Gemini { model, .. }
-            | Self::OpenRouter { model, .. }
-            | Self::Groq { model, .. } => model,
-        }
-    }
-
     /// Groq rejects a top-level array schema, so it gets plain JSON output.
     pub(crate) fn structured_output(&self) -> bool {
-        !matches!(self, Self::Groq { .. })
+        self.provider != Provider::Groq
     }
 }
 
@@ -71,38 +61,42 @@ impl Config {
                 )?),
             },
         };
-        let provider = var("LLM_PROVIDER")
+        let provider = match var("LLM_PROVIDER")
             .unwrap_or_else(|_| "gemini".to_string())
-            .to_lowercase();
-        let llm = match provider.as_str() {
-            "gemini" => Llm::Gemini {
+            .to_lowercase()
+            .as_str()
+        {
+            "gemini" => Provider::Gemini,
+            "openrouter" => Provider::OpenRouter,
+            "groq" => Provider::Groq,
+            other => bail!("unknown LLM_PROVIDER: {other}"),
+        };
+        let llm = match provider {
+            Provider::Gemini => Llm {
+                provider,
                 key: required_key("GEMINI_API_KEY")?,
-                model: non_empty(
-                    "GEMINI_MODEL",
-                    var("GEMINI_MODEL").unwrap_or_else(|_| DEFAULT_GEMINI_MODEL.to_string()),
-                )?,
+                model: model_var("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)?,
+                fallbacks: Vec::new(),
             },
-            "openrouter" => Llm::OpenRouter {
+            Provider::OpenRouter => Llm {
+                provider,
                 key: required_key("OPENROUTER_API_KEY")?,
-                model: non_empty(
-                    "OPENROUTER_MODEL",
-                    var("OPENROUTER_MODEL")
-                        .unwrap_or_else(|_| DEFAULT_OPENROUTER_MODEL.to_string()),
-                )?,
+                model: model_var("OPENROUTER_MODEL", DEFAULT_OPENROUTER_MODEL)?,
                 fallbacks: fallbacks("OPENROUTER_FALLBACKS", DEFAULT_OPENROUTER_FALLBACKS),
             },
-            "groq" => Llm::Groq {
+            Provider::Groq => Llm {
+                provider,
                 key: required_key("GROQ_API_KEY")?,
-                model: non_empty(
-                    "GROQ_MODEL",
-                    var("GROQ_MODEL").unwrap_or_else(|_| DEFAULT_GROQ_MODEL.to_string()),
-                )?,
+                model: model_var("GROQ_MODEL", DEFAULT_GROQ_MODEL)?,
                 fallbacks: fallbacks("GROQ_FALLBACKS", DEFAULT_GROQ_FALLBACKS),
             },
-            other => bail!("unknown LLM_PROVIDER: {other}"),
         };
         Ok(Self { persistence, llm })
     }
+}
+
+fn model_var(name: &str, default: &str) -> AnyResult<String> {
+    non_empty(name, var(name).unwrap_or_else(|_| default.to_string()))
 }
 
 fn required_key(name: &str) -> AnyResult<SecretString> {

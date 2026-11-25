@@ -10,39 +10,22 @@ use crate::news;
 use crate::report::{RunReport, StoreOutcome};
 
 pub async fn run_scrape(config: &Config, ctx: &AppContext) -> AnyResult<RunReport> {
-    // Google News indexes regional reports hours late; an overlapping window
-    // with dedup beats a one-shot daily fetch.
-    run_with_window(config, ctx, "when:3d", 21, news::MAX_ITEMS).await
-}
-
-pub async fn run_with_window(
-    config: &Config,
-    ctx: &AppContext,
-    window: &str,
-    seen_days: i64,
-    max_items: usize,
-) -> AnyResult<RunReport> {
-    run(config, ctx, window, seen_days, max_items).await
+    run(config, ctx, 21, news::MAX_ITEMS).await
 }
 
 async fn run(
     config: &Config,
     ctx: &AppContext,
-    window: &str,
     seen_days: i64,
     max_items: usize,
 ) -> AnyResult<RunReport> {
     let store = ctx.store.as_ref();
     let run_id = store.begin_run().await?;
 
-    match scrape_once(ctx, config, window, seen_days, max_items).await {
+    match scrape_once(ctx, config, seen_days, max_items).await {
         Ok(report) => {
             store
-                .finish_run(
-                    run_id,
-                    &report,
-                    &json!({"model": config.llm.model(), "window": window}),
-                )
+                .finish_run(run_id, &report, &json!({"model": config.llm.model}))
                 .await?;
             Ok(report)
         }
@@ -53,18 +36,17 @@ async fn run(
     }
 }
 
-#[instrument(skip_all, fields(window = %window, seen_days = seen_days, max_items = max_items))]
+#[instrument(skip_all, fields(seen_days = seen_days, max_items = max_items))]
 async fn scrape_once(
     ctx: &AppContext,
     config: &Config,
-    window: &str,
     seen_days: i64,
     max_items: usize,
 ) -> AnyResult<RunReport> {
     let store = ctx.store.as_ref();
     let seen = Utc::now() - ChronoDuration::days(seen_days);
 
-    let items = news::fetch_items(&ctx.http, window).await?;
+    let items = news::fetch_items(&ctx.http).await?;
     let already_seen = store.seen_urls(seen).await?;
     let articles_seen = items.len();
     let articles = news::enrich(&ctx.http, items, &already_seen, max_items).await;

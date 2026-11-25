@@ -135,11 +135,8 @@ async fn fetch_feed_once(client: &reqwest::Client, url: &str) -> AnyResult<Vec<N
     Ok(items)
 }
 
-#[instrument(skip(client), fields(window = %_window))]
-pub(crate) async fn fetch_items(
-    client: &reqwest::Client,
-    _window: &str,
-) -> AnyResult<Vec<NewsItem>> {
+#[instrument(skip(client))]
+pub(crate) async fn fetch_items(client: &reqwest::Client) -> AnyResult<Vec<NewsItem>> {
     let jobs = rules()
         .news
         .queries

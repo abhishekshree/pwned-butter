@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use tokio::time::sleep;
 use tracing::warn;
 
-use crate::config::Llm;
+use crate::config::{Llm, Provider};
 use crate::domain::{Article, Candidate};
 use crate::models::{LlmAction, Sanitized};
 
@@ -21,14 +21,15 @@ const MAX_ATTEMPTS: usize = 3;
 const RATE_LIMIT_PAUSE: Duration = Duration::from_secs(60);
 
 pub(crate) fn client(llm: &Llm) -> AnyResult<Client> {
-    let mut builder = Client::builder();
-    let (adapter, key) = match llm {
-        Llm::Gemini { key, .. } => (AdapterKind::Gemini, key),
-        Llm::OpenRouter { key, .. } => (AdapterKind::OpenRouter, key),
-        Llm::Groq { key, .. } => (AdapterKind::Groq, key),
+    let adapter = match llm.provider {
+        Provider::Gemini => AdapterKind::Gemini,
+        Provider::OpenRouter => AdapterKind::OpenRouter,
+        Provider::Groq => AdapterKind::Groq,
     };
-    builder = builder.append_provider_config(adapter, AuthData::from_single(key.expose()));
-    builder.build().context("build genai client")
+    Client::builder()
+        .append_provider_config(adapter, AuthData::from_single(llm.key.expose()))
+        .build()
+        .context("build genai client")
 }
 
 fn json_options(max_tokens: u32, schema: Value, structured: bool) -> ChatOptions {
