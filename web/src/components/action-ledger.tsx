@@ -1,4 +1,4 @@
-import { ArrowUpRight, ChevronDown } from "lucide-react";
+import { ArrowUpRight, ChevronDown, MapPin } from "lucide-react";
 
 import {
   STATUS_CONFIG,
@@ -102,6 +102,13 @@ export function ActionLedger({ actions }: { actions: ActionRow[] }) {
             </summary>
 
             <div className="mt-3 space-y-2 border-t border-border pt-3 text-sm md:pl-[6.25rem]">
+              {loc ? (
+                <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
+                  <MapPin className="mt-0.5 size-3 shrink-0" aria-hidden="true" />
+                  <span>{loc}</span>
+                </p>
+              ) : null}
+
               <p className="text-xs font-medium text-foreground">
                 {actionTypeLabel(a.action_type)}
                 {a.outlet_type && a.outlet_type !== "other" ? (
