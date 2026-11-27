@@ -44,7 +44,7 @@ impl CoveredCity {
 }
 
 /// An RSS item after enrichment, with its canonical URL resolved.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Article {
     pub title: String,
     pub url: String,

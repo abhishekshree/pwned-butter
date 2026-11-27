@@ -35,7 +35,7 @@ sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio",
 urlencoding = "2"
 dotenvy = "0.15"
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "time"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json", "time"] }
 toml = "1.2.1"
 
 [lints.rust]

@@ -80,6 +80,19 @@ async fn chat_text(
     unreachable!("MAX_ATTEMPTS is nonzero")
 }
 
+fn log_llm(step: &str, model: &str, input: &str, output: &AnyResult<String>) {
+    let error = output.as_ref().err().map(|error| format!("{error:#}"));
+    tracing::debug!(
+        target: "artifact",
+        step,
+        model,
+        input = %input,
+        output = %output.as_deref().unwrap_or_default(),
+        error = error.as_deref(),
+        "llm_call"
+    );
+}
+
 /// Titles plus a short snippet are enough to judge relevance. URLs cost ~30
 /// tokens each and the prompt forbids opening them, so they are not sent.
 fn triage_payload(items: &[Article]) -> AnyResult<String> {
@@ -107,9 +120,11 @@ pub(crate) async fn triage_batch(
         Ok(user) => user,
         Err(error) => return (Err(error), 0),
     };
-    let request = ChatRequest::from_system(TRIAGE_PROMPT).append_message(ChatMessage::user(user));
+    let request =
+        ChatRequest::from_system(TRIAGE_PROMPT).append_message(ChatMessage::user(user.clone()));
     let options = json_options(2048, triage_schema(), structured);
     let (text, calls) = chat_text(client, model, request, &options).await;
+    log_llm("triage", model, &user, &text);
     (text.and_then(|text| parse_verdicts(&text)), calls)
 }
 
@@ -135,10 +150,13 @@ pub(crate) async fn collapse_batch(
         Ok(user) => user,
         Err(error) => return (Err(error).context("serialize collapse batch"), 0),
     };
-    let request = ChatRequest::from_system(COLLAPSE_PROMPT).append_message(ChatMessage::user(user));
+    let request =
+        ChatRequest::from_system(COLLAPSE_PROMPT).append_message(ChatMessage::user(user.clone()));
     // Groq rejects top-level array schemas; the response is parsed by hand anyway.
     let options = json_options(1024, json!({}), false);
-    chat_text(client, model, request, &options).await
+    let (text, calls) = chat_text(client, model, request, &options).await;
+    log_llm("collapse", model, &user, &text);
+    (text, calls)
 }
 
 /// The model returns chunk-local indices; `absolute` resolves them and drops out-of-range values.
@@ -162,12 +180,14 @@ pub(crate) async fn extract_batch<'a>(
         Ok(user) => user,
         Err(error) => return (Err(error).context("serialize news batch"), 0),
     };
-    let request = ChatRequest::from_system(SYSTEM_PROMPT).append_message(ChatMessage::user(user));
+    let request =
+        ChatRequest::from_system(SYSTEM_PROMPT).append_message(ChatMessage::user(user.clone()));
     let options = json_options(8192, json!({"type": "array"}), opts.structured);
     let mut calls = 0;
     let mut last_error = anyhow::anyhow!("no LLM models configured");
     for model in opts.models {
         let (text, used) = chat_text(client, model, request.clone(), &options).await;
+        log_llm("extract", model, &user, &text);
         calls += used;
         match text
             .and_then(|text| parse_llm_text(&text))

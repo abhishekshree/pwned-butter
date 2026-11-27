@@ -1,8 +1,11 @@
+use std::path::PathBuf;
+
 use anyhow::Result as AnyResult;
 use chrono::{Duration as ChronoDuration, Utc};
 use serde_json::json;
 use tracing::instrument;
 
+use crate::artifacts;
 use crate::config::Config;
 use crate::context::AppContext;
 use crate::llm;
@@ -36,6 +39,17 @@ async fn run(
     }
 }
 
+fn dump_artifact<T: serde::Serialize>(
+    dir: Option<&PathBuf>,
+    name: &str,
+    value: &T,
+) -> AnyResult<()> {
+    let Some(dir) = dir else {
+        return Ok(());
+    };
+    artifacts::write_json(dir, name, value)
+}
+
 #[instrument(skip_all, fields(seen_days = seen_days, max_items = max_items))]
 async fn scrape_once(
     ctx: &AppContext,
@@ -45,15 +59,34 @@ async fn scrape_once(
 ) -> AnyResult<RunReport> {
     let store = ctx.store.as_ref();
     let seen = Utc::now() - ChronoDuration::days(seen_days);
+    let artifact_dir = std::env::var_os("ARTIFACT_DIR").map(PathBuf::from);
 
     let items = news::fetch_items(&ctx.http).await?;
+    dump_artifact(artifact_dir.as_ref(), "items.json", &items)?;
     let already_seen = store.seen_urls(seen).await?;
     let articles_seen = items.len();
     let articles = news::enrich(&ctx.http, items, &already_seen, max_items).await;
+    dump_artifact(artifact_dir.as_ref(), "articles.json", &articles)?;
     let articles_new = articles.len();
 
     let extraction = llm::extract(config, &articles).await?;
-    let StoreOutcome { inserted, .. } = store.upsert_actions(&extraction.candidates).await?;
+    let StoreOutcome { inserted, skipped } = store.upsert_actions(&extraction.candidates).await?;
+    let run = json!({
+        "key": Utc::now().format("%Y-%m-%dT%H-%M-%SZ").to_string(),
+        "articles_seen": articles_seen,
+        "articles_new": articles_new,
+        "actions_upserted": inserted,
+        "actions_skipped": skipped,
+        "triage_calls": extraction.metrics.triage_calls,
+        "extraction_calls": extraction.metrics.extraction_calls,
+        "triage_failures": extraction.metrics.triage_failures,
+        "extraction_failures": extraction.metrics.extraction_failures,
+        "rejected": extraction.metrics.rejected,
+        "degraded": extraction.degraded,
+        "model": config.llm.model,
+        "candidates": &extraction.candidates,
+    });
+    dump_artifact(artifact_dir.as_ref(), "run.json", &run)?;
 
     Ok(RunReport {
         articles_seen,
