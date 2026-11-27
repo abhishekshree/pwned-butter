@@ -88,16 +88,16 @@ jobs:
           B2_BUCKET: ${{ secrets.B2_BUCKET }}
           RCLONE_CONFIG_B2_ACCOUNT: ${{ secrets.B2_KEY_ID }}
           RCLONE_CONFIG_B2_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+          RCLONE_CONFIG_B2_TYPE: b2
         shell: bash
         run: |
           if [ -z "${B2_BUCKET:-}" ] || [ -z "${RCLONE_CONFIG_B2_ACCOUNT:-}" ] || [ -z "${RCLONE_CONFIG_B2_KEY:-}" ]; then
             echo "B2 secrets not set; skipping artifact upload"
             exit 0
           fi
-          sudo apt-get install -y rclone >/dev/null 2>&1 || true
+          curl -fsSL https://rclone.org/install.sh | sudo bash
           mkdir -p /tmp/artifacts
           cp /tmp/scrape.log /tmp/artifacts/scrape.log 2>/dev/null || true
-          export RCLONE_CONFIG_B2_TYPE=b2
           dest="B2:${B2_BUCKET}/runs/$(date -u +%Y-%m-%d)/run-${{ github.run_number }}"
           rclone copy /tmp/artifacts "$dest" || echo "artifact upload failed (non-fatal)"
 
