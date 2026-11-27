@@ -9,7 +9,6 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result as AnyResult, bail};
 
-pub(crate) const DEFAULT_GEMINI_MODEL: &str = "gemini-3.8-flash";
 pub(crate) const DEFAULT_OPENROUTER_MODEL: &str = "nvidia/nemotron-3-ultra-550b-a55b:free";
 pub(crate) const DEFAULT_OPENROUTER_FALLBACKS: &[&str] =
     &["nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"];
@@ -20,7 +19,6 @@ pub(crate) const DEFAULT_GROQ_FALLBACKS: &[&str] = &["openai/gpt-oss-120b"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
-    Gemini,
     OpenRouter,
     Groq,
 }
@@ -62,22 +60,15 @@ impl Config {
             },
         };
         let provider = match var("LLM_PROVIDER")
-            .unwrap_or_else(|_| "gemini".to_string())
+            .unwrap_or_else(|_| "groq".to_string())
             .to_lowercase()
             .as_str()
         {
-            "gemini" => Provider::Gemini,
             "openrouter" => Provider::OpenRouter,
             "groq" => Provider::Groq,
             other => bail!("unknown LLM_PROVIDER: {other}"),
         };
         let llm = match provider {
-            Provider::Gemini => Llm {
-                provider,
-                key: required_key("GEMINI_API_KEY")?,
-                model: model_var("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)?,
-                fallbacks: Vec::new(),
-            },
             Provider::OpenRouter => Llm {
                 provider,
                 key: required_key("OPENROUTER_API_KEY")?,

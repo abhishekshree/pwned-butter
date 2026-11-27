@@ -10,15 +10,15 @@ enforcement: licence suspensions, stop-business orders, seals, seizures and
 re-openings at restaurants, hotels, dhabas and dark stores.
 
 The FDA publishes no machine-readable list, so a scheduled job builds the
-records daily from Google News RSS. Gemini Flash pulls structured entries out
-of the articles and stores each one in Postgres with a link to its source.
+records daily from Google News RSS. Groq's Qwen model pulls structured entries
+out of the articles and stores each one in Postgres with a link to its source.
 
 ## How it works
 
 Every day at 06:00 UTC a GitHub Action runs a Rust job that reads targeted
 Google News RSS searches over an overlapping 72-hour window, prioritises
-explicit enforcement reports, extracts the article text, and has Gemini Flash
-turn it into structured records (establishment, action, date). A second Gemini
+explicit enforcement reports, extracts the article text, and has Qwen
+turn it into structured records (establishment, action, date). A second LLM
 pass groups records describing the same real-world event (re-reports by other
 outlets with name variants) and keeps one. Records are upserted into Neon,
 deduplicated on source article, establishment, event window and name heuristics.
@@ -42,8 +42,8 @@ a JSONL file (e.g. `/tmp/fda-actions.jsonl`). RSS and the LLM still run; records
 and run summaries are appended to that file and its `.runs.jsonl` sibling
 instead of Neon.
 
-`LLM_PROVIDER` selects the vendor (`gemini`, `openrouter` or `groq`); only that
-vendor's key is required. Groq's free tier is the default in `.env.example`.
+`LLM_PROVIDER` selects the vendor (`openrouter` or `groq`); only that
+vendor's key is required. Groq's free tier is the default.
 Strict JSON-schema output is disabled for Groq because it rejects top-level
 array schemas.
 

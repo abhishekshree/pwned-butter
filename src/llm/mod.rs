@@ -41,7 +41,6 @@ fn verdict_article<'a>(chunk: &'a [Article], verdict: &Verdict) -> Option<&'a Ar
 /// Namespaced model IDs for the active vendor, primary first.
 fn models_for(llm: &Llm) -> Vec<String> {
     match llm.provider {
-        Provider::Gemini => vec![llm.model.clone()],
         Provider::OpenRouter => prefixed(&llm.model, &llm.fallbacks, "open_router"),
         Provider::Groq => prefixed(&llm.model, &llm.fallbacks, "groq"),
     }
@@ -308,7 +307,7 @@ mod tests {
                 url: SecretString::new(String::new()),
             },
             llm: Llm {
-                provider: Provider::Gemini,
+                provider: Provider::OpenRouter,
                 key: SecretString::new("key".into()),
                 model: "model".into(),
                 fallbacks: Vec::new(),

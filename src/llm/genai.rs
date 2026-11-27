@@ -22,7 +22,6 @@ const RATE_LIMIT_PAUSE: Duration = Duration::from_secs(60);
 
 pub(crate) fn client(llm: &Llm) -> AnyResult<Client> {
     let adapter = match llm.provider {
-        Provider::Gemini => AdapterKind::Gemini,
         Provider::OpenRouter => AdapterKind::OpenRouter,
         Provider::Groq => AdapterKind::Groq,
     };
