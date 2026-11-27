@@ -285,13 +285,21 @@ async fn fetch_article(client: &reqwest::Client, url: &str) -> AnyResult<Fetched
     })
 }
 
+/// RSS descriptions that only repeat the headline give the extractor nothing
+/// beyond the title, which produces records with no area or concrete findings.
+fn fallback_snippet(item: &NewsItem) -> Option<String> {
+    let snippet = item.snippet.as_deref()?.trim();
+    let beyond_title = snippet
+        .strip_prefix(item.title.trim())
+        .unwrap_or(snippet)
+        .trim();
+    (beyond_title.chars().count() >= 40).then(|| snippet.to_string())
+}
+
 fn canonical(item: &NewsItem, fetched: Option<FetchedArticle>) -> (String, Option<String>) {
     match fetched {
         Some(FetchedArticle { final_url, snippet }) => (final_url, snippet),
-        None => {
-            let snippet = item.snippet.clone().or_else(|| Some(item.title.clone()));
-            (item.url.clone(), snippet)
-        }
+        None => (item.url.clone(), fallback_snippet(item)),
     }
 }
 
@@ -335,6 +343,10 @@ pub(crate) async fn enrich(
             }
         };
         let (url, snippet) = canonical(&item, fetched);
+        if snippet.is_none() {
+            warn!("skipping headline-only article ({})", item.url);
+            continue;
+        }
         if urls.contains(&url) || seen.contains(&url) {
             continue;
         }
@@ -353,7 +365,7 @@ pub(crate) async fn enrich(
 mod tests {
     use super::{
         FetchedArticle, article_url, canonical, description_snippet, extract_snippet,
-        select_for_enrichment,
+        fallback_snippet, select_for_enrichment,
     };
     use crate::models::NewsItem;
     use chrono::{Duration, Utc};
@@ -454,10 +466,43 @@ mod tests {
             url, "https://news.google.com/original",
             "failure keeps original URL"
         );
+        assert_eq!(snippet, None, "headline alone is not enough evidence");
+    }
+
+    #[test]
+    fn fallback_snippet_drops_headline_echo() {
+        let title = "FDA suspends six Mumbai licences";
+        let item = NewsItem {
+            title: title.into(),
+            url: "https://news.google.com/original".into(),
+            source: None,
+            published: None,
+            snippet: Some(format!("{title} - The 420.in")),
+        };
+
         assert_eq!(
-            snippet.as_deref(),
-            Some("FDA seals eatery"),
-            "failure degrades to headline"
+            fallback_snippet(&item),
+            None,
+            "a description that only repeats the title adds no evidence"
+        );
+    }
+
+    #[test]
+    fn fallback_snippet_keeps_substantive_description() {
+        let title = "FDA suspends six Mumbai licences";
+        let detail = "Inspectors found cockroaches, uncovered dustbins and raw food stored with cooked food at six outlets including Blinkit in Fort.";
+        let item = NewsItem {
+            title: title.into(),
+            url: "https://news.google.com/original".into(),
+            source: None,
+            published: None,
+            snippet: Some(format!("{title} {detail}")),
+        };
+
+        assert_eq!(
+            fallback_snippet(&item).as_deref(),
+            Some(item.snippet.as_deref().expect("snippet set")),
+            "real article text still survives a blocked publisher page"
         );
     }
 }
