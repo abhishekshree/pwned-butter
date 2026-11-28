@@ -25,22 +25,16 @@ pub struct RunReport {
 }
 
 impl RunReport {
-    /// One representation of a run's metrics; the two stores only add backend fields.
-    pub fn to_details(&self, extra: &Value) -> Value {
-        let mut details = json!({
+    /// One representation of a run's metrics for the `fetch_runs.details` column.
+    pub fn to_details(&self) -> Value {
+        json!({
             "triage_calls": self.metrics.triage_calls,
             "extraction_calls": self.metrics.extraction_calls,
             "triage_failures": self.metrics.triage_failures,
             "extraction_failures": self.metrics.extraction_failures,
             "rejected": self.metrics.rejected,
             "degraded": self.degraded,
-        });
-        if let (Some(obj), Some(extra)) = (details.as_object_mut(), extra.as_object()) {
-            for (key, value) in extra {
-                obj.entry(key.clone()).or_insert_with(|| value.clone());
-            }
-        }
-        details
+        })
     }
 }
 

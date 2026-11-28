@@ -3,18 +3,18 @@ use std::time::Duration;
 use anyhow::{Context, Result as AnyResult};
 pub(crate) use genai::Client;
 use genai::adapter::AdapterKind;
-use genai::chat::{ChatMessage, ChatOptions, ChatRequest, JsonSpec};
+use genai::chat::{ChatMessage, ChatOptions, ChatRequest};
 use genai::resolver::AuthData;
 use serde_json::{Value, json};
 use tokio::time::sleep;
 use tracing::warn;
 
-use crate::config::{Llm, Provider};
-use crate::domain::{Article, Candidate};
-use crate::models::{LlmAction, Sanitized};
+use crate::config::Llm;
+use crate::domain::Article;
+use crate::models::LlmAction;
 
-use super::extract::{COLLAPSE_PROMPT, SYSTEM_PROMPT, strip_code_fences};
-use super::triage::{TRIAGE_PROMPT, Verdict, parse_verdicts, triage_schema};
+use super::extract::{SYSTEM_PROMPT, strip_code_fences};
+use super::triage::{TRIAGE_PROMPT, Verdict, parse_verdicts};
 
 const MAX_ATTEMPTS: usize = 3;
 /// A 429 is a tokens-per-minute window, so a short retry just burns more tokens.
@@ -30,30 +30,20 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 pub(crate) fn client(llm: &Llm) -> AnyResult<Client> {
-    let adapter = match llm.provider {
-        Provider::OpenRouter => AdapterKind::OpenRouter,
-        Provider::Groq => AdapterKind::Groq,
-    };
     Client::builder()
-        .append_provider_config(adapter, AuthData::from_single(llm.key.expose()))
+        .append_provider_config(AdapterKind::Groq, AuthData::from_single(llm.key.expose()))
         .build()
         .context("build genai client")
 }
 
-fn json_options(max_tokens: u32, schema: Value, structured: bool) -> ChatOptions {
-    let options = ChatOptions::default()
+fn json_options(max_tokens: u32) -> ChatOptions {
+    ChatOptions::default()
         .with_temperature(0.0)
-        .with_max_tokens(max_tokens);
-    if structured {
-        options.with_response_format(JsonSpec::new("response", schema))
-    } else {
-        options
-    }
+        .with_max_tokens(max_tokens)
 }
 
 pub(crate) struct ExtractOptions<'a> {
     pub(crate) models: &'a [String],
-    pub(crate) structured: bool,
 }
 
 // Attempts are returned as data so a fully failed batch still reports its calls.
@@ -123,7 +113,6 @@ pub(crate) async fn triage_batch(
     client: &Client,
     model: &str,
     items: &[Article],
-    structured: bool,
 ) -> (AnyResult<Vec<Verdict>>, usize) {
     let user = match triage_payload(items) {
         Ok(user) => user,
@@ -131,41 +120,10 @@ pub(crate) async fn triage_batch(
     };
     let request =
         ChatRequest::from_system(TRIAGE_PROMPT).append_message(ChatMessage::user(user.clone()));
-    let options = json_options(2048, triage_schema(), structured);
+    let options = json_options(2048);
     let (text, calls) = chat_text(client, model, request, &options).await;
     log_llm("triage", model, &user, &text);
     (text.and_then(|text| parse_verdicts(&text)), calls)
-}
-
-/// Names and dates only: the model needs no article text to spot alias variants.
-pub(crate) async fn collapse_batch(
-    client: &Client,
-    model: &str,
-    candidates: &[Candidate],
-) -> (AnyResult<String>, usize) {
-    let records: Vec<Value> = candidates
-        .iter()
-        .enumerate()
-        .map(|(id, c)| {
-            json!({
-                "id": id,
-                "name": c.establishment,
-                "date": c.action_date,
-                "type": c.action_type.to_string(),
-            })
-        })
-        .collect();
-    let user = match serde_json::to_string(&json!({"records": records})) {
-        Ok(user) => user,
-        Err(error) => return (Err(error).context("serialize collapse batch"), 0),
-    };
-    let request =
-        ChatRequest::from_system(COLLAPSE_PROMPT).append_message(ChatMessage::user(user.clone()));
-    // Groq rejects top-level array schemas; the response is parsed by hand anyway.
-    let options = json_options(1024, json!({}), false);
-    let (text, calls) = chat_text(client, model, request, &options).await;
-    log_llm("collapse", model, &user, &text);
-    (text, calls)
 }
 
 /// The model returns chunk-local indices; `absolute` resolves them and drops out-of-range values.
@@ -191,7 +149,7 @@ pub(crate) async fn extract_batch<'a>(
     };
     let request =
         ChatRequest::from_system(SYSTEM_PROMPT).append_message(ChatMessage::user(user.clone()));
-    let options = json_options(8192, json!({"type": "array"}), opts.structured);
+    let options = json_options(8192);
     let mut calls = 0;
     let mut last_error = anyhow::anyhow!("no LLM models configured");
     for model in opts.models {
@@ -261,7 +219,7 @@ pub(crate) fn parse_llm_text(text: &str) -> AnyResult<Vec<LlmAction>> {
     Ok(actions)
 }
 
-pub(crate) fn sanitize_action(mut action: LlmAction) -> Sanitized<LlmAction> {
+pub(crate) fn sanitize_action(mut action: LlmAction) -> LlmAction {
     action.establishment = clamp(action.establishment, 200);
     clamp_opt(&mut action.area, 120);
     clamp_opt(&mut action.city, 120);
@@ -283,7 +241,7 @@ pub(crate) fn sanitize_action(mut action: LlmAction) -> Sanitized<LlmAction> {
         .filter(|platform| !platform.is_empty())
         .collect();
     action.platforms.truncate(6);
-    Sanitized::new(action)
+    action
 }
 
 fn clamp(value: String, max: usize) -> String {

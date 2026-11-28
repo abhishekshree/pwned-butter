@@ -37,15 +37,18 @@ cargo run --release --bin local_scrape
 cd web && pnpm install && pnpm dev
 ```
 
-To run the full pipeline without touching Postgres, set `LOCAL_WRITER_PATH` to
-a JSONL file (e.g. `/tmp/fda-actions.jsonl`). RSS and the LLM still run; records
-and run summaries are appended to that file and its `.runs.jsonl` sibling
-instead of Neon.
+A local Postgres instance is enough to run the full pipeline:
 
-`LLM_PROVIDER` selects the vendor (`openrouter` or `groq`); only that
-vendor's key is required. Groq's free tier is the default.
-Strict JSON-schema output is disabled for Groq because it rejects top-level
-array schemas.
+```bash
+docker run -d --name fda-pg -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=fda -p 5432:5432 postgres:17
+export DATABASE_URL=postgres://postgres:postgres@localhost:5432/fda
+cargo run --bin migrate
+cargo run --bin local_scrape
+```
+
+The LLM is Groq. Set `GROQ_API_KEY`; `GROQ_MODEL` and `GROQ_FALLBACKS`
+override the defaults. Groq gets plain JSON output because it rejects
+top-level array schemas.
 
 Tests (what CI runs) via [cargo-nextest](https://nexte.st):
 

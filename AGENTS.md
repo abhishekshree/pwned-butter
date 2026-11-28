@@ -34,6 +34,11 @@ Applies to all Rust in this repo. Before committing: `cargo fmt --check`,
 - Prefer `Option<T>` over sentinel values. Validate at the trust boundary,
   not in every caller.
 
+### Scope
+
+- Every new type, field, trait, variant, or env var names its caller. If the
+  only caller is a test or nobody, it does not ship.
+
 ### Functions
 
 - One job each; return early instead of nesting.

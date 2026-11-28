@@ -59,7 +59,7 @@ fn sanitizes_strings_and_limits_lists() {
         "platforms": [" Swiggy ", " "]
     }))
     .unwrap();
-    let action = sanitize_action(action).into_inner();
+    let action = sanitize_action(action);
     assert_eq!(action.establishment, "X");
     assert_eq!(action.violations, vec!["issue"]);
     assert_eq!(action.platforms, vec!["swiggy"]);

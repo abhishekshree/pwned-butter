@@ -1,43 +1,8 @@
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use strum::{Display, EnumIter, EnumString};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NewsItem {
-    pub title: String,
-    pub url: String,
-    pub source: Option<String>,
-    pub published: Option<DateTime<Utc>>,
-    pub snippet: Option<String>,
-}
-
-impl NewsItem {
-    pub fn haystack(&self) -> String {
-        format!(
-            "{} {} {}",
-            self.title,
-            self.snippet.as_deref().unwrap_or(""),
-            self.source.as_deref().unwrap_or("")
-        )
-        .to_lowercase()
-    }
-}
+use strum::{Display, EnumString};
 
 /// strum's snake_case keeps the DB value, serde name and prompt name in sync.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    EnumString,
-    Display,
-    EnumIter,
-)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Display)]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum ActionType {
@@ -51,9 +16,7 @@ pub enum ActionType {
     Reopened,
 }
 
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display, EnumIter,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, EnumString, Display)]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum OutletType {
@@ -108,17 +71,4 @@ where
     D: serde::Deserializer<'de>,
 {
     Ok(Option::<Vec<String>>::deserialize(de)?.unwrap_or_default())
-}
-
-/// Marks a value that has passed validation; construct only through `new`.
-pub struct Sanitized<T>(T);
-
-impl<T> Sanitized<T> {
-    pub(crate) fn new(value: T) -> Self {
-        Self(value)
-    }
-
-    pub(crate) fn into_inner(self) -> T {
-        self.0
-    }
 }

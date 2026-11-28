@@ -8,32 +8,23 @@ use tracing::instrument;
 use crate::artifacts;
 use crate::config::Config;
 use crate::context::AppContext;
+use crate::db;
 use crate::llm;
 use crate::news;
 use crate::report::{RunReport, StoreOutcome};
 
+const SEEN_DAYS: i64 = 21;
+
 pub async fn run_scrape(config: &Config, ctx: &AppContext) -> AnyResult<RunReport> {
-    run(config, ctx, 21, news::MAX_ITEMS).await
-}
+    let run_id = db::begin_run(&ctx.db).await?;
 
-async fn run(
-    config: &Config,
-    ctx: &AppContext,
-    seen_days: i64,
-    max_items: usize,
-) -> AnyResult<RunReport> {
-    let store = ctx.store.as_ref();
-    let run_id = store.begin_run().await?;
-
-    match scrape_once(ctx, config, seen_days, max_items).await {
+    match scrape_once(ctx, config).await {
         Ok(report) => {
-            store
-                .finish_run(run_id, &report, &json!({"model": config.llm.model}))
-                .await?;
+            db::finish_run(&ctx.db, run_id, &report, &config.llm.model).await?;
             Ok(report)
         }
         Err(error) => {
-            store.fail_run(run_id, &format!("{error:#}")).await?;
+            db::fail_run(&ctx.db, run_id, &format!("{error:#}")).await?;
             Err(error)
         }
     }
@@ -50,27 +41,22 @@ fn dump_artifact<T: serde::Serialize>(
     artifacts::write_json(dir, name, value)
 }
 
-#[instrument(skip_all, fields(seen_days = seen_days, max_items = max_items))]
-async fn scrape_once(
-    ctx: &AppContext,
-    config: &Config,
-    seen_days: i64,
-    max_items: usize,
-) -> AnyResult<RunReport> {
-    let store = ctx.store.as_ref();
-    let seen = Utc::now() - ChronoDuration::days(seen_days);
+#[instrument(skip_all, fields(seen_days = SEEN_DAYS, max_items = news::MAX_ITEMS))]
+async fn scrape_once(ctx: &AppContext, config: &Config) -> AnyResult<RunReport> {
+    let seen = Utc::now() - ChronoDuration::days(SEEN_DAYS);
     let artifact_dir = std::env::var_os("ARTIFACT_DIR").map(PathBuf::from);
 
     let items = news::fetch_items(&ctx.http).await?;
     dump_artifact(artifact_dir.as_ref(), "items.json", &items)?;
-    let already_seen = store.seen_urls(seen).await?;
+    let already_seen = db::seen_urls(&ctx.db, seen).await?;
     let articles_seen = items.len();
-    let articles = news::enrich(&ctx.http, items, &already_seen, max_items).await;
+    let articles = news::enrich(&ctx.http, items, &already_seen, news::MAX_ITEMS).await;
     dump_artifact(artifact_dir.as_ref(), "articles.json", &articles)?;
     let articles_new = articles.len();
 
     let extraction = llm::extract(config, &articles).await?;
-    let StoreOutcome { inserted, skipped } = store.upsert_actions(&extraction.candidates).await?;
+    let StoreOutcome { inserted, skipped } =
+        db::upsert_actions(&ctx.db, &extraction.candidates).await?;
     let run = json!({
         "key": Utc::now().format("%Y-%m-%dT%H-%M-%SZ").to_string(),
         "articles_seen": articles_seen,

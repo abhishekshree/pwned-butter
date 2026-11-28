@@ -1,13 +1,12 @@
 use std::fmt::Write;
 
 use chrono::{Duration, Utc};
-use test_case::test_case;
 
 use super::{
     FetchedArticle, article_url, canonical, description_snippet, extract_snippet, fallback_snippet,
     select_for_enrichment,
 };
-use crate::models::NewsItem;
+use crate::domain::Article;
 
 #[test]
 fn html_snippets() {
@@ -44,14 +43,14 @@ bing description -> Some("FDA suspended the licence over & pests.")
 #[test]
 fn prioritises_explicit_enforcement_before_generic_news() {
     let now = Utc::now();
-    let generic = NewsItem {
+    let generic = Article {
         title: "Maharashtra food trends this Diwali".into(),
         url: "https://example.test/generic".into(),
         source: None,
         published: Some(now),
         snippet: None,
     };
-    let action = NewsItem {
+    let action = Article {
         title: "Maharashtra FDA orders restaurant to cease business after raid".into(),
         url: "https://example.test/action".into(),
         source: None,
@@ -74,7 +73,7 @@ fn bing_apiclick_link_resolves_to_publisher_url() {
 
 #[test]
 fn canonical_uses_final_url_on_success_and_original_url_on_failure() {
-    let item = NewsItem {
+    let item = Article {
         title: "FDA seals eatery".into(),
         url: "https://news.google.com/original".into(),
         source: None,
@@ -107,16 +106,31 @@ fn canonical_uses_final_url_on_success_and_original_url_on_failure() {
     assert_eq!(snippet, None, "headline alone is not enough evidence");
 }
 
-#[test_case("FDA suspends six Mumbai licences - The 420.in", None; "headline echo adds no evidence")]
-#[test_case("FDA suspends six Mumbai licences Inspectors found cockroaches, uncovered dustbins and raw food stored with cooked food at six outlets including Blinkit in Fort.", Some("FDA suspends six Mumbai licences Inspectors found cockroaches, uncovered dustbins and raw food stored with cooked food at six outlets including Blinkit in Fort."); "substantive description survives")]
-fn fallback_snippet_uses_only_substantive_descriptions(snippet: &str, expected: Option<&str>) {
-    let item = NewsItem {
-        title: "FDA suspends six Mumbai licences".into(),
-        url: "https://news.google.com/original".into(),
-        source: None,
-        published: None,
-        snippet: Some(snippet.into()),
-    };
+#[test]
+fn fallback_snippet_uses_only_substantive_descriptions() {
+    let cases = [
+        (
+            "headline echo adds no evidence",
+            "FDA suspends six Mumbai licences - The 420.in",
+            None,
+        ),
+        (
+            "substantive description survives",
+            "FDA suspends six Mumbai licences Inspectors found cockroaches, uncovered dustbins and raw food stored with cooked food at six outlets including Blinkit in Fort.",
+            Some(
+                "FDA suspends six Mumbai licences Inspectors found cockroaches, uncovered dustbins and raw food stored with cooked food at six outlets including Blinkit in Fort.",
+            ),
+        ),
+    ];
+    for (name, snippet, expected) in cases {
+        let item = Article {
+            title: "FDA suspends six Mumbai licences".into(),
+            url: "https://news.google.com/original".into(),
+            source: None,
+            published: None,
+            snippet: Some(snippet.into()),
+        };
 
-    assert_eq!(fallback_snippet(&item).as_deref(), expected);
+        assert_eq!(fallback_snippet(&item).as_deref(), expected, "{name}");
+    }
 }
