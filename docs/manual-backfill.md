@@ -67,7 +67,7 @@ extraction contract:
   (re-reported drives appear in several outlets' coverage).
 - Collapse same-outlet re-reports within ±5 days into one row.
 - Apply the live quality gate by hand: thresholds come from
-  `src/rules.toml`, enforcement lives in `src/domain/mod.rs` — city
+  `src/ingest/rules.toml`, enforcement lives in `src/domain/types.rs` — city
   required, details ≥ 20 chars, establishment ≤ 9 words, not the
   regulator, not a product, not quote-led.
 - Thin rows (named + suspended + city, no outlet-level violations) pass
