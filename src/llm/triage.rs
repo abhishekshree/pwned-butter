@@ -1,6 +1,6 @@
 use anyhow::{Result as AnyResult, anyhow};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 use tracing::warn;
 
 use super::extract::strip_code_fences;
@@ -13,20 +13,6 @@ pub(crate) struct Verdict {
     pub(crate) source_index: usize,
     #[serde(default)]
     pub(crate) reason: Option<String>,
-}
-
-pub(crate) fn triage_schema() -> Value {
-    json!({
-        "type": "array",
-        "items": {
-            "type": "object",
-            "properties": {
-                "sourceIndex": {"type": "integer"},
-                "reason": {"type": "string"}
-            },
-            "required": ["sourceIndex", "reason"]
-        }
-    })
 }
 
 pub(crate) fn parse_verdicts(text: &str) -> AnyResult<Vec<Verdict>> {

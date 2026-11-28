@@ -5,7 +5,7 @@ use anyhow::{Result as AnyResult, anyhow};
 use tokio::time::sleep;
 use tracing::{debug, info, instrument, warn};
 
-use crate::config::{Config, Llm, Provider};
+use crate::config::{Config, Llm};
 use crate::domain::{Article, Candidate};
 use crate::report::RunMetrics;
 
@@ -32,12 +32,9 @@ fn verdict_article<'a>(chunk: &'a [Article], verdict: &Verdict) -> Option<&'a Ar
     chunk.get(verdict.source_index)
 }
 
-/// Namespaced model IDs for the active vendor, primary first.
+/// Namespaced model IDs for Groq, primary first.
 fn models_for(llm: &Llm) -> Vec<String> {
-    match llm.provider {
-        Provider::OpenRouter => prefixed(&llm.model, &llm.fallbacks, "open_router"),
-        Provider::Groq => prefixed(&llm.model, &llm.fallbacks, "groq"),
-    }
+    prefixed(&llm.model, &llm.fallbacks, "groq")
 }
 
 fn prefixed(model: &str, fallbacks: &[String], namespace: &str) -> Vec<String> {
@@ -54,9 +51,6 @@ fn prefixed(model: &str, fallbacks: &[String], namespace: &str) -> Vec<String> {
 /// Extraction needs a large output budget, which Groq's reasoning model has;
 /// the smaller model stays first for the compact triage call.
 fn extraction_models(llm: &Llm) -> Vec<String> {
-    if llm.provider != Provider::Groq {
-        return models_for(llm);
-    }
     let mut names = llm.fallbacks.clone();
     if !names.contains(&llm.model) {
         names.push(llm.model.clone());
@@ -73,7 +67,6 @@ async fn triage<'a>(
     client: &genai::Client,
     models: &[String],
     items: &'a [Article],
-    structured: bool,
 ) -> AnyResult<(Vec<&'a Article>, RunMetrics)> {
     if items.is_empty() {
         return Ok((Vec::new(), RunMetrics::default()));
@@ -81,7 +74,7 @@ async fn triage<'a>(
     let mut metrics = RunMetrics::default();
     let mut verdicts = None;
     for model in models {
-        let (result, calls) = genai::triage_batch(client, model, items, structured).await;
+        let (result, calls) = genai::triage_batch(client, model, items).await;
         metrics.triage_calls += calls;
         match result {
             Ok(found) => {
@@ -121,10 +114,9 @@ async fn triage<'a>(
 
 #[instrument(skip_all, fields(total = items.len(), model = %config.llm.model))]
 pub(crate) async fn extract(config: &Config, items: &[Article]) -> AnyResult<Extraction> {
-    let structured = config.llm.structured_output();
     let client = genai::client(&config.llm)?;
     let triage_models = models_for(&config.llm);
-    let (articles, mut metrics) = triage(&client, &triage_models, items, structured).await?;
+    let (articles, mut metrics) = triage(&client, &triage_models, items).await?;
     info!(relevant = articles.len(), total = items.len(), "llm triage");
     if articles.is_empty() {
         let degraded = metrics.triage_failures > 0;
@@ -139,10 +131,7 @@ pub(crate) async fn extract(config: &Config, items: &[Article]) -> AnyResult<Ext
     sleep(TPM_PAUSE).await;
 
     let models = extraction_models(&config.llm);
-    let opts = ExtractOptions {
-        models: &models,
-        structured,
-    };
+    let opts = ExtractOptions { models: &models };
 
     let mut candidates = Vec::new();
     let mut failed = 0;

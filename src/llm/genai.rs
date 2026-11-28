@@ -3,18 +3,18 @@ use std::time::Duration;
 use anyhow::{Context, Result as AnyResult};
 pub(crate) use genai::Client;
 use genai::adapter::AdapterKind;
-use genai::chat::{ChatMessage, ChatOptions, ChatRequest, JsonSpec};
+use genai::chat::{ChatMessage, ChatOptions, ChatRequest};
 use genai::resolver::AuthData;
 use serde_json::{Value, json};
 use tokio::time::sleep;
 use tracing::warn;
 
-use crate::config::{Llm, Provider};
+use crate::config::Llm;
 use crate::domain::Article;
 use crate::models::LlmAction;
 
 use super::extract::{SYSTEM_PROMPT, strip_code_fences};
-use super::triage::{TRIAGE_PROMPT, Verdict, parse_verdicts, triage_schema};
+use super::triage::{TRIAGE_PROMPT, Verdict, parse_verdicts};
 
 const MAX_ATTEMPTS: usize = 3;
 /// A 429 is a tokens-per-minute window, so a short retry just burns more tokens.
@@ -30,30 +30,20 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 pub(crate) fn client(llm: &Llm) -> AnyResult<Client> {
-    let adapter = match llm.provider {
-        Provider::OpenRouter => AdapterKind::OpenRouter,
-        Provider::Groq => AdapterKind::Groq,
-    };
     Client::builder()
-        .append_provider_config(adapter, AuthData::from_single(llm.key.expose()))
+        .append_provider_config(AdapterKind::Groq, AuthData::from_single(llm.key.expose()))
         .build()
         .context("build genai client")
 }
 
-fn json_options(max_tokens: u32, schema: Value, structured: bool) -> ChatOptions {
-    let options = ChatOptions::default()
+fn json_options(max_tokens: u32) -> ChatOptions {
+    ChatOptions::default()
         .with_temperature(0.0)
-        .with_max_tokens(max_tokens);
-    if structured {
-        options.with_response_format(JsonSpec::new("response", schema))
-    } else {
-        options
-    }
+        .with_max_tokens(max_tokens)
 }
 
 pub(crate) struct ExtractOptions<'a> {
     pub(crate) models: &'a [String],
-    pub(crate) structured: bool,
 }
 
 // Attempts are returned as data so a fully failed batch still reports its calls.
@@ -123,7 +113,6 @@ pub(crate) async fn triage_batch(
     client: &Client,
     model: &str,
     items: &[Article],
-    structured: bool,
 ) -> (AnyResult<Vec<Verdict>>, usize) {
     let user = match triage_payload(items) {
         Ok(user) => user,
@@ -131,7 +120,7 @@ pub(crate) async fn triage_batch(
     };
     let request =
         ChatRequest::from_system(TRIAGE_PROMPT).append_message(ChatMessage::user(user.clone()));
-    let options = json_options(2048, triage_schema(), structured);
+    let options = json_options(2048);
     let (text, calls) = chat_text(client, model, request, &options).await;
     log_llm("triage", model, &user, &text);
     (text.and_then(|text| parse_verdicts(&text)), calls)
@@ -160,7 +149,7 @@ pub(crate) async fn extract_batch<'a>(
     };
     let request =
         ChatRequest::from_system(SYSTEM_PROMPT).append_message(ChatMessage::user(user.clone()));
-    let options = json_options(8192, json!({"type": "array"}), opts.structured);
+    let options = json_options(8192);
     let mut calls = 0;
     let mut last_error = anyhow::anyhow!("no LLM models configured");
     for model in opts.models {

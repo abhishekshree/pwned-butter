@@ -1,15 +1,12 @@
 use super::{extract, models_for, verdict_article};
-use crate::config::{Config, Llm, Persistence, Provider, SecretString};
+use crate::config::{Config, Llm, SecretString};
 use crate::domain::Article;
 use crate::llm::triage::Verdict;
 
 fn config() -> Config {
     Config {
-        persistence: Persistence::Postgres {
-            url: SecretString::new(String::new()),
-        },
+        database_url: SecretString::new(String::new()),
         llm: Llm {
-            provider: Provider::OpenRouter,
             key: SecretString::new("key".into()),
             model: "model".into(),
             fallbacks: Vec::new(),
@@ -56,7 +53,6 @@ fn verdict_index_resolves_against_the_whole_item_list() {
 
 fn groq() -> Llm {
     Llm {
-        provider: Provider::Groq,
         key: SecretString::new("key".into()),
         model: "qwen/qwen3.8-27b".into(),
         fallbacks: vec!["openai/gpt-oss-120b".into()],
@@ -69,12 +65,6 @@ fn groq_models_use_the_groq_namespace() {
         models_for(&groq()),
         ["groq::qwen/qwen3.8-27b", "groq::openai/gpt-oss-120b"]
     );
-}
-
-#[test]
-fn groq_disables_strict_json_schema() {
-    assert!(!groq().structured_output());
-    assert!(config().llm.structured_output());
 }
 
 #[tokio::test]

@@ -46,10 +46,9 @@ cargo run --bin migrate
 cargo run --bin local_scrape
 ```
 
-`LLM_PROVIDER` selects the vendor (`openrouter` or `groq`); only that
-vendor's key is required. Groq's free tier is the default.
-Strict JSON-schema output is disabled for Groq because it rejects top-level
-array schemas.
+The LLM is Groq. Set `GROQ_API_KEY`; `GROQ_MODEL` and `GROQ_FALLBACKS`
+override the defaults. Groq gets plain JSON output because it rejects
+top-level array schemas.
 
 Tests (what CI runs) via [cargo-nextest](https://nexte.st):
 

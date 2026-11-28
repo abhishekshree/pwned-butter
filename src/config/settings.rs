@@ -4,34 +4,17 @@ use anyhow::{Context, Result as AnyResult, bail};
 
 use super::SecretString;
 
-pub(crate) const DEFAULT_OPENROUTER_MODEL: &str = "nvidia/nemotron-3-ultra-550b-a55b:free";
-pub(crate) const DEFAULT_OPENROUTER_FALLBACKS: &[&str] =
-    &["nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"];
 /// gpt-oss is a reasoning model: on Groq's free tier it spends its token budget
 /// thinking and returns no text, so the non-reasoning model leads.
 pub(crate) const DEFAULT_GROQ_MODEL: &str = "qwen/qwen3.8-27b";
 pub(crate) const DEFAULT_GROQ_FALLBACKS: &[&str] = &["openai/gpt-oss-120b"];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Provider {
-    OpenRouter,
-    Groq,
-}
-
-/// The active LLM vendor. Only that vendor's key is read from the environment.
+/// Groq credentials and model selection.
 #[derive(Debug, Clone)]
 pub struct Llm {
-    pub provider: Provider,
     pub key: SecretString,
     pub model: String,
     pub fallbacks: Vec<String>,
-}
-
-impl Llm {
-    /// Groq rejects a top-level array schema, so it gets plain JSON output.
-    pub(crate) fn structured_output(&self) -> bool {
-        self.provider != Provider::Groq
-    }
 }
 
 /// Every environment read in the crate happens here.
@@ -47,28 +30,10 @@ impl Config {
             "DATABASE_URL",
             var("DATABASE_URL").context("DATABASE_URL is not set")?,
         )?);
-        let provider = match var("LLM_PROVIDER")
-            .unwrap_or_else(|_| "groq".to_string())
-            .to_lowercase()
-            .as_str()
-        {
-            "openrouter" => Provider::OpenRouter,
-            "groq" => Provider::Groq,
-            other => bail!("unknown LLM_PROVIDER: {other}"),
-        };
-        let llm = match provider {
-            Provider::OpenRouter => Llm {
-                provider,
-                key: required_key("OPENROUTER_API_KEY")?,
-                model: model_var("OPENROUTER_MODEL", DEFAULT_OPENROUTER_MODEL)?,
-                fallbacks: fallbacks("OPENROUTER_FALLBACKS", DEFAULT_OPENROUTER_FALLBACKS),
-            },
-            Provider::Groq => Llm {
-                provider,
-                key: required_key("GROQ_API_KEY")?,
-                model: model_var("GROQ_MODEL", DEFAULT_GROQ_MODEL)?,
-                fallbacks: fallbacks("GROQ_FALLBACKS", DEFAULT_GROQ_FALLBACKS),
-            },
+        let llm = Llm {
+            key: required_key("GROQ_API_KEY")?,
+            model: model_var("GROQ_MODEL", DEFAULT_GROQ_MODEL)?,
+            fallbacks: fallbacks("GROQ_FALLBACKS", DEFAULT_GROQ_FALLBACKS),
         };
         Ok(Self { database_url, llm })
     }

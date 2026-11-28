@@ -41,7 +41,7 @@ fn dump_artifact<T: serde::Serialize>(
     artifacts::write_json(dir, name, value)
 }
 
-#[instrument(skip_all)]
+#[instrument(skip_all, fields(seen_days = SEEN_DAYS, max_items = news::MAX_ITEMS))]
 async fn scrape_once(ctx: &AppContext, config: &Config) -> AnyResult<RunReport> {
     let seen = Utc::now() - ChronoDuration::days(SEEN_DAYS);
     let artifact_dir = std::env::var_os("ARTIFACT_DIR").map(PathBuf::from);
