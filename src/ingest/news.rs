@@ -14,7 +14,6 @@ use tracing::{error, info, instrument, warn};
 use urlencoding::encode;
 
 use crate::domain::Article;
-use crate::models::NewsItem;
 use crate::rules::rules;
 
 pub(crate) const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -81,7 +80,7 @@ where
 }
 
 /// One retry covers transient 503 storms; a sustained block shows up as seen=0.
-async fn fetch_feed(client: &reqwest::Client, url: &str) -> AnyResult<Vec<NewsItem>> {
+async fn fetch_feed(client: &reqwest::Client, url: &str) -> AnyResult<Vec<Article>> {
     match fetch_feed_once(client, url).await {
         Ok(items) => Ok(items),
         Err(first) => {
@@ -93,7 +92,7 @@ async fn fetch_feed(client: &reqwest::Client, url: &str) -> AnyResult<Vec<NewsIt
     }
 }
 
-async fn fetch_feed_once(client: &reqwest::Client, url: &str) -> AnyResult<Vec<NewsItem>> {
+async fn fetch_feed_once(client: &reqwest::Client, url: &str) -> AnyResult<Vec<Article>> {
     let resp = client
         .get(url)
         .send()
@@ -124,7 +123,7 @@ async fn fetch_feed_once(client: &reqwest::Client, url: &str) -> AnyResult<Vec<N
             .pub_date()
             .and_then(|d| DateTime::parse_from_rfc2822(d).ok())
             .map(|dt| dt.with_timezone(&Utc));
-        items.push(NewsItem {
+        items.push(Article {
             title: title.to_string(),
             url: article_url(link),
             source: it.source().and_then(|s| s.title().map(str::to_string)),
@@ -136,7 +135,7 @@ async fn fetch_feed_once(client: &reqwest::Client, url: &str) -> AnyResult<Vec<N
 }
 
 #[instrument(skip(client))]
-pub(crate) async fn fetch_items(client: &reqwest::Client) -> AnyResult<Vec<NewsItem>> {
+pub(crate) async fn fetch_items(client: &reqwest::Client) -> AnyResult<Vec<Article>> {
     let jobs = rules()
         .news
         .queries
@@ -147,7 +146,7 @@ pub(crate) async fn fetch_items(client: &reqwest::Client) -> AnyResult<Vec<NewsI
             async move { fetch_feed(&client, &url).await }
         })
         .collect();
-    let mut items: Vec<NewsItem> = Vec::new();
+    let mut items: Vec<Article> = Vec::new();
     for res in fan_out(RSS_CONCURRENCY, jobs).await {
         match res {
             Ok(found) => items.extend(found),
@@ -165,7 +164,7 @@ pub(crate) async fn fetch_items(client: &reqwest::Client) -> AnyResult<Vec<NewsI
     Ok(items)
 }
 
-fn enforcement_score(item: &NewsItem) -> u32 {
+fn enforcement_score(item: &Article) -> u32 {
     let config = &rules().news;
     let hay = item.haystack();
     let any = |words: &[String]| words.iter().any(|w| hay.contains(w));
@@ -185,7 +184,7 @@ fn enforcement_score(item: &NewsItem) -> u32 {
     score
 }
 
-fn select_for_enrichment(mut items: Vec<NewsItem>, max_items: usize) -> Vec<NewsItem> {
+fn select_for_enrichment(mut items: Vec<Article>, max_items: usize) -> Vec<Article> {
     items.sort_by_cached_key(|item| {
         (
             Reverse(enforcement_score(item)),
@@ -287,7 +286,7 @@ async fn fetch_article(client: &reqwest::Client, url: &str) -> AnyResult<Fetched
 
 /// RSS descriptions that only repeat the headline give the extractor nothing
 /// beyond the title, which produces records with no area or concrete findings.
-fn fallback_snippet(item: &NewsItem) -> Option<String> {
+fn fallback_snippet(item: &Article) -> Option<String> {
     let snippet = item.snippet.as_deref()?.trim();
     let beyond_title = snippet
         .strip_prefix(item.title.trim())
@@ -296,7 +295,7 @@ fn fallback_snippet(item: &NewsItem) -> Option<String> {
     (beyond_title.chars().count() >= 40).then(|| snippet.to_string())
 }
 
-fn canonical(item: &NewsItem, fetched: Option<FetchedArticle>) -> (String, Option<String>) {
+fn canonical(item: &Article, fetched: Option<FetchedArticle>) -> (String, Option<String>) {
     match fetched {
         Some(FetchedArticle { final_url, snippet }) => (final_url, snippet),
         None => (item.url.clone(), fallback_snippet(item)),
@@ -306,7 +305,7 @@ fn canonical(item: &NewsItem, fetched: Option<FetchedArticle>) -> (String, Optio
 #[instrument(skip(client, items, seen), fields(max_items = max_items, available = items.len()))]
 pub(crate) async fn enrich(
     client: &reqwest::Client,
-    items: Vec<NewsItem>,
+    items: Vec<Article>,
     seen: &HashSet<String>,
     max_items: usize,
 ) -> Vec<Article> {
@@ -319,22 +318,20 @@ pub(crate) async fn enrich(
     );
     let jobs = items
         .into_iter()
-        .enumerate()
-        .map(|(i, item)| {
+        .map(|item| {
             let client = (*client).clone();
             let url = item.url.clone();
             async move {
                 let res = fetch_article(&client, &url).await;
-                (i, item, res)
+                (item, res)
             }
         })
         .collect();
-    let mut results = fan_out(FETCH_CONCURRENCY, jobs).await;
-    results.sort_by_key(|(i, _, _)| *i);
+    let results = fan_out(FETCH_CONCURRENCY, jobs).await;
 
     let mut out: Vec<Article> = Vec::with_capacity(results.len());
     let mut urls: HashSet<String> = HashSet::new();
-    for (_, item, res) in results {
+    for (item, res) in results {
         let fetched = match res {
             Ok(fetched) => Some(fetched),
             Err(e) => {
@@ -351,7 +348,11 @@ pub(crate) async fn enrich(
             continue;
         }
         urls.insert(url.clone());
-        out.push(Article::new(item, url, snippet));
+        out.push(Article {
+            url,
+            snippet,
+            ..item
+        });
     }
     out.sort_by(|a, b| {
         b.published

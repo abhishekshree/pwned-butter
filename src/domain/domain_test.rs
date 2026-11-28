@@ -1,8 +1,6 @@
-use test_case::test_case;
-
 use super::*;
 use crate::error::Rejection;
-use crate::models::{ActionType, LlmAction, Sanitized};
+use crate::models::{ActionType, LlmAction};
 
 const FULL: &str = "licence suspended over cockroach infestation found during inspection";
 
@@ -24,25 +22,99 @@ fn candidate(est: &str, details: Option<&str>) -> Result<Candidate, Rejection> {
         details: details.map(str::to_string),
         ..Default::default()
     };
-    Candidate::try_new(Sanitized::new(action), &article())
+    Candidate::try_new(action, &article())
 }
 
-#[test_case("Domino's Vile Parle", Some(FULL), Ok(()); "complete record")]
-#[test_case("IIT Bombay Hostel Canteen (Hostels 12, 13 & 14)", Some(FULL), Ok(()); "long genuine name")]
-#[test_case("Domino's Vile Parle", Some("12345678901234567890"), Ok(()); "details at floor")]
-#[test_case("'Popularity was never my goal'", Some(FULL), Err(Rejection::QuoteLedEstablishment); "quote-led name")]
-#[test_case("Popular Re 1 Ayurvedic Digestive Tablet Fails Maharashtra FDA Quality Test", Some(FULL), Err(Rejection::ProductNotOutlet); "product name")]
-#[test_case("Maharashtra FDA rolls out year", Some(FULL), Err(Rejection::RegulatorNotOutlet); "regulator name")]
-#[test_case("FDA awaiting response from restaurants at Mumbai Cricket Association premises", Some(FULL), Err(Rejection::PendingAction); "awaiting response")]
-#[test_case("FDA awaits replies from restaurants at MCA premises", Some(FULL), Err(Rejection::PendingAction); "awaits replies")]
-#[test_case("Maharashtra FDA awaits replies from five MCA restaurants over licensing violations", Some(FULL), Err(Rejection::PendingAction); "awaits replies long")]
-#[test_case("Popular Re 1 Digestive Item Fails Maharashtra Quality Test Today Here", Some(FULL), Err(Rejection::HeadlineFragment); "headline fragment")]
-#[test_case("Domino's Vile Parle", None, Err(Rejection::NoSubstantiveDetails); "no details")]
-#[test_case("Domino's Vile Parle", Some("1234567890123456789"), Err(Rejection::NoSubstantiveDetails); "short details")]
-#[test_case("MCA BKC Club", Some("FDA has issued a notice and seeks explanation from the club within seven days"), Err(Rejection::PendingAction); "seeks explanation")]
-#[test_case("   ", Some(FULL), Err(Rejection::NoEstablishment); "blank name")]
-fn gates_junk_shapes(est: &str, details: Option<&str>, expected: Result<(), Rejection>) {
-    assert_eq!(candidate(est, details).map(|_| ()), expected, "{est}");
+#[test]
+fn gates_junk_shapes() {
+    let cases = [
+        ("complete record", "Domino's Vile Parle", Some(FULL), Ok(())),
+        (
+            "long genuine name",
+            "IIT Bombay Hostel Canteen (Hostels 12, 13 & 14)",
+            Some(FULL),
+            Ok(()),
+        ),
+        (
+            "details at floor",
+            "Domino's Vile Parle",
+            Some("12345678901234567890"),
+            Ok(()),
+        ),
+        (
+            "quote-led name",
+            "'Popularity was never my goal'",
+            Some(FULL),
+            Err(Rejection::QuoteLedEstablishment),
+        ),
+        (
+            "product name",
+            "Popular Re 1 Ayurvedic Digestive Tablet Fails Maharashtra FDA Quality Test",
+            Some(FULL),
+            Err(Rejection::ProductNotOutlet),
+        ),
+        (
+            "regulator name",
+            "Maharashtra FDA rolls out year",
+            Some(FULL),
+            Err(Rejection::RegulatorNotOutlet),
+        ),
+        (
+            "awaiting response",
+            "FDA awaiting response from restaurants at Mumbai Cricket Association premises",
+            Some(FULL),
+            Err(Rejection::PendingAction),
+        ),
+        (
+            "awaits replies",
+            "FDA awaits replies from restaurants at MCA premises",
+            Some(FULL),
+            Err(Rejection::PendingAction),
+        ),
+        (
+            "awaits replies long",
+            "Maharashtra FDA awaits replies from five MCA restaurants over licensing violations",
+            Some(FULL),
+            Err(Rejection::PendingAction),
+        ),
+        (
+            "headline fragment",
+            "Popular Re 1 Digestive Item Fails Maharashtra Quality Test Today Here",
+            Some(FULL),
+            Err(Rejection::HeadlineFragment),
+        ),
+        (
+            "no details",
+            "Domino's Vile Parle",
+            None,
+            Err(Rejection::NoSubstantiveDetails),
+        ),
+        (
+            "short details",
+            "Domino's Vile Parle",
+            Some("1234567890123456789"),
+            Err(Rejection::NoSubstantiveDetails),
+        ),
+        (
+            "seeks explanation",
+            "MCA BKC Club",
+            Some("FDA has issued a notice and seeks explanation from the club within seven days"),
+            Err(Rejection::PendingAction),
+        ),
+        (
+            "blank name",
+            "   ",
+            Some(FULL),
+            Err(Rejection::NoEstablishment),
+        ),
+    ];
+    for (name, est, details, expected) in cases {
+        assert_eq!(
+            candidate(est, details).map(|_| ()),
+            expected,
+            "{name}: {est}"
+        );
+    }
 }
 
 #[test]
@@ -57,5 +129,5 @@ fn keeps_inspection_without_violations_when_detailed() {
         ),
         ..Default::default()
     };
-    assert!(Candidate::try_new(Sanitized::new(action), &article()).is_ok());
+    assert!(Candidate::try_new(action, &article()).is_ok());
 }

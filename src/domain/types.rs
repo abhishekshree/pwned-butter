@@ -1,11 +1,11 @@
 //! Validated domain types.
 
 use chrono::{DateTime, NaiveDate, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use strum::{EnumIter, IntoEnumIterator};
 
 use crate::error::Rejection;
-use crate::models::{ActionType, LlmAction, NewsItem, OutletType, Sanitized};
+use crate::models::{ActionType, LlmAction, OutletType};
 use crate::rules::rules;
 
 /// The only cities this tracker covers.
@@ -44,7 +44,7 @@ impl CoveredCity {
 }
 
 /// An RSS item after enrichment, with its canonical URL resolved.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Article {
     pub title: String,
     pub url: String,
@@ -54,16 +54,6 @@ pub struct Article {
 }
 
 impl Article {
-    pub fn new(item: NewsItem, url: String, snippet: Option<String>) -> Self {
-        Self {
-            title: item.title,
-            url,
-            source: item.source,
-            published: item.published,
-            snippet,
-        }
-    }
-
     pub fn haystack(&self) -> String {
         format!(
             "{} {} {}",
@@ -76,8 +66,6 @@ impl Article {
 }
 
 /// A validated record ready for persistence — also the insert DTO.
-// #[non_exhaustive] only seals against other crates; this field seals within the crate too.
-#[allow(clippy::manual_non_exhaustive)]
 #[derive(Debug, Clone, Serialize)]
 pub struct Candidate {
     pub establishment: String,
@@ -97,14 +85,11 @@ pub struct Candidate {
     pub source_publisher: Option<String>,
     pub source_headline: Option<String>,
     pub published_at: Option<DateTime<Utc>>,
-    #[serde(skip)]
-    _sealed: (),
 }
 
 impl Candidate {
     /// Unknown outlet codes become `None` because the DB column is nullable.
-    pub fn try_new(action: Sanitized<LlmAction>, article: &Article) -> Result<Self, Rejection> {
-        let action = action.into_inner();
+    pub fn try_new(action: LlmAction, article: &Article) -> Result<Self, Rejection> {
         let establishment =
             nonempty(Some(action.establishment.as_str())).ok_or(Rejection::NoEstablishment)?;
         let city = CoveredCity::parse(action.city.as_deref().unwrap_or(""))
@@ -168,7 +153,6 @@ impl Candidate {
             source_publisher: nonempty(article.source.as_deref()),
             source_headline: Some(article.title.clone()),
             published_at: article.published,
-            _sealed: (),
         })
     }
 }
@@ -211,20 +195,23 @@ impl EventKey {
 
         fn tokens(s: &str) -> Vec<&str> {
             s.split(|c: char| !c.is_alphanumeric())
-                .filter(|t| !t.is_empty() && !GENERIC_WORDS.contains(t))
+                .filter(|t| !t.is_empty())
                 .collect()
         }
 
-        // "mca" = initials of the consecutive run "mumbai cricket association".
-        fn is_acronym_of(acro: &str, words: &[&str]) -> bool {
-            !acro.is_empty()
-                && acro.len() <= words.len()
-                && acro.chars().zip(words).all(|(c, w)| w.starts_with(c))
-        }
-
-        fn token_matches(t: &str, words: &[&str]) -> bool {
-            words.contains(&t)
-                || (0..=words.len().saturating_sub(t.len())).any(|i| is_acronym_of(t, &words[i..]))
+        /// Exact word, or initials of a run of words; returns the matched length.
+        fn token_match_len(token: &str, content: &[&str], all: &[&str]) -> Option<usize> {
+            if content.contains(&token) {
+                return Some(token.len());
+            }
+            let mut rest = all;
+            let mut matched = 0;
+            for ch in token.chars() {
+                let index = rest.iter().position(|word| word.starts_with(ch))?;
+                matched += rest[index].len();
+                rest = &rest[index + 1..];
+            }
+            (matched > 0).then_some(matched)
         }
 
         let norm = |s: &str| -> String {
@@ -242,12 +229,23 @@ impl EventKey {
         if a.len().min(b.len()) >= 6 && (a.contains(&b) || b.contains(&a)) {
             return true;
         }
-        let side_matches = |from: &[&str], to: &[&str]| {
-            from.iter().map(|t| t.len()).sum::<usize>() >= 6
-                && from.iter().all(|t| token_matches(t, to))
-                && from.iter().any(|t| t.len() >= 3 && to.contains(t))
+        fn content<'a>(all: &[&'a str]) -> Vec<&'a str> {
+            all.iter()
+                .copied()
+                .filter(|t| !GENERIC_WORDS.contains(t))
+                .collect()
+        }
+        let (all_a, all_b) = (tokens(&a), tokens(&b));
+        let (content_a, content_b) = (content(&all_a), content(&all_b));
+        let side_matches = |from: &[&str], to_content: &[&str], to_all: &[&str]| {
+            let lengths: Vec<usize> = from
+                .iter()
+                .filter_map(|t| token_match_len(t, to_content, to_all))
+                .collect();
+            lengths.len() == from.len()
+                && lengths.iter().any(|&len| len >= 3)
+                && lengths.iter().sum::<usize>() >= 6
         };
-        let (ta, tb) = (tokens(&a), tokens(&b));
-        side_matches(&ta, &tb) || side_matches(&tb, &ta)
+        side_matches(&content_a, &content_b, &all_b) || side_matches(&content_b, &content_a, &all_a)
     }
 }

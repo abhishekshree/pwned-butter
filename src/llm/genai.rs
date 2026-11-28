@@ -10,10 +10,10 @@ use tokio::time::sleep;
 use tracing::warn;
 
 use crate::config::{Llm, Provider};
-use crate::domain::{Article, Candidate};
-use crate::models::{LlmAction, Sanitized};
+use crate::domain::Article;
+use crate::models::LlmAction;
 
-use super::extract::{COLLAPSE_PROMPT, SYSTEM_PROMPT, strip_code_fences};
+use super::extract::{SYSTEM_PROMPT, strip_code_fences};
 use super::triage::{TRIAGE_PROMPT, Verdict, parse_verdicts, triage_schema};
 
 const MAX_ATTEMPTS: usize = 3;
@@ -137,37 +137,6 @@ pub(crate) async fn triage_batch(
     (text.and_then(|text| parse_verdicts(&text)), calls)
 }
 
-/// Names and dates only: the model needs no article text to spot alias variants.
-pub(crate) async fn collapse_batch(
-    client: &Client,
-    model: &str,
-    candidates: &[Candidate],
-) -> (AnyResult<String>, usize) {
-    let records: Vec<Value> = candidates
-        .iter()
-        .enumerate()
-        .map(|(id, c)| {
-            json!({
-                "id": id,
-                "name": c.establishment,
-                "date": c.action_date,
-                "type": c.action_type.to_string(),
-            })
-        })
-        .collect();
-    let user = match serde_json::to_string(&json!({"records": records})) {
-        Ok(user) => user,
-        Err(error) => return (Err(error).context("serialize collapse batch"), 0),
-    };
-    let request =
-        ChatRequest::from_system(COLLAPSE_PROMPT).append_message(ChatMessage::user(user.clone()));
-    // Groq rejects top-level array schemas; the response is parsed by hand anyway.
-    let options = json_options(1024, json!({}), false);
-    let (text, calls) = chat_text(client, model, request, &options).await;
-    log_llm("collapse", model, &user, &text);
-    (text, calls)
-}
-
 /// The model returns chunk-local indices; `absolute` resolves them and drops out-of-range values.
 pub(crate) async fn extract_batch<'a>(
     client: &Client,
@@ -261,7 +230,7 @@ pub(crate) fn parse_llm_text(text: &str) -> AnyResult<Vec<LlmAction>> {
     Ok(actions)
 }
 
-pub(crate) fn sanitize_action(mut action: LlmAction) -> Sanitized<LlmAction> {
+pub(crate) fn sanitize_action(mut action: LlmAction) -> LlmAction {
     action.establishment = clamp(action.establishment, 200);
     clamp_opt(&mut action.area, 120);
     clamp_opt(&mut action.city, 120);
@@ -283,7 +252,7 @@ pub(crate) fn sanitize_action(mut action: LlmAction) -> Sanitized<LlmAction> {
         .filter(|platform| !platform.is_empty())
         .collect();
     action.platforms.truncate(6);
-    Sanitized::new(action)
+    action
 }
 
 fn clamp(value: String, max: usize) -> String {
