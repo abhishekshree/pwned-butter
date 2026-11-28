@@ -1,24 +1,21 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use anyhow::{Context, Result as AnyResult, bail};
+use anyhow::{Context, Result as AnyResult};
 use chrono::{DateTime, Utc};
-use serde_json::Value;
+use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 
-use crate::config::{Config, Persistence};
+use crate::config::Config;
 use crate::domain::{Candidate, EventKey};
 use crate::report::{RunReport, StoreOutcome};
 
 pub async fn pool(config: &Config) -> AnyResult<PgPool> {
-    let Persistence::Postgres { url } = &config.persistence else {
-        bail!("pool requires Postgres persistence");
-    };
     PgPoolOptions::new()
         .max_connections(5)
         .acquire_timeout(Duration::from_secs(15))
-        .connect(url.expose())
+        .connect(config.database_url.expose())
         .await
         .context("connect to neon")
 }
@@ -35,43 +32,16 @@ pub(crate) async fn seen_urls(pool: &PgPool, cutoff: DateTime<Utc>) -> AnyResult
     )
 }
 
-const INSERT_TAIL: &str = "establishment, area, city, brand, operator, outlet_type, action_type,
-                action_date, violations, compliance_score, fssai_number, details,
-                platforms, source_url, source_publisher, source_headline, published_at";
-
-async fn execute_insert(
-    conn: &mut sqlx::PgConnection,
-    r: &Candidate,
-    conflict_tail: &str,
-) -> AnyResult<u64> {
-    let sql = format!(
-        "INSERT INTO actions ({INSERT_TAIL}) VALUES \
-         ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) \
-         ON CONFLICT (source_url, establishment, action_date) {conflict_tail}"
-    );
-    // conflict_tail is a compile-time constant, not user input.
-    let res = sqlx::query(sqlx::AssertSqlSafe(sql))
-        .bind(&r.establishment)
-        .bind(&r.area)
-        .bind(r.city.as_str())
-        .bind(&r.brand)
-        .bind(&r.operator)
-        .bind(r.outlet_type.map(|t| t.to_string()))
-        .bind(r.action_type.to_string())
-        .bind(r.action_date)
-        .bind(&r.violations)
-        .bind(r.compliance_score)
-        .bind(&r.fssai_number)
-        .bind(&r.details)
-        .bind(&r.platforms)
-        .bind(&r.source_url)
-        .bind(&r.source_publisher)
-        .bind(&r.source_headline)
-        .bind(r.published_at)
-        .execute(conn)
-        .await?;
-    Ok(res.rows_affected())
-}
+const UPSERT_SQL: &str = "INSERT INTO actions (
+            establishment, area, city, brand, operator, outlet_type, action_type,
+            action_date, violations, compliance_score, fssai_number, details,
+            platforms, source_url, source_publisher, source_headline, published_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+         ON CONFLICT (source_url, establishment, action_date) DO UPDATE SET
+            violations = EXCLUDED.violations,
+            platforms = EXCLUDED.platforms,
+            details = EXCLUDED.details,
+            updated_at = now()";
 
 /// `EventKey` is the dedup authority; the SQL EXCLUDE constraint is the backstop.
 pub(crate) async fn upsert_actions(pool: &PgPool, rows: &[Candidate]) -> AnyResult<StoreOutcome> {
@@ -101,16 +71,27 @@ pub(crate) async fn upsert_actions(pool: &PgPool, rows: &[Candidate]) -> AnyResu
             continue;
         }
         outcome.inserted += usize::try_from(
-            execute_insert(
-                &mut tx,
-                r,
-                "DO UPDATE SET
-                    violations = EXCLUDED.violations,
-                    platforms = EXCLUDED.platforms,
-                    details = EXCLUDED.details,
-                    updated_at = now()",
-            )
-            .await?,
+            sqlx::query(UPSERT_SQL)
+                .bind(&r.establishment)
+                .bind(&r.area)
+                .bind(r.city.as_str())
+                .bind(&r.brand)
+                .bind(&r.operator)
+                .bind(r.outlet_type.map(|t| t.to_string()))
+                .bind(r.action_type.to_string())
+                .bind(r.action_date)
+                .bind(&r.violations)
+                .bind(r.compliance_score)
+                .bind(&r.fssai_number)
+                .bind(&r.details)
+                .bind(&r.platforms)
+                .bind(&r.source_url)
+                .bind(&r.source_publisher)
+                .bind(&r.source_headline)
+                .bind(r.published_at)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected(),
         )?;
     }
     tx.commit().await?;
@@ -128,9 +109,10 @@ pub(crate) async fn finish_run(
     pool: &PgPool,
     run_id: i64,
     report: &RunReport,
-    details: &Value,
+    model: &str,
 ) -> AnyResult<()> {
-    let details_json = report.to_details(details);
+    let mut details_json = report.to_details();
+    details_json["model"] = json!(model);
 
     sqlx::query(
         "UPDATE fetch_runs SET finished_at = now(), status = 'ok',

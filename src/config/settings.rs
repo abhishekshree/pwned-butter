@@ -1,9 +1,8 @@
 use std::env::var;
-use std::path::PathBuf;
 
 use anyhow::{Context, Result as AnyResult, bail};
 
-use super::{Persistence, SecretString};
+use super::SecretString;
 
 pub(crate) const DEFAULT_OPENROUTER_MODEL: &str = "nvidia/nemotron-3-ultra-550b-a55b:free";
 pub(crate) const DEFAULT_OPENROUTER_FALLBACKS: &[&str] =
@@ -38,23 +37,16 @@ impl Llm {
 /// Every environment read in the crate happens here.
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub persistence: Persistence,
+    pub database_url: SecretString,
     pub llm: Llm,
 }
 
 impl Config {
     pub fn from_env() -> AnyResult<Self> {
-        let persistence = match var("LOCAL_WRITER_PATH") {
-            Ok(path) => Persistence::Local {
-                path: PathBuf::from(non_empty("LOCAL_WRITER_PATH", path)?),
-            },
-            Err(_) => Persistence::Postgres {
-                url: SecretString::new(non_empty(
-                    "DATABASE_URL",
-                    var("DATABASE_URL").context("DATABASE_URL is not set")?,
-                )?),
-            },
-        };
+        let database_url = SecretString::new(non_empty(
+            "DATABASE_URL",
+            var("DATABASE_URL").context("DATABASE_URL is not set")?,
+        )?);
         let provider = match var("LLM_PROVIDER")
             .unwrap_or_else(|_| "groq".to_string())
             .to_lowercase()
@@ -78,7 +70,7 @@ impl Config {
                 fallbacks: fallbacks("GROQ_FALLBACKS", DEFAULT_GROQ_FALLBACKS),
             },
         };
-        Ok(Self { persistence, llm })
+        Ok(Self { database_url, llm })
     }
 }
 
