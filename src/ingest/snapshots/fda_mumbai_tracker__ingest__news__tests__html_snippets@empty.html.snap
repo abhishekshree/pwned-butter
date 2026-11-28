@@ -1,0 +1,7 @@
+---
+source: src/ingest/news_test.rs
+expression: "format!(\"extract: {:?}\\ndescription: {:?}\", extract_snippet(&html),\ndescription_snippet(&html))"
+input_file: src/ingest/fixtures/empty.html
+---
+extract: None
+description: None

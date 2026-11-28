@@ -1,8 +1,0 @@
----
-source: src/ingest/news_test.rs
-expression: out
----
-article: title then paragraphs -> Some("FDA seals eatery\nFDA officials sealed the eatery after finding serious hygiene violations and expired stock.")
-empty page -> None
-google news landing page -> None
-bing description -> Some("FDA suspended the licence over & pests.")

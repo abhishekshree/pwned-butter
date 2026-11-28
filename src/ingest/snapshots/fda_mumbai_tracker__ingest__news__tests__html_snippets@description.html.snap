@@ -1,0 +1,7 @@
+---
+source: src/ingest/news_test.rs
+expression: "format!(\"extract: {:?}\\ndescription: {:?}\", extract_snippet(&html),\ndescription_snippet(&html))"
+input_file: src/ingest/fixtures/description.html
+---
+extract: None
+description: Some("FDA suspended the licence over & pests.")
