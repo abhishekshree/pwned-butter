@@ -1,4 +1,5 @@
 use chrono::{Duration, Utc};
+use test_case::test_case;
 
 use super::{
     FetchedArticle, article_url, canonical, description_snippet, extract_snippet, fallback_snippet,
@@ -9,10 +10,12 @@ use crate::models::NewsItem;
 #[test]
 fn extract_snippet_leads_with_title_then_paragraphs() {
     let html = "<html><head><title>FDA seals eatery</title></head>            <body><p>FDA officials sealed the eatery after finding serious hygiene violations and expired stock.</p></body></html>";
-    let snippet = extract_snippet(html).expect("basic article yields a snippet");
-    assert!(
-        snippet.contains("FDA seals eatery"),
-        "title leads the snippet"
+    assert_eq!(
+        extract_snippet(html).as_deref(),
+        Some(
+            "FDA seals eatery\nFDA officials sealed the eatery after finding serious hygiene violations and expired stock."
+        ),
+        "title and paragraphs are joined in that order"
     );
 }
 
@@ -105,39 +108,16 @@ fn canonical_uses_final_url_on_success_and_original_url_on_failure() {
     assert_eq!(snippet, None, "headline alone is not enough evidence");
 }
 
-#[test]
-fn fallback_snippet_drops_headline_echo() {
-    let title = "FDA suspends six Mumbai licences";
+#[test_case("FDA suspends six Mumbai licences - The 420.in", None; "headline echo adds no evidence")]
+#[test_case("FDA suspends six Mumbai licences Inspectors found cockroaches, uncovered dustbins and raw food stored with cooked food at six outlets including Blinkit in Fort.", Some("FDA suspends six Mumbai licences Inspectors found cockroaches, uncovered dustbins and raw food stored with cooked food at six outlets including Blinkit in Fort."); "substantive description survives")]
+fn fallback_snippet_uses_only_substantive_descriptions(snippet: &str, expected: Option<&str>) {
     let item = NewsItem {
-        title: title.into(),
+        title: "FDA suspends six Mumbai licences".into(),
         url: "https://news.google.com/original".into(),
         source: None,
         published: None,
-        snippet: Some(format!("{title} - The 420.in")),
+        snippet: Some(snippet.into()),
     };
 
-    assert_eq!(
-        fallback_snippet(&item),
-        None,
-        "a description that only repeats the title adds no evidence"
-    );
-}
-
-#[test]
-fn fallback_snippet_keeps_substantive_description() {
-    let title = "FDA suspends six Mumbai licences";
-    let detail = "Inspectors found cockroaches, uncovered dustbins and raw food stored with cooked food at six outlets including Blinkit in Fort.";
-    let item = NewsItem {
-        title: title.into(),
-        url: "https://news.google.com/original".into(),
-        source: None,
-        published: None,
-        snippet: Some(format!("{title} {detail}")),
-    };
-
-    assert_eq!(
-        fallback_snippet(&item).as_deref(),
-        Some(item.snippet.as_deref().expect("snippet set")),
-        "real article text still survives a blocked publisher page"
-    );
+    assert_eq!(fallback_snippet(&item).as_deref(), expected);
 }

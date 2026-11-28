@@ -4,14 +4,14 @@ pub mod context;
 pub mod db;
 pub mod domain;
 pub mod error;
+pub mod ingest;
 pub mod llm;
 mod local;
 pub mod models;
-pub mod news;
 pub mod report;
-pub mod rules;
-pub mod scrape;
 mod store;
+
+pub use ingest::{news, rules, scrape};
 
 /// The single startup boundary for binaries.
 pub fn init() {

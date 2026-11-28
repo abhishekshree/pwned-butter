@@ -13,12 +13,21 @@ use crate::config::{Llm, Provider};
 use crate::domain::{Article, Candidate};
 use crate::models::{LlmAction, Sanitized};
 
+use super::extract::{COLLAPSE_PROMPT, SYSTEM_PROMPT, strip_code_fences};
 use super::triage::{TRIAGE_PROMPT, Verdict, parse_verdicts, triage_schema};
-use super::{COLLAPSE_PROMPT, SYSTEM_PROMPT, strip_code_fences, truncate};
 
 const MAX_ATTEMPTS: usize = 3;
 /// A 429 is a tokens-per-minute window, so a short retry just burns more tokens.
 const RATE_LIMIT_PAUSE: Duration = Duration::from_secs(60);
+
+fn truncate(s: &str, max: usize) -> String {
+    let out: String = s.chars().take(max).collect();
+    if s.chars().count() > max {
+        format!("{out}…")
+    } else {
+        out
+    }
+}
 
 pub(crate) fn client(llm: &Llm) -> AnyResult<Client> {
     let adapter = match llm.provider {
@@ -293,5 +302,5 @@ fn clamp_opt(field: &mut Option<String>, max: usize) {
 }
 
 #[cfg(test)]
-#[path = "../../tests/unit/llm_genai.rs"]
+#[path = "genai_test.rs"]
 mod tests;

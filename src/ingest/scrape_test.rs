@@ -28,10 +28,6 @@ fn action() -> LlmAction {
     }
 }
 
-fn try_new(action: LlmAction, source: &Article) -> Result<Candidate, Rejection> {
-    Candidate::try_new(Sanitized::new(action), source)
-}
-
 fn published() -> Option<chrono::DateTime<Utc>> {
     Some(
         Utc.with_ymd_and_hms(2026, 11, 18, 9, 0, 0)
@@ -46,7 +42,7 @@ fn candidate_keeps_its_source_provenance() {
     action.brand = Some("Domino's".into());
     action.outlet_type = Some("restaurant".into());
     let source = article(published());
-    let candidate = try_new(action, &source).expect("valid");
+    let candidate = Candidate::try_new(Sanitized::new(action), &source).expect("valid");
 
     assert_eq!(candidate.source_url, "https://a.test/1");
     assert_eq!(candidate.source_publisher.as_deref(), Some("Test Press"));
@@ -64,7 +60,7 @@ fn rejects_out_of_scope_city() {
     let mut action = action();
     action.city = Some("Nashik".into());
     assert_eq!(
-        try_new(action, &article(published())).err(),
+        Candidate::try_new(Sanitized::new(action), &article(published())).err(),
         Some(Rejection::OutOfScopeCity),
         "uncovered city is rejected at the boundary"
     );
@@ -75,7 +71,7 @@ fn rejects_missing_action_date() {
     let mut action = action();
     action.action_date = None;
     assert_eq!(
-        try_new(action, &article(None)).err(),
+        Candidate::try_new(Sanitized::new(action), &article(None)).err(),
         Some(Rejection::NoActionDate),
         "no reported or published date means no fabricated date"
     );
@@ -85,7 +81,8 @@ fn rejects_missing_action_date() {
 fn unknown_outlet_code_becomes_none() {
     let mut action = action();
     action.outlet_type = Some("pavement stand".into());
-    let candidate = try_new(action, &article(published())).expect("valid candidate");
+    let candidate =
+        Candidate::try_new(Sanitized::new(action), &article(published())).expect("valid candidate");
     assert_eq!(
         candidate.outlet_type, None,
         "unknown codes are not an error sink"
@@ -100,6 +97,7 @@ fn unknown_outlet_code_becomes_none() {
 fn compliance_score_keeps_only_0_to_100(score: Option<i32>, expected: Option<i32>) {
     let mut action = action();
     action.compliance_score = score;
-    let candidate = try_new(action, &article(published())).expect("valid candidate");
+    let candidate =
+        Candidate::try_new(Sanitized::new(action), &article(published())).expect("valid candidate");
     assert_eq!(candidate.compliance_score, expected, "{score:?}");
 }

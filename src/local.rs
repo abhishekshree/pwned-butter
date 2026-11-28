@@ -144,5 +144,5 @@ impl LocalWriter {
 }
 
 #[cfg(test)]
-#[path = "../tests/unit/local.rs"]
+#[path = "local_test.rs"]
 mod tests;

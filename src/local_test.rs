@@ -29,10 +29,6 @@ fn candidate_on(url: &str, establishment: &str, date: &str) -> Candidate {
     Candidate::try_new(Sanitized::new(action), &article).expect("valid candidate")
 }
 
-fn candidate(url: &str, establishment: &str) -> Candidate {
-    candidate_on(url, establishment, "2026-08-11")
-}
-
 #[test]
 fn run_ids_increment_once_per_run() {
     let path = temp_dir().join(format!("fda-local-runs-{}.jsonl", id()));
@@ -51,7 +47,11 @@ fn writes_deduplicates_and_reports_seen_urls() {
     let path = temp_dir().join(format!("fda-local-writer-{}.jsonl", id()));
     let _ = remove_file(&path);
     let writer = LocalWriter::new(path.clone());
-    let rows = [candidate("https://example.test/1", "Domino's Vile Parle")];
+    let rows = [candidate_on(
+        "https://example.test/1",
+        "Domino's Vile Parle",
+        "2026-08-11",
+    )];
 
     let first = writer.upsert_actions(&rows).expect("first write");
     let second = writer.upsert_actions(&rows).expect("second write");

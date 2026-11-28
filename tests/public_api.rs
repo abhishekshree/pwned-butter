@@ -3,6 +3,7 @@
 use std::fs::{self, File};
 
 use serde_json::json;
+use test_case::test_case;
 
 use fda_mumbai_tracker::artifacts::write_json;
 use fda_mumbai_tracker::domain::EventKey;
@@ -23,60 +24,15 @@ fn writes_named_json_file() {
     fs::remove_dir_all(dir).ok();
 }
 
-#[test]
-fn same_event_matches_case_and_containment() {
-    assert!(
-        same_event("Otters Club", "otters club"),
-        "case-insensitive exact"
-    );
-    assert!(
-        same_event("Otters Club", "Otters Club, Carter Road, Bandra West"),
-        "locality qualifier still matches"
-    );
-    assert!(
-        same_event(
-            "Blinkit Dark Store (Malad West)",
-            "Blinkit Dark Store Malad West"
-        ),
-        "punctuation-insensitive match"
-    );
-}
-
-#[test]
-fn same_event_rejects_different_outlets() {
-    assert!(
-        !same_event(
-            "Domino's Pizza (Borivali West)",
-            "Domino's Pizza (Ghatkopar West)"
-        ),
-        "different localities are different events"
-    );
-    assert!(
-        !same_event("Domino's Pizza", "Pizza Hut Borivali"),
-        "different brands never match"
-    );
-}
-
-#[test]
-fn same_event_short_names_match_exactly_only() {
-    assert!(
-        !same_event("KFC", "KFC Andheri"),
-        "short name containment is too loose"
-    );
-    assert!(same_event("KFC", "kfc"), "exact short names match");
-}
-
-#[test]
-fn same_event_matches_acronym_and_venue_drift() {
-    assert!(
-        same_event("MCA BKC Club", "Mumbai Cricket Association (BKC Facility)"),
-        "acronym plus venue-word drift matches (Aug 2026 dupes)"
-    );
-    assert!(
-        !same_event(
-            "Cricket Club of India Canteen",
-            "Mumbai Cricket Association (BKC Facility)"
-        ),
-        "shared generic words alone do not match"
-    );
+#[test_case("Otters Club", "otters club", true; "case-insensitive exact")]
+#[test_case("Otters Club", "Otters Club, Carter Road, Bandra West", true; "locality qualifier still matches")]
+#[test_case("Blinkit Dark Store (Malad West)", "Blinkit Dark Store Malad West", true; "punctuation-insensitive match")]
+#[test_case("Domino's Pizza (Borivali West)", "Domino's Pizza (Ghatkopar West)", false; "different localities are different events")]
+#[test_case("Domino's Pizza", "Pizza Hut Borivali", false; "different brands never match")]
+#[test_case("KFC", "KFC Andheri", false; "short name containment is too loose")]
+#[test_case("KFC", "kfc", true; "exact short names match")]
+#[test_case("MCA BKC Club", "Mumbai Cricket Association (BKC Facility)", true; "acronym plus venue-word drift matches")]
+#[test_case("Cricket Club of India Canteen", "Mumbai Cricket Association (BKC Facility)", false; "shared generic words alone do not match")]
+fn same_event_matches(a: &str, b: &str, expected: bool) {
+    assert_eq!(same_event(a, b), expected, "{a} vs {b}");
 }

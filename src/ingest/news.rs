@@ -362,5 +362,5 @@ pub(crate) async fn enrich(
 }
 
 #[cfg(test)]
-#[path = "../tests/unit/news.rs"]
+#[path = "news_test.rs"]
 mod tests;

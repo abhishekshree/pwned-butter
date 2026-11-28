@@ -1,6 +1,7 @@
 use test_case::test_case;
 
 use super::*;
+use crate::error::Rejection;
 use crate::models::{ActionType, LlmAction, Sanitized};
 
 const FULL: &str = "licence suspended over cockroach infestation found during inspection";

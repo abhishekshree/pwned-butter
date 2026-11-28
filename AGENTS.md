@@ -60,10 +60,12 @@ Applies to all Rust in this repo. Before committing: `cargo fmt --check`,
 
 ### Tests
 
-- `#[cfg(test)]` module per file, with its body in `tests/unit/<module>.rs`
+- `#[cfg(test)]` module per file, with its body in a sibling `<module>_test.rs`
   via `#[path]`; Arrange-Act-Assert, failure messages that say what broke.
 - Tests that only use the public API go in `tests/` as standalone
   integration-test crates.
+- `mod.rs` files only declare submodules and re-export them; implementation
+  lives in the named child module.
 - Every new branch, parser, or dedup/match rule gets a test; trivial
   pass-throughs do not.
 - No network or DB in unit tests: test the pure function or mock at the

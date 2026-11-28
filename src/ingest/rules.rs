@@ -37,5 +37,5 @@ pub(crate) fn rules() -> &'static Rules {
 }
 
 #[cfg(test)]
-#[path = "../tests/unit/rules.rs"]
+#[path = "rules_test.rs"]
 mod tests;

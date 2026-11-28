@@ -98,5 +98,5 @@ async fn scrape_once(
 }
 
 #[cfg(test)]
-#[path = "../tests/unit/scrape.rs"]
+#[path = "scrape_test.rs"]
 mod tests;

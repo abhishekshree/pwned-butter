@@ -3,7 +3,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::warn;
 
-use super::strip_code_fences;
+use super::extract::strip_code_fences;
 
 pub(crate) const TRIAGE_PROMPT: &str = include_str!("../prompts/triage.txt");
 
@@ -49,5 +49,5 @@ pub(crate) fn parse_verdicts(text: &str) -> AnyResult<Vec<Verdict>> {
 }
 
 #[cfg(test)]
-#[path = "../../tests/unit/llm_triage.rs"]
+#[path = "triage_test.rs"]
 mod tests;
