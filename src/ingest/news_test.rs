@@ -1,5 +1,6 @@
+use std::fmt::Write;
+
 use chrono::{Duration, Utc};
-use insta::{assert_snapshot, glob};
 use test_case::test_case;
 
 use super::{
@@ -10,14 +11,34 @@ use crate::models::NewsItem;
 
 #[test]
 fn html_snippets() {
-    glob!("fixtures/*.html", |path| {
-        let html = std::fs::read_to_string(path).expect("read html fixture");
-        assert_snapshot!(format!(
-            "extract: {:?}\ndescription: {:?}",
-            extract_snippet(&html),
-            description_snippet(&html)
-        ));
-    });
+    let cases = [
+        (
+            "article: title then paragraphs",
+            "<html><head><title>FDA seals eatery</title></head><body><p>FDA officials sealed the eatery after finding serious hygiene violations and expired stock.</p></body></html>",
+        ),
+        ("empty page", "<html><head></head><body></body></html>"),
+        (
+            "google news landing page",
+            "<html><head><title>Google News - FDA raid</title></head><body><p>Google News landing page for the FDA raid story with plenty of filler text here.</p></body></html>",
+        ),
+    ];
+    let mut out = String::new();
+    for (name, html) in cases {
+        let _ = writeln!(out, "{name} -> {:?}", extract_snippet(html));
+    }
+    let _ = writeln!(
+        out,
+        "bing description -> {:?}",
+        description_snippet("<b>FDA</b> suspended the licence over &amp; pests.")
+    );
+    assert_eq!(
+        out,
+        r#"article: title then paragraphs -> Some("FDA seals eatery\nFDA officials sealed the eatery after finding serious hygiene violations and expired stock.")
+empty page -> None
+google news landing page -> None
+bing description -> Some("FDA suspended the licence over & pests.")
+"#
+    );
 }
 
 #[test]

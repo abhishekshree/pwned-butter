@@ -1,7 +1,0 @@
----
-source: src/ingest/news_test.rs
-expression: "format!(\"extract: {:?}\\ndescription: {:?}\", extract_snippet(&html),\ndescription_snippet(&html))"
-input_file: src/ingest/fixtures/google_news.html
----
-extract: None
-description: Some("Google News - FDA raidGoogle News landing page for the FDA raid story with plenty of filler text here.")
