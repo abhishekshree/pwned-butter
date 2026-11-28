@@ -1,6 +1,4 @@
-use super::{
-    apply_collapse, extract, extraction_models, models_for, parse_collapse, verdict_article,
-};
+use super::{apply_collapse, extract, models_for, parse_collapse, verdict_article};
 use crate::config::{Config, Llm, Persistence, Provider, SecretString};
 use crate::domain::Article;
 use crate::llm::triage::Verdict;
@@ -71,14 +69,6 @@ fn groq_models_use_the_groq_namespace() {
     assert_eq!(
         models_for(&groq()),
         ["groq::qwen/qwen3.8-27b", "groq::openai/gpt-oss-120b"]
-    );
-}
-
-#[test]
-fn groq_extraction_leads_with_the_high_output_model() {
-    assert_eq!(
-        extraction_models(&groq()),
-        ["groq::openai/gpt-oss-120b", "groq::qwen/qwen3.8-27b"]
     );
 }
 

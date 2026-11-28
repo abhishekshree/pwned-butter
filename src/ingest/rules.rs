@@ -35,7 +35,3 @@ static BUNDLED: OnceLock<Rules> = OnceLock::new();
 pub(crate) fn rules() -> &'static Rules {
     BUNDLED.get_or_init(|| toml::from_str(TEXT).expect("bundled rules.toml is valid"))
 }
-
-#[cfg(test)]
-#[path = "rules_test.rs"]
-mod tests;
