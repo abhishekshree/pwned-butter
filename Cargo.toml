@@ -49,4 +49,5 @@ panic = "abort"
 strip = true
 
 [dev-dependencies]
+insta = { version = "1.49", default-features = false }
 test-case = "3.4.1"

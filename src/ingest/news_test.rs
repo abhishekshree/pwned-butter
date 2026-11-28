@@ -1,4 +1,7 @@
+use std::fmt::Write;
+
 use chrono::{Duration, Utc};
+use insta::assert_snapshot;
 use test_case::test_case;
 
 use super::{
@@ -8,29 +11,28 @@ use super::{
 use crate::models::NewsItem;
 
 #[test]
-fn extract_snippet_leads_with_title_then_paragraphs() {
-    let html = "<html><head><title>FDA seals eatery</title></head>            <body><p>FDA officials sealed the eatery after finding serious hygiene violations and expired stock.</p></body></html>";
-    assert_eq!(
-        extract_snippet(html).as_deref(),
-        Some(
-            "FDA seals eatery\nFDA officials sealed the eatery after finding serious hygiene violations and expired stock."
+fn html_snippets() {
+    let cases = [
+        (
+            "article: title then paragraphs",
+            "<html><head><title>FDA seals eatery</title></head>            <body><p>FDA officials sealed the eatery after finding serious hygiene violations and expired stock.</p></body></html>",
         ),
-        "title and paragraphs are joined in that order"
+        ("empty page", "<html><head></head><body></body></html>"),
+        (
+            "google news landing page",
+            "<html><head><title>Google News - FDA raid</title></head>            <body><p>Google News landing page for the FDA raid story with plenty of filler text here.</p></body></html>",
+        ),
+    ];
+    let mut out = String::new();
+    for (name, html) in cases {
+        let _ = writeln!(out, "{name} -> {:?}", extract_snippet(html));
+    }
+    let _ = writeln!(
+        out,
+        "bing description -> {:?}",
+        description_snippet("<b>FDA</b> suspended the licence over &amp; pests.")
     );
-}
-
-#[test]
-fn extract_snippet_returns_none_for_empty_page() {
-    assert_eq!(
-        extract_snippet("<html><head></head><body></body></html>"),
-        None
-    );
-}
-
-#[test]
-fn extract_snippet_rejects_google_news_landing_pages() {
-    let html = "<html><head><title>Google News - FDA raid</title></head>            <body><p>Google News landing page for the FDA raid story with plenty of filler text here.</p></body></html>";
-    assert_eq!(extract_snippet(html), None);
+    assert_snapshot!(out);
 }
 
 #[test]
@@ -61,15 +63,6 @@ fn bing_apiclick_link_resolves_to_publisher_url() {
         article_url(link),
         "https://www.thehindu.com/news/test",
         "publisher URL must be unwrapped before fetching"
-    );
-}
-
-#[test]
-fn bing_description_strips_html_to_plain_text() {
-    assert_eq!(
-        description_snippet("<b>FDA</b> suspended the licence over &amp; pests.").as_deref(),
-        Some("FDA suspended the licence over & pests."),
-        "description supplies article text when the publisher page is blocked"
     );
 }
 

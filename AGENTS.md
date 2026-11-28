@@ -70,4 +70,6 @@ Applies to all Rust in this repo. Before committing: `cargo fmt --check`,
   pass-throughs do not.
 - No network or DB in unit tests: test the pure function or mock at the
   boundary.
+- HTML parsing results go in one `insta` snapshot per test file; regenerate
+  with `INSTA_UPDATE=always cargo test` and commit the `.snap`.
 
